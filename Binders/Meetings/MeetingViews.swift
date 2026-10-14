@@ -395,7 +395,10 @@ struct MeetingDetailView: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(maxWidth: 400)
+                // Its natural width, not a range: the segmented control underneath never draws narrower than its
+                // labels, so a `.frame(maxWidth:)` let SwiftUI count it as shrinkable and report a window minimum
+                // ~40pt too small. At that minimum the page overflowed and was centred, clipping both edges.
+                .fixedSize()
                 Spacer()
                 Menu {
                     ForEach(MeetingTemplate.all) { template in
@@ -420,6 +423,7 @@ struct MeetingDetailView: View {
                 } label: {
                     Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
                 }
+                .fixedSize()
                 Menu {
                     Button("Export Markdown…") { service.export(meeting) }
                     let audio = meeting.audioURLs.filter { FileManager.default.fileExists(atPath: $0.path) }
