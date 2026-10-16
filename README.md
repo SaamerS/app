@@ -34,6 +34,11 @@ memory you can ask questions. The speech models, the language model and your dat
   adds a to-do ("add to-do call Sam tomorrow") or puts something on your calendar ("add it to my calendar").
 - **Meeting notes.** Records your microphone and the other side of a call in any meeting app, or a recording you import, then
   writes a summary, decisions and action items with their owners. Full transcript with speakers, and an Ask tab per meeting.
+- **All-day capture.** Turn it on in Binders for iPhone or on the Mac and it listens through the day, cuts it into
+  conversations, and writes each one down as a capture on the device that heard it. Each gets a summary, its promises become to-dos,
+  and it's filed in the binder it belongs to. From the iPhone only the text comes to your Mac, over the network or by
+  AirDrop. Audio never leaves the device, and captures are never shared with your team. See
+  [docs/CAPTURE-ALLDAY.md](docs/CAPTURE-ALLDAY.md).
 - **Writing capture.** Switch it on (**fn W**) and Binders keeps what you send in Teams, Outlook, Mail, Slack and your browser,
   at the moment you send it. Keystrokes are never recorded. Promises in those messages ("I'll send it by Friday") become to-dos
   with a deadline and a reminder.
@@ -189,6 +194,8 @@ $APP --selftest-meeting recording.wav          # transcribe, label speakers and 
 $APP --selftest-commitments message.txt        # which promises and asks the model finds in a message
 $APP --selftest-capture-rules                  # the allow, deny and recipient rules of writing capture
 $APP --selftest-team                           # two simulated teammates sharing a temporary folder
+$APP --selftest-conversation                   # a phone sending the day's conversations (BINDERS_DATA_DIR=$(mktemp -d))
+$APP --selftest-allday two-voices.wav          # All-day capture on this Mac, with a recording for the microphone
 $APP --selftest-update-check <appcast url>     # does the updater see a newer signed version in this feed
 $APP --selftest-model-status [--unload]        # is the language model in memory; free it
 $APP --selftest-ollama-install <empty dir>     # the real Ollama download and checks, installed into a throwaway folder

@@ -2,8 +2,9 @@ import SwiftData
 import SwiftUI
 import BindersKit
 
-/// One day, filled in by itself: its meetings and their action items, the notes you worked on, promises made and to-dos
-/// due, cards that moved on the boards, and what you dictated, next to a note of your own for the day. ‹ and › go back
+/// One day, filled in by itself: its meetings and their action items, the conversations your iPhone heard, the notes you
+/// worked on, promises made and to-dos due, cards that moved on the boards, and what you dictated, next to a note of your
+/// own for the day. ‹ and › go back
 /// through the days; yesterday's page is a record of yesterday.
 struct TodayView: View {
     @Environment(HubNavigation.self) private var navigation
@@ -28,7 +29,11 @@ struct TodayView: View {
     static func dailyTitle(for day: Date) -> String { day.formatted(.iso8601.year().month().day()) }
 
     private var dailyNote: NoteItem? { notes.first { $0.title == dailyTitle } }
-    private var dayMeetings: [MeetingRecord] { meetings.filter { onDay($0.createdAt) }.sorted { $0.createdAt < $1.createdAt } }
+    private var dayMeetings: [MeetingRecord] { meetings.filter { onDay($0.createdAt) && !$0.isConversation }.sorted { $0.createdAt < $1.createdAt } }
+    /// What the iPhone heard that day, less the small talk.
+    private var dayConversations: [MeetingRecord] {
+        meetings.filter { onDay($0.createdAt) && $0.isConversation && $0.status != "trivial" }.sorted { $0.createdAt < $1.createdAt }
+    }
     private var dayNotes: [NoteItem] { notes.filter { onDay($0.updatedAt) && $0.title != dailyTitle } }
     /// Notes due that day; on today's page, also the ones overdue and not done.
     private var dueNotes: [NoteItem] {
@@ -60,7 +65,7 @@ struct TodayView: View {
     }
 
     private var tasks: [TaskEntry] {
-        TaskCollector.collect(meetings: dayMeetings, notes: [], commitments: dayCommitments,
+        TaskCollector.collect(meetings: dayMeetings + dayConversations, notes: [], commitments: dayCommitments,
                               openMeeting: { open(meeting: $0) }, openNote: { _ in },
                               commitmentActions: CommitmentActions(toggle: { commitmentService.toggle($0) },
                                                                    dismiss: { commitmentService.setStatus($0, "dismissed") },
@@ -85,6 +90,13 @@ struct TodayView: View {
                         if !dayMeetings.isEmpty || !tasks.isEmpty {
                             section(dayMeetings.isEmpty ? "Promises and to-dos" : "Meetings, promises and to-dos") {
                                 TaskBoard(tasks: tasks, binderName: { id in binders.first { $0.id == id }?.name })
+                            }
+                        }
+                        if !dayConversations.isEmpty {
+                            section("Captures") {
+                                ForEach(dayConversations) { conversation in
+                                    ConversationRow(conversation: conversation, binder: binderName(conversation.binderID)) { open(meeting: conversation) }
+                                }
                             }
                         }
                         if !dueNotes.isEmpty {
@@ -132,7 +144,7 @@ struct TodayView: View {
                                 if dictations.count > 6 { Text("and \(dictations.count - 6) more").font(.caption).foregroundStyle(.secondary) }
                             }
                         }
-                        if moved.isEmpty, dictations.isEmpty, dayMeetings.isEmpty, dayNotes.isEmpty, tasks.isEmpty, dueNotes.isEmpty {
+                        if moved.isEmpty, dictations.isEmpty, dayMeetings.isEmpty, dayConversations.isEmpty, dayNotes.isEmpty, tasks.isEmpty, dueNotes.isEmpty {
                             Text(isToday ? "Meetings, notes, promises, cards and dictations from today show up here as they happen."
                                  : "Nothing was recorded on this day.")
                                 .foregroundStyle(.secondary)
@@ -173,6 +185,7 @@ struct TodayView: View {
     private func summary(dictations: [TranscriptRecord], moved: Int) -> String {
         var parts = [day.formatted(.dateTime.weekday(.wide).month(.wide).day())]
         if !dayMeetings.isEmpty { parts.append(dayMeetings.count == 1 ? "1 meeting" : "\(dayMeetings.count) meetings") }
+        if !dayConversations.isEmpty { parts.append(dayConversations.count == 1 ? "1 capture" : "\(dayConversations.count) captures") }
         let words = dictations.reduce(0) { $0 + $1.wordCount }
         if words > 0 { parts.append("\(words.formatted()) words dictated") }
         if moved > 0 { parts.append(moved == 1 ? "1 card moved" : "\(moved) cards moved") }
@@ -243,7 +256,46 @@ struct TodayView: View {
         navigation.selection = .binder
     }
 
-    private func open(meeting: MeetingRecord) { show(binder: meeting.binderID, tab: .meetings) { $0.pendingMeetingID = meeting.id } }
+    private func open(meeting: MeetingRecord) { show(binder: meeting.binderID, tab: .listing(meeting)) { $0.pendingMeetingID = meeting.id } }
     private func open(note: NoteItem) { show(binder: note.binderID, tab: .notes) { $0.pendingNoteID = note.id } }
     private func open(card: TaskCard) { show(binder: card.binderID, tab: .board) { $0.pendingCardID = card.id } }
+}
+
+/// One conversation on the Today page: when, what it was about, where it went, and the gist.
+private struct ConversationRow: View {
+    @Environment(MeetingService.self) private var service
+    let conversation: MeetingRecord
+    let binder: String
+    let open: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 8) {
+                Image(systemName: conversation.symbol).font(.caption).foregroundStyle(.secondary).frame(width: 16)
+                Button(conversation.title, action: open).buttonStyle(.link).lineLimit(1)
+                Spacer(minLength: 0)
+                if !binder.isEmpty { Badge(text: binder, color: .secondary) }
+            }
+            Text(times + (gist.map { " · \($0)" } ?? ""))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .padding(.leading, 24)
+        }
+    }
+
+    private var times: String {
+        let start = conversation.createdAt.formatted(date: .omitted, time: .shortened)
+        let range = conversation.endedAt.map { start + "–" + $0.formatted(date: .omitted, time: .shortened) } ?? start
+        if service.busyMeetingIDs.contains(conversation.id) || conversation.status == "processing" { return range + " · writing notes…" }
+        return range
+    }
+
+    /// The first line of its summary.
+    private var gist: String? {
+        conversation.summary.components(separatedBy: "\n").lazy
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { !$0.isEmpty && !$0.hasPrefix("#") }
+            .map { $0.hasPrefix("- ") ? String($0.dropFirst(2)) : $0 }
+    }
 }

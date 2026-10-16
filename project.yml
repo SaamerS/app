@@ -30,14 +30,16 @@ settings:
     DEVELOPMENT_TEAM: 87LFD98HJU
     CODE_SIGN_STYLE: Manual
     CODE_SIGN_IDENTITY: "Apple Development: Helder Feixas (2SNS7F6FAZ)"
-    MARKETING_VERSION: "0.7.0"
-    CURRENT_PROJECT_VERSION: "12"
+    MARKETING_VERSION: "0.8.0"
+    CURRENT_PROJECT_VERSION: "13"
 targets:
   Binders:
     type: application
     platform: macOS
     sources:
       - path: Binders
+      # All-day capture's listening and cutting, the same on the Mac and the iPhone.
+      - path: CaptureShared
     info:
       path: Binders/Resources/Info.plist
       properties:
@@ -57,7 +59,20 @@ targets:
         # Tailscale, and macOS only lets an app reach that if it allows it. Binders' own addresses are all https.
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
-        NSMicrophoneUsageDescription: Binders listens only while you hold your dictation shortcut or record a meeting, and transcribes on this Mac.
+        NSMicrophoneUsageDescription: Binders listens only while you hold your dictation shortcut, record a meeting, or have All-day capture on, and transcribes on this Mac.
+        # Binders files: conversations from the iPhone, by AirDrop, Files or Mail.
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Binders file
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Owner
+            LSItemContentTypes: [io.binders.transfer]
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: io.binders.transfer
+            UTTypeDescription: Binders file
+            UTTypeConformsTo: [public.data, public.content]
+            UTTypeTagSpecification:
+              public.filename-extension: [binders]
+              public.mime-type: [application/x-binders]
         NSAudioCaptureUsageDescription: Binders records what other meeting participants say so it can take notes on this Mac.
         NSCalendarsFullAccessUsageDescription: Binders uses your calendar to title meetings and name attendees in meeting notes, and to add the events you ask for out loud.
         NSHumanReadableCopyright: © 2026 Helder Feixas
@@ -99,6 +114,7 @@ targets:
     sources:
       - path: Phone
       - path: PhoneShared
+      - path: CaptureShared
     info:
       path: Phone/Resources/Info.plist
       properties:
@@ -115,10 +131,25 @@ targets:
             CFBundleTypeRole: Viewer
         NSLocalNetworkUsageDescription: Binders connects to Binders on your Mac over your network, so your to-dos, notes and meetings stay on your own devices.
         NSBonjourServices: [_binders._tcp]
-        NSMicrophoneUsageDescription: Binders listens while you dictate. After you dictate with the Binders keyboard, it keeps the microphone ready for five minutes so the next dictation starts at once; nothing is transcribed or kept until you tap the mic.
+        NSMicrophoneUsageDescription: Binders listens while you dictate, and while All-day capture is on, to write down your conversations; audio stays on this iPhone. After you dictate with the Binders keyboard, it keeps the microphone ready for five minutes so the next dictation starts at once; nothing is transcribed or kept until you tap the mic.
         NSSpeechRecognitionUsageDescription: Binders turns what you dictate into text on this iPhone.
-        # The Binders keyboard can't use the microphone, so the app listens for it from the background.
-        UIBackgroundModes: [audio]
+        # The Binders keyboard can't use the microphone, so the app listens for it from the background; All-day capture
+        # listens with the screen locked, and writes conversations down while the phone charges.
+        UIBackgroundModes: [audio, processing]
+        BGTaskSchedulerPermittedIdentifiers: [io.binders.app.conversations]
+        # iOS 27 keeps background apps off the Neural Engine unless they hold the Background Inference entitlement
+        # (com.apple.developer.background-tasks.continued-processing.inference). Set this to true only together with
+        # that entitlement in Phone/Resources/Binders.entitlements, once the App ID has the capability: then All-day capture
+        # writes conversations down in the background again (CaptureModels.mayInferInBackground).
+        BindersBackgroundInference: false
+        # Conversations shared as a Binders file, which Binders on the Mac opens.
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: io.binders.transfer
+            UTTypeDescription: Binders file
+            UTTypeConformsTo: [public.data, public.content]
+            UTTypeTagSpecification:
+              public.filename-extension: [binders]
+              public.mime-type: [application/x-binders]
         # Only the encryption built into iOS (TLS to your own Mac), which is exempt.
         ITSAppUsesNonExemptEncryption: false
     settings:
@@ -126,7 +157,7 @@ targets:
         # The App Store Connect record "Binders" (6751210657), taken over from the old events app at 2.0.
         PRODUCT_BUNDLE_IDENTIFIER: io.binders.app
         MARKETING_VERSION: "2.0"
-        CURRENT_PROJECT_VERSION: "6"
+        CURRENT_PROJECT_VERSION: "10"
         PRODUCT_NAME: Binders
         SDKROOT: iphoneos
         SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
@@ -136,12 +167,18 @@ targets:
         CODE_SIGN_IDENTITY: "Apple Development"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+      configs:
+        # The recording "Process Sample File" runs All-day capture on, in debug builds only.
+        Release:
+          EXCLUDED_SOURCE_FILE_NAMES: capture-sample.caf
     entitlements:
       path: Phone/Resources/Binders.entitlements
       properties:
         com.apple.security.application-groups: [group.io.binders.app]
     dependencies:
       - package: BindersKit
+      # Parakeet, the diarizer and the voice detector for All-day capture, as on the Mac.
+      - package: FluidAudio
       - target: BindersKeyboard
     scheme:
       testTargets: [BindersPhoneUITests]
@@ -176,7 +213,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: io.binders.app.keyboard
         # Same as the app's: an extension's versions must match the app it's in.
         MARKETING_VERSION: "2.0"
-        CURRENT_PROJECT_VERSION: "6"
+        CURRENT_PROJECT_VERSION: "10"
         PRODUCT_NAME: BindersKeyboard
         SDKROOT: iphoneos
         SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"

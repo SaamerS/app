@@ -17,7 +17,6 @@ final class CommitmentService {
     private var settings: AppSettings { AppSettings.shared }
     private var pending = false
     private var runTask: Task<Void, Never>?
-    private let router = NotificationRouter()
 
     init(flowBar: FlowBarController) {
         self.flowBar = flowBar
@@ -199,7 +198,7 @@ final class CommitmentService {
         let body = commitment.task + (commitment.dueText.map { " · due \($0)" } ?? "")
         let components = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute], from: fireAt)
         let center = UNUserNotificationCenter.current()
-        center.delegate = router
+        MacNotifications.shared.install()
         center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
             guard granted else { return }
             let content = UNMutableNotificationContent()
@@ -216,19 +215,5 @@ final class CommitmentService {
     private func cancelReminder(_ commitment: CommitmentRecord) {
         UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: ["commitment-\(commitment.id.uuidString)"])
         commitment.reminderScheduled = false
-    }
-}
-
-/// Shows reminders even while Binders is frontmost, and opens Home when one is clicked.
-private final class NotificationRouter: NSObject, UNUserNotificationCenterDelegate {
-    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
-                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        completionHandler([.banner, .list, .sound])
-    }
-
-    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
-                                withCompletionHandler completionHandler: @escaping () -> Void) {
-        DispatchQueue.main.async { HubWindowController.shared.show(section: .home) }
-        completionHandler()
     }
 }

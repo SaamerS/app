@@ -39,6 +39,15 @@ final class DictationController {
     @ObservationIgnored private var editObserver: EditObserver?
     @ObservationIgnored private var lastWarmUp = Date.distantPast
     @ObservationIgnored private(set) lazy var meetings = MeetingService(speech: speech, flowBar: flowBar)
+    /// Conversations the iPhone heard during the day, written up as they arrive.
+    @ObservationIgnored private(set) lazy var conversations: ConversationService = {
+        let conversations = ConversationService(meetings: meetings)
+        conversations.controller = self
+        meetings.conversations = conversations
+        return conversations
+    }()
+    /// All-day capture on this Mac: conversations heard through the day.
+    @ObservationIgnored private(set) lazy var allDay = AllDayCaptureService(controller: self)
     @ObservationIgnored private(set) lazy var knowledge = KnowledgeService()
     @ObservationIgnored private(set) lazy var team = TeamSyncService(flowBar: flowBar)
     @ObservationIgnored private(set) lazy var capture = WritingCaptureService(flowBar: flowBar)
@@ -71,9 +80,12 @@ final class DictationController {
             MainActor.assumeIsolated {
                 Store.shared.pruneOldAudio(olderThanDays: AppSettings.shared.audioRetentionDays)
                 Store.shared.pruneWriting(olderThanDays: AppSettings.shared.captureRetentionDays)
+                Store.shared.purgeTrivialConversations()
             }
         }
         meetings.startMonitoring()
+        conversations.recover()
+        allDay.start()
         capture.afterCommit = { [weak self] record in self?.commitments.enqueue(record) }
         AutomationService.shared.notify = { [weak self] text, symbol in self?.flowBar.toast(text, symbol: symbol, duration: 5) }
         knowledge.isAppBusy = { [weak self] in

@@ -4,6 +4,8 @@ import Foundation
 
 public enum KnowledgeKind: String, Codable, Sendable, CaseIterable, Identifiable {
     case meeting, note, writing, dictation, command
+    /// Heard by the iPhone during the day.
+    case conversation
 
     public var id: String { rawValue }
 
@@ -14,6 +16,7 @@ public enum KnowledgeKind: String, Codable, Sendable, CaseIterable, Identifiable
         case .writing: "Writing"
         case .dictation: "Dictations"
         case .command: "Commands"
+        case .conversation: "Captures"
         }
     }
 }

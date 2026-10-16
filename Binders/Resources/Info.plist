@@ -6,6 +6,21 @@
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
 	<string>Binders</string>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Binders file</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Owner</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>io.binders.transfer</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -55,7 +70,7 @@
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Binders lets the iPhones you pair with this Mac connect to it over your network, so your notes and to-dos stay on your own devices.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Binders listens only while you hold your dictation shortcut or record a meeting, and transcribes on this Mac.</string>
+	<string>Binders listens only while you hold your dictation shortcut, record a meeting, or have All-day capture on, and transcribes on this Mac.</string>
 	<key>SUEnableSystemProfiling</key>
 	<false/>
 	<key>SUFeedURL</key>
@@ -64,5 +79,30 @@
 	<string>C/rZOrAgEm5p5fW21qnUggPEQxu3edbA42Qn7qd3BfE=</string>
 	<key>SUScheduledCheckInterval</key>
 	<integer>86400</integer>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+				<string>public.content</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Binders file</string>
+			<key>UTTypeIdentifier</key>
+			<string>io.binders.transfer</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>binders</string>
+				</array>
+				<key>public.mime-type</key>
+				<array>
+					<string>application/x-binders</string>
+				</array>
+			</dict>
+		</dict>
+	</array>
 </dict>
 </plist>

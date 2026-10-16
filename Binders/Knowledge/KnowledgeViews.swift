@@ -15,6 +15,7 @@ enum EntityStyle {
         case "place": .brown
         case "topic": .pink
         case "meeting": .red
+        case "conversation": .mint
         case "note": .yellow
         case "command": .indigo
         default: .gray
@@ -741,7 +742,7 @@ struct KnowledgeGraphView: View {
 
     private var legend: some View {
         let kinds = EntityStyle.typeOrder.filter { kind in graph.nodes.contains { $0.kind == kind } }
-            + ["meeting", "note", "command"].filter { kind in graph.nodes.contains { $0.kind == kind } }
+            + ["meeting", "conversation", "note", "command"].filter { kind in graph.nodes.contains { $0.kind == kind } }
         return HStack(spacing: 12) {
             ForEach(kinds, id: \.self) { kind in
                 HStack(spacing: 5) {
@@ -895,7 +896,7 @@ struct KnowledgeGraphView: View {
             let rect = CGRect(x: center.x - r, y: center.y - r, width: r * 2, height: r * 2)
             if node.isDocument {
                 context.fill(Path(roundedRect: rect, cornerRadius: r * 0.35), with: .color(color.opacity(0.8 * alpha)))
-                var glyph = context.resolve(Image(systemName: node.kind == "meeting" ? "person.2.fill" : (node.kind == "note" ? "note.text" : "terminal")))
+                var glyph = context.resolve(Image(systemName: node.kind == "meeting" ? "person.2.fill" : node.kind == "conversation" ? "bubble.left.and.bubble.right.fill" : (node.kind == "note" ? "note.text" : "terminal")))
                 glyph.shading = .color(.white.opacity(alpha))
                 let g = r * 1.1
                 context.draw(glyph, in: CGRect(x: center.x - g / 2, y: center.y - g / 2, width: g, height: g))

@@ -174,22 +174,32 @@ struct MeetingsView: View {
     @State private var selection: UUID?
     @State private var search = ""
     @State private var importing = false
+    /// Conversations kept out of sight as small talk, shown on request for a week before they go.
+    @State private var showsTrivial = false
     let binderID: UUID?
+    /// The iPhone's conversations instead of meetings.
+    let showsConversations: Bool
 
-    /// The meetings in one binder, or every meeting when `binderID` is nil.
-    init(binderID: UUID? = nil) {
+    /// The meetings in one binder, or every meeting when `binderID` is nil; or the conversations the iPhone heard.
+    init(binderID: UUID? = nil, conversations: Bool = false) {
         self.binderID = binderID
+        showsConversations = conversations
+        let kind = conversations ? MeetingRecord.conversationKind : "meeting"
         if let binderID {
-            _meetings = Query(filter: #Predicate<MeetingRecord> { $0.binderID == binderID }, sort: [SortDescriptor(\MeetingRecord.createdAt, order: .reverse)])
+            _meetings = Query(filter: #Predicate<MeetingRecord> { $0.binderID == binderID && $0.kind == kind },
+                              sort: [SortDescriptor(\MeetingRecord.createdAt, order: .reverse)])
         } else {
-            _meetings = Query(sort: [SortDescriptor(\MeetingRecord.createdAt, order: .reverse)])
+            _meetings = Query(filter: #Predicate<MeetingRecord> { $0.kind == kind }, sort: [SortDescriptor(\MeetingRecord.createdAt, order: .reverse)])
         }
     }
 
+    private var shown: [MeetingRecord] { showsTrivial ? meetings : meetings.filter { $0.status != "trivial" } }
+    private var trivialCount: Int { meetings.filter { $0.status == "trivial" }.count }
+
     private var filtered: [MeetingRecord] {
         let query = search.trimmed
-        guard !query.isEmpty else { return meetings }
-        return meetings.filter {
+        guard !query.isEmpty else { return shown }
+        return shown.filter {
             $0.title.localizedCaseInsensitiveContains(query) || $0.summary.localizedCaseInsensitiveContains(query)
                 || $0.userNotes.localizedCaseInsensitiveContains(query)
         }
@@ -198,25 +208,44 @@ struct MeetingsView: View {
     var body: some View {
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 10) {
-                Text("Meetings").font(BindersTheme.columnTitle)
-                Button {
-                    Task {
-                        await service.toggle()
-                        if let id = service.recordingMeetingID { selection = id }
+                if showsConversations {
+                    Text("Captures").font(BindersTheme.columnTitle)
+                    Text("Heard by Binders on your iPhone during the day. Only the text came to this Mac, and it stays here.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button { importing = true } label: {
+                        Label("Open a Binders File…", systemImage: "square.and.arrow.down").frame(maxWidth: .infinity)
                     }
-                } label: {
-                    Label(service.isRecording ? "Stop recording" : "Record meeting",
-                          systemImage: service.isRecording ? "stop.fill" : "record.circle")
-                        .frame(maxWidth: .infinity)
+                    .buttonStyle(.bordered)
+                    .help("Captures your iPhone shared by AirDrop or saved to Files. A capture already here isn't kept twice.")
+                    if trivialCount > 0 || showsTrivial {
+                        Toggle("Show small talk (\(trivialCount))", isOn: $showsTrivial)
+                            .toggleStyle(.checkbox)
+                            .font(.caption)
+                            .help("Captures with nothing worth keeping are hidden, and deleted a week after they were heard.")
+                    }
+                } else {
+                    Text("Meetings").font(BindersTheme.columnTitle)
+                    Button {
+                        Task {
+                            await service.toggle()
+                            if let id = service.recordingMeetingID { selection = id }
+                        }
+                    } label: {
+                        Label(service.isRecording ? "Stop recording" : "Record meeting",
+                              systemImage: service.isRecording ? "stop.fill" : "record.circle")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(service.isRecording ? .red : .accentColor)
+                    .controlSize(.large)
+                    Button { importing = true } label: {
+                        Label("Import Recording…", systemImage: "square.and.arrow.down").frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .help("Transcribe an audio or video file into a new meeting. You can also drop a file anywhere on this page.")
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(service.isRecording ? .red : .accentColor)
-                .controlSize(.large)
-                Button { importing = true } label: {
-                    Label("Import Recording…", systemImage: "square.and.arrow.down").frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .help("Transcribe an audio or video file into a new meeting. You can also drop a file anywhere on this page.")
                 TextField("Search", text: $search).textFieldStyle(.roundedBorder)
                 List(filtered, selection: $selection) { meeting in
                     MeetingRow(meeting: meeting, busy: service.busyMeetingIDs.contains(meeting.id),
@@ -237,6 +266,13 @@ struct MeetingsView: View {
                     DispatchQueue.main.async { Store.shared.deleteMeeting(meeting) }
                 }
                 .id(meeting.id)
+            } else if showsConversations {
+                ContentUnavailableView {
+                    Label("Captures", systemImage: "bubble.left.and.bubble.right")
+                } description: {
+                    Text("Turn on All-day capture in Binders on your iPhone. It writes down the conversations around you on the phone, and sends only the text here, where each gets notes and its promises become to-dos.")
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ContentUnavailableView {
                     Label("Meeting notes", systemImage: "person.2.wave.2")
@@ -246,8 +282,13 @@ struct MeetingsView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .fileImporter(isPresented: $importing, allowedContentTypes: [.audio, .movie]) { result in
-            guard case .success(let url) = result else { return }
+        .fileImporter(isPresented: $importing, allowedContentTypes: showsConversations ? [UTType(exportedAs: BindersTransfer.typeIdentifier)] : [.audio, .movie],
+                      allowsMultipleSelection: showsConversations) { result in
+            guard case .success(let urls) = result, let url = urls.first else { return }
+            if showsConversations {
+                if let controller = HubWindowController.shared.controller { urls.forEach { BindersFiles.open($0, controller: controller) } }
+                return
+            }
             Task {
                 let scoped = url.startAccessingSecurityScopedResource()
                 defer { if scoped { url.stopAccessingSecurityScopedResource() } }
@@ -255,6 +296,7 @@ struct MeetingsView: View {
             }
         }
         .dropDestination(for: URL.self) { urls, _ in
+            guard !showsConversations else { return false }
             let files = urls.filter { url in
                 let type = UTType(filenameExtension: url.pathExtension) ?? .data
                 return url.isFileURL && (type.conforms(to: .audio) || type.conforms(to: .movie))
@@ -268,18 +310,11 @@ struct MeetingsView: View {
             return true
         }
         .onAppear {
-            if let pending = navigation.pendingMeetingID {
-                selection = pending
-                navigation.pendingMeetingID = nil
-            } else if selection == nil {
-                selection = service.recordingMeetingID ?? meetings.first?.id
+            if !takePending(), selection == nil {
+                selection = showsConversations ? shown.first?.id : (service.recordingMeetingID ?? meetings.first?.id)
             }
         }
-        .onChange(of: navigation.pendingMeetingID) {
-            guard let pending = navigation.pendingMeetingID else { return }
-            selection = pending
-            navigation.pendingMeetingID = nil
-        }
+        .onChange(of: navigation.pendingMeetingID) { _ = takePending() }
         .onReceive(NotificationCenter.default.publisher(for: TeamSyncService.itemsWillBeRemoved)) { notification in
             // A teammate stopped sharing the open meeting: close it before sync deletes it.
             if let ids = notification.userInfo?["ids"] as? Set<UUID>, let selection, ids.contains(selection) { self.selection = nil }
@@ -288,6 +323,24 @@ struct MeetingsView: View {
             // A meeting discarded after processing (nothing was said) disappears from under the selection.
             if let selection, !meetings.contains(where: { $0.id == selection }) { self.selection = nil }
         }
+    }
+
+    /// Opens the meeting or conversation something asked for, when it's one of this list's; the other list takes the rest.
+    private func takePending() -> Bool {
+        guard let pending = navigation.pendingMeetingID else { return false }
+        guard let record = meetings.first(where: { $0.id == pending }) else {
+            // Asked for before the record arrived (just recorded): meetings take it, as they always have.
+            if !showsConversations, Store.shared.binderID(ofMeeting: pending) == nil {
+                selection = pending
+                navigation.pendingMeetingID = nil
+                return true
+            }
+            return false
+        }
+        if record.status == "trivial" { showsTrivial = true }
+        selection = pending
+        navigation.pendingMeetingID = nil
+        return true
     }
 }
 
@@ -372,6 +425,11 @@ struct MeetingDetailView: View {
                         Label("Shared by \(meeting.teamAuthorName ?? "a teammate") · read-only", systemImage: "person.2")
                             .font(.callout)
                             .foregroundStyle(.secondary)
+                    } else if let binder = Store.shared.binder(meeting.binderID), meeting.isConversation {
+                        Label(binder.sharedWithTeam ? "In \(binder.name) · not shared" : "In \(binder.name)", systemImage: "books.vertical")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .help((meeting.routingReason.map { "Filed here: \($0). " } ?? "") + "Captures stay on this Mac, even in a shared binder.")
                     } else if let binder = Store.shared.binder(meeting.binderID) {
                         Label(binder.sharedWithTeam ? "In \(binder.name) · shared with the team" : "In \(binder.name)",
                               systemImage: binder.sharedWithTeam ? "person.2" : "books.vertical")
@@ -385,6 +443,18 @@ struct MeetingDetailView: View {
                 }
                 if let error = meeting.errorMessage {
                     Label(error, systemImage: "exclamationmark.triangle").font(.callout).foregroundStyle(.orange)
+                }
+                if meeting.isConversation, meeting.suggestions.contains(where: { $0.status == .offered }) {
+                    ConversationSuggestionsView(meeting: meeting)
+                }
+                if meeting.status == "trivial" {
+                    HStack(spacing: 10) {
+                        Label("Binders took this for small talk and hid it. It's deleted a week after it was heard.", systemImage: "eye.slash")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        Button("Keep It") { Task { await service.conversations?.keep(meeting) } }
+                            .controlSize(.small)
+                    }
                 }
                 if let activity = service.activity[meeting.id] {
                     Label(activity, systemImage: isBusy ? "hourglass" : "info.circle").font(.callout).foregroundStyle(.secondary)
@@ -402,23 +472,32 @@ struct MeetingDetailView: View {
                 // ~40pt too small. At that minimum the page overflowed and was centred, clipping both edges.
                 .fixedSize()
                 Spacer()
-                Menu {
-                    ForEach(MeetingTemplate.all) { template in
-                        Button {
-                            Task { await service.summarize(meeting, templateID: template.id) }
-                        } label: {
-                            if template.id == meeting.templateID {
-                                Label(template.name, systemImage: "checkmark")
-                            } else {
-                                Text(template.name)
+                if meeting.isConversation {
+                    Button {
+                        Task { await service.summarize(meeting, templateID: MeetingTemplate.conversation.id) }
+                    } label: {
+                        Label("Regenerate", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(isBusy || editingSummary || shownSegments.isEmpty || meeting.status == "trivial")
+                } else {
+                    Menu {
+                        ForEach(MeetingTemplate.all) { template in
+                            Button {
+                                Task { await service.summarize(meeting, templateID: template.id) }
+                            } label: {
+                                if template.id == meeting.templateID {
+                                    Label(template.name, systemImage: "checkmark")
+                                } else {
+                                    Text(template.name)
+                                }
                             }
                         }
+                    } label: {
+                        Label("Regenerate", systemImage: "arrow.clockwise")
                     }
-                } label: {
-                    Label("Regenerate", systemImage: "arrow.clockwise")
+                    .fixedSize(horizontal: true, vertical: false)
+                    .disabled(isBusy || isRecording || editingSummary || shownSegments.isEmpty || meeting.isTeamCopy)
                 }
-                .fixedSize(horizontal: true, vertical: false)
-                .disabled(isBusy || isRecording || editingSummary || shownSegments.isEmpty || meeting.isTeamCopy)
                 Button {
                     TextInserter.copyToClipboard(service.markdown(for: meeting))
                     copied = true
@@ -432,9 +511,11 @@ struct MeetingDetailView: View {
                     if !audio.isEmpty {
                         Button("Show Audio in Finder") { NSWorkspace.shared.activateFileViewerSelecting(audio) }
                     }
-                    if !meeting.isTeamCopy {
+                    if !meeting.isTeamCopy, !meeting.isConversation {
                         Button("Replace My Mic Track…") { rescuing = true }
                             .disabled(isRecording || isBusy)
+                    }
+                    if !meeting.isTeamCopy {
                         Menu("Move to Binder") {
                             MoveToBinderItems(current: meeting.binderID) { binder in
                                 Store.shared.move(meeting, to: binder)
@@ -448,7 +529,7 @@ struct MeetingDetailView: View {
                         Button("Only \(meeting.teamAuthorName ?? "the author") can delete this meeting") {}
                             .disabled(true)
                     } else {
-                        Button("Delete Meeting", role: .destructive) { confirmDelete = true }
+                        Button("Delete \(meeting.kindName)", role: .destructive) { confirmDelete = true }
                             .disabled(isRecording || isBusy || service.chattingMeetingIDs.contains(meeting.id))
                     }
                 } label: {
@@ -466,7 +547,8 @@ struct MeetingDetailView: View {
         .task(id: "\(meeting.id)|\(meeting.status)|\(isBusy)") {
             segments = Store.shared.segments(for: meeting.id)
         }
-        .confirmationDialog(team.isConfigured && meeting.sharedWithTeam
+        .confirmationDialog(meeting.isConversation ? "Delete this capture and its transcript?"
+                            : team.isConfigured && meeting.sharedWithTeam
                             ? "Delete this meeting, its transcript and audio? It's also removed for your team."
                             : "Delete this meeting, its transcript and audio?", isPresented: $confirmDelete) {
             Button("Delete", role: .destructive, action: onDelete)
@@ -476,6 +558,9 @@ struct MeetingDetailView: View {
 
     private var metaLine: String {
         var parts = [meeting.createdAt.formatted(date: .abbreviated, time: .shortened)]
+        if meeting.isConversation, let ended = meeting.endedAt {
+            parts[0] += "–" + ended.formatted(date: .omitted, time: .shortened)
+        }
         if meeting.duration > 0 { parts.append("\(max(1, Int((meeting.duration / 60).rounded()))) min") }
         if let app = meeting.appName { parts.append(app) }
         return parts.joined(separator: " · ")
@@ -834,5 +919,46 @@ private struct MicRescueSheet: View {
         .fileImporter(isPresented: $choosing, allowedContentTypes: [.audio, .movie]) { result in
             if case .success(let url) = result { fileURL = url }
         }
+    }
+}
+
+/// What a conversation brought up: cards to put on a board, answers from your binders. Yes, no, or later.
+private struct ConversationSuggestionsView: View {
+    @Environment(MeetingService.self) private var service
+    @Bindable var meeting: MeetingRecord
+    @State private var message: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(meeting.suggestions.filter { $0.status == .offered }) { suggestion in
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: suggestion.kind == .card ? "rectangle.split.3x1" : "questionmark.bubble")
+                        .foregroundStyle(.secondary)
+                        .frame(width: 18)
+                    VStack(alignment: .leading, spacing: 3) {
+                        if suggestion.kind == .card {
+                            Text("Put “\(suggestion.text)” on the \(suggestion.binder) board?")
+                        } else {
+                            Text("You asked: \(suggestion.text)").font(.callout.weight(.semibold))
+                            Text(suggestion.answer ?? "").textSelection(.enabled)
+                            if !suggestion.sources.isEmpty {
+                                Text("From " + suggestion.sources.joined(separator: ", ")).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    Spacer(minLength: 8)
+                    if suggestion.kind == .card {
+                        Button("Add to Board") { message = service.conversations?.accept(suggestion.id).message }
+                        Button("Not Now") { service.conversations?.dismiss(suggestion.id) }
+                    } else {
+                        Button("Got It") { service.conversations?.accept(suggestion.id) }
+                    }
+                }
+                .controlSize(.small)
+            }
+            if let message { Text(message).font(.caption).foregroundStyle(.secondary) }
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.accentColor.opacity(0.08)))
     }
 }

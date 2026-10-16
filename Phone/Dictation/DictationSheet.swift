@@ -61,6 +61,10 @@ struct DictationSheet: View {
                 }
             }
         }
+        // Swiped away while listening: the microphone goes off, and All-day capture gets it back.
+        .onDisappear {
+            if session.phase == .listening || session.phase == .starting { session.cancel() }
+        }
         .task {
             chosenBinder = binder
             // For trying it where there's no microphone or speech model, such as the Simulator.
@@ -137,6 +141,20 @@ struct DictationSheet: View {
                 } label: { Label("Insert", systemImage: "text.insert").frame(maxWidth: .infinity) }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
+            } else if connection.mac == nil {
+                // Without a Mac there's nowhere on this iPhone to keep a note or a to-do yet: copy it, or share it.
+                Button {
+                    UIPasteboard.general.string = session.text
+                    show("Copied")
+                } label: { Label("Copy", systemImage: "doc.on.doc").frame(maxWidth: .infinity) }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                ShareLink(item: session.text) { Label("Share…", systemImage: "square.and.arrow.up").frame(maxWidth: .infinity) }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                Text("Pair with your Mac to keep notes and to-dos in your binders.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             } else {
                 if !binders.isEmpty {
                     Picker("Binder", selection: Binding(get: { chosenBinder ?? binders.first?.name ?? "" }, set: { chosenBinder = $0 })) {
@@ -167,9 +185,11 @@ struct DictationSheet: View {
                 }
             }
             HStack {
-                Button("Copy") {
-                    UIPasteboard.general.string = session.text
-                    show("Copied")
+                if connection.mac != nil || onInsert != nil {
+                    Button("Copy") {
+                        UIPasteboard.general.string = session.text
+                        show("Copied")
+                    }
                 }
                 Spacer()
                 Button("Dictate Again") { Task { await session.start() } }
@@ -187,7 +207,9 @@ struct DictationSheet: View {
         Task {
             let sent = await connection.save(tool, text: text, binder: binder)
             let what = tool == "add_todo" ? "To-do" : "Note"
-            show(sent ? "\(what) saved\(binder.map { " in \($0)" } ?? "")" : "\(what) kept on this iPhone; it goes to your Mac when it's back")
+            let kept = connection.mac == nil ? "\(what) kept on this iPhone until you pair a Mac"
+                                             : "\(what) kept on this iPhone; it goes to your Mac when it's back"
+            show(sent ? "\(what) saved\(binder.map { " in \($0)" } ?? "")" : kept)
             try? await Task.sleep(for: .seconds(1.2))
             dismiss()
         }

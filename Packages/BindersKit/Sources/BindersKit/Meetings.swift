@@ -331,10 +331,22 @@ public struct MeetingTemplate: Identifiable, Hashable, Sendable {
         ## Follow-ups
         """)
 
+    /// A conversation the iPhone heard during the day: informal, often partial, no agenda. Not offered for meetings.
+    public static let conversation = MeetingTemplate(id: "conversation", name: "Conversation", sections: """
+        ## Summary
+        One to three sentences on what it was about and where it landed.
+        ## Decisions
+        ## Promises
+        - [ ] You — what you said you would do (due date if mentioned)
+        - [ ] Name — what they said they would do for you
+        ## Ideas
+        ## People mentioned
+        """)
+
     public static let all: [MeetingTemplate] = [.general, .oneOnOne, .standup, .sales, .interview, .lecture]
 
     public static func template(id: String) -> MeetingTemplate {
-        all.first { $0.id == id } ?? .general
+        (all + [.conversation]).first { $0.id == id } ?? .general
     }
 }
 

@@ -20,7 +20,17 @@ enum BinderPalette {
 }
 
 enum BinderTab: String, CaseIterable {
-    case overview = "Overview", board = "Board", meetings = "Meetings", notes = "Notes", knowledge = "Knowledge"
+    case overview = "Overview", board = "Board", meetings = "Meetings", conversations = "Captures", notes = "Notes", knowledge = "Knowledge"
+}
+
+extension BinderTab {
+    /// The tab a meeting or a conversation is listed on.
+    static func listing(_ record: MeetingRecord) -> BinderTab { record.isConversation ? .conversations : .meetings }
+}
+
+extension MeetingRecord {
+    /// Its symbol wherever meetings and conversations are listed together.
+    var symbol: String { isConversation ? "bubble.left.and.bubble.right" : "person.2.wave.2" }
 }
 
 /// One binder: what's in it, what's still open in it, and whether the team sees it.
@@ -54,6 +64,9 @@ struct BinderPage: View {
     private func content(_ binder: BinderRecord) -> some View {
         @Bindable var binder = binder
         let counts = Store.shared.counts(in: binder.id)
+        let conversations = Store.shared.conversationCount(in: binder.id, includingTrivial: true)
+        // Only binders the iPhone's conversations have gone into get their tab.
+        let tabs = BinderTab.allCases.filter { $0 != .conversations || conversations > 0 || tab == .conversations }
         return VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .center, spacing: 12) {
@@ -138,11 +151,11 @@ struct BinderPage: View {
             .padding(.top, 24)
             .padding(.bottom, 12)
             Picker("", selection: $tab) {
-                ForEach(BinderTab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                ForEach(tabs, id: \.self) { Text($0.rawValue).tag($0) }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(maxWidth: 520)
+            .frame(maxWidth: tabs.count > 5 ? 640 : 520)
             .padding(.horizontal, 24)
             .padding(.bottom, 12)
             Divider()
@@ -151,13 +164,14 @@ struct BinderPage: View {
                 case .overview:
                     BinderOverview(binder: binder, openMeeting: { id in
                         navigation.pendingMeetingID = id
-                        tab = .meetings
+                        tab = Store.shared.isConversation(id) ? .conversations : .meetings
                     }, openNote: { id in
                         navigation.pendingNoteID = id
                         tab = .notes
                     })
                 case .board: BoardView(binder: binder)
                 case .meetings: MeetingsView(binderID: binder.id)
+                case .conversations: MeetingsView(binderID: binder.id, conversations: true).id("conversations-\(binder.id)")
                 case .notes: NotesView(binderID: binder.id)
                 case .knowledge: KnowledgeView(binderID: binder.id)
                 }
@@ -183,6 +197,8 @@ struct BinderPage: View {
 
     private func subtitle(_ binder: BinderRecord, counts: (meetings: Int, notes: Int)) -> String {
         var parts = ["\(counts.meetings) \(counts.meetings == 1 ? "meeting" : "meetings")", "\(counts.notes) \(counts.notes == 1 ? "note" : "notes")"]
+        let conversations = Store.shared.conversationCount(in: binder.id)
+        if conversations > 0 { parts.append("\(conversations) \(conversations == 1 ? "capture" : "captures")") }
         if binder.isDefault { parts.append("where new things go unless another binder is open") }
         if binder.archived { parts.append("archived") }
         return parts.joined(separator: " · ")
@@ -235,7 +251,7 @@ struct BinderOverview: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 HStack(spacing: 12) {
-                    StatCard(title: "Meetings", value: "\(meetings.count)", symbol: "person.2.wave.2")
+                    StatCard(title: "Meetings", value: "\(meetings.filter { !$0.isConversation }.count)", symbol: "person.2.wave.2")
                     StatCard(title: "Notes", value: "\(notes.count)", symbol: "note.text")
                     StatCard(title: "Open to-dos", value: "\(open)", symbol: "checklist")
                     StatCard(title: "People & topics", value: "\(people.count)", symbol: "point.3.connected.trianglepath.dotted")
@@ -253,7 +269,7 @@ struct BinderOverview: View {
                 .paperCard(padding: 16)
 
                 HStack(alignment: .top, spacing: 16) {
-                    recentList(title: "Recent meetings", empty: "No meetings yet.", items: meetings.prefix(6).map { meeting in
+                    recentList(title: "Recent meetings", empty: "No meetings yet.", items: meetings.filter { !$0.isConversation }.prefix(6).map { meeting in
                         (meeting.id, meeting.title, meeting.createdAt.formatted(date: .abbreviated, time: .shortened) + " · \(max(1, Int((meeting.duration / 60).rounded()))) min", { openMeeting(meeting.id) })
                     })
                     recentList(title: "Recent notes", empty: "No notes yet.", items: notes.prefix(6).map { note in

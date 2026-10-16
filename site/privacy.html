@@ -43,7 +43,7 @@
   <div class="wrap">
     <p class="kicker">Privacy</p>
     <h1>Where your data lives</h1>
-    <p class="lede">Binders is a local-first Mac app. It has no account system, no analytics and no server of its own. This page describes what the app does as of version 0.7.0.</p>
+    <p class="lede">Binders is a local-first app for Mac and iPhone. It has no account system, no analytics and no server of its own. This page describes Binders for iPhone 2.0 and the Mac app as of version 0.7.0.</p>
   </div>
 </section>
 <article class="page">
@@ -51,7 +51,7 @@
 
     <h2>What stays on your Mac</h2>
     <ul>
-      <li>Recordings, transcripts, meeting notes, notes, captured writing, to-dos, your dictionary and snippets. They live in the Binders folder inside your user Library, which you can open from Settings.</li>
+      <li>Recordings, transcripts, meeting notes, captures, notes, captured writing, to-dos, your dictionary and snippets. They live in the Binders folder inside your user Library, which you can open from Settings.</li>
       <li>Speech recognition. Audio is transcribed on your Mac by the Parakeet or Whisper model you choose. Audio is never sent anywhere for transcription.</li>
       <li>The search index and the knowledge graph.</li>
     </ul>
@@ -78,8 +78,20 @@
       <li>Captured writing is deleted after the period you set, 90 days by default, and you can delete any of it at any time.</li>
     </ul>
 
+    <h2>Binders for iPhone</h2>
+    <ul>
+      <li>It talks only to Binders on your own Mac, over your network, or through Tailscale if you use it, on an encrypted connection that only your paired iPhone can open. There is no Binders server in between. Without a Mac, dictation, the Binders keyboard and All-day capture work on the iPhone alone, and what they write down stays on it until you pair a Mac.</li>
+      <li>It keeps a copy of what it last showed from your Mac, such as your to-dos, notes and meetings, so you can read them while the Mac is away. Forgetting the Mac deletes that copy.</li>
+      <li>What you dictate is written down on the iPhone by Apple’s on-device speech recognition, then tidied up by your Mac when it’s in reach, or on the iPhone when it isn’t, and kept with your other dictations on your Mac.</li>
+      <li>The Binders keyboard doesn’t store or send what you type. Corrections are looked up on the iPhone. With Full Access, the keyboard hands your dictation to the Binders app on the same iPhone.</li>
+      <li><strong>All-day capture</strong> is off until you turn it on, and iOS shows its microphone indicator while it listens. Mute turns the microphone off. Only speech is kept, on the iPhone. Its audio waits there until it has been written down (with iOS 27, that happens while you have Binders open), then it’s deleted; if it can’t be written down, its audio is deleted three days after it was heard. Only the text goes to your Mac, over the connection above or in a Binders file you share yourself by AirDrop or Files. The text stays on the iPhone for 30 days after the conversation, so you can read it there.</li>
+      <li>What All-day capture keeps on the iPhone, its audio, its text and the text waiting for your Mac, is left out of your iCloud backups, and so are the speech models.</li>
+      <li>If you teach Binders your voice, the voice print is kept in the iPhone’s keychain. The recording you read for it isn’t kept.</li>
+      <li>The speech models for All-day capture are downloaded once from Hugging Face, over Wi-Fi.</li>
+    </ul>
+
     <h2>Recording other people</h2>
-    <p>Meeting notes record what the other people on a call say. Many places require everyone’s consent before a conversation is recorded. Binders reminds you of this before your first recording; telling people, and not recording when someone objects, is your responsibility.</p>
+    <p>Meeting notes record what the other people on a call say, and All-day capture, on the Mac or the iPhone, writes down conversations around you. Many places require everyone’s consent before a conversation is recorded. Binders reminds you of this before your first recording; telling people, and not recording when someone objects, is your responsibility.</p>
 
     <h2>How your data is stored</h2>
     <p>Your data sits in ordinary files in your user Library. Binders does not add its own encryption, so it is protected the way the rest of your Mac is: by your login and, when you have it switched on, FileVault. The API key for a language model server, if you use one, is kept in the macOS Keychain.</p>
@@ -90,8 +102,9 @@
       <li><strong>Accessibility</strong> to notice your shortcut in any app, type the result for you, and read the field you are writing in when capture is on.</li>
       <li><strong>Audio capture</strong> to record the other side of a call for meeting notes.</li>
       <li><strong>Calendar</strong>, optional, to title meetings and name attendees.</li>
-      <li><strong>Notifications</strong>, optional, to remind you when something you promised is due.</li>
+      <li><strong>Notifications</strong>, optional, to remind you when something you promised is due, and to offer a card or an answer after a conversation.</li>
     </ul>
+    <p>On the iPhone: <strong>Microphone</strong> and <strong>Speech Recognition</strong> to write down what you dictate and, when it is on, All-day capture; <strong>Local Network</strong> to reach your Mac; and <strong>Notifications</strong>, optional, for what your Mac offers after a conversation, to tell you when All-day capture was paused, and to tell you when captures are waiting to be written down.</p>
 
     <h2>Contact</h2>
     <p>Questions about any of this: <a href="mailto:hello@binders.io">hello@binders.io</a>. If you have found a security problem, please write to <a href="mailto:security@binders.io">security@binders.io</a> before making it public, and give us a chance to fix it. Mail to those addresses is delivered through Amazon SES to the publisher’s inbox.</p>

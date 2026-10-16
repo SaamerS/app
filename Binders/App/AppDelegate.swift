@@ -23,6 +23,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.controller = controller
         HubWindowController.shared.controller = controller
         statusItem = StatusItemController(controller: controller)
+        MacNotifications.shared.controller = controller
+        MacNotifications.shared.install()
         controller.start()
         if controller.settings.phoneLink { controller.link.start() }
         controller.board.start()
@@ -68,7 +70,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func application(_ application: NSApplication, open urls: [URL]) {
         guard let controller else { return }
-        for url in urls { URLCommands.handle(url, controller: controller) }
+        for url in urls {
+            // A Binders file from the iPhone (AirDrop, Files, Mail), or a binders:// link.
+            if url.isFileURL, url.pathExtension.lowercased() == BindersTransfer.fileExtension {
+                BindersFiles.open(url, controller: controller)
+            } else {
+                URLCommands.handle(url, controller: controller)
+            }
+        }
     }
 }
 
@@ -139,6 +148,12 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         let capture = add(to: menu, "Writing Capture", #selector(toggleCapture))
         capture.state = controller.capture.isOn ? .on : .off
         capture.toolTip = "Keep what you write in Teams, Outlook, Mail and allowed sites once it's sent (\(controller.capture.hotkeyHint))"
+        let allDay = add(to: menu, "All-day Capture", #selector(toggleAllDay))
+        allDay.state = controller.allDay.isOn ? .on : .off
+        allDay.toolTip = "Listen for conversations through the day and keep them, written down, in your binders"
+        if controller.allDay.isOn {
+            add(to: menu, controller.allDay.isMuted ? "Unmute All-day Capture" : "Mute All-day Capture", #selector(toggleAllDayMute))
+        }
 
         let recent = Store.shared.recentTranscripts(limit: 10).filter { !$0.finalText.isEmpty }
         if !recent.isEmpty {
@@ -177,6 +192,12 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     @objc private func openHub() { HubWindowController.shared.show(section: .home) }
     @objc private func toggleCapture() { controller.capture.toggle() }
+    @objc private func toggleAllDay() {
+        if controller.allDay.isOn { controller.allDay.turnOff() } else { Task { await controller.allDay.turnOn() } }
+    }
+    @objc private func toggleAllDayMute() {
+        if controller.allDay.isMuted { controller.allDay.unmute() } else { controller.allDay.mute() }
+    }
     @objc private func openSettings() { HubWindowController.shared.show(section: .settings) }
     @objc private func checkForUpdates() { UpdateService.shared.checkNow() }
     @objc private func openScratchpad() { ScratchpadController.shared.show() }

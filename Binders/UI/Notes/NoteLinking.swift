@@ -114,7 +114,7 @@ enum LinkTargets {
                 $0.pendingNoteID = note.id
                 $0.pendingNotePlace = place
             }
-        case .meeting(let meeting): show(binder: meeting.binderID, tab: .meetings) { $0.pendingMeetingID = meeting.id }
+        case .meeting(let meeting): show(binder: meeting.binderID, tab: .listing(meeting)) { $0.pendingMeetingID = meeting.id }
         case .binder(let binder): show(binder: binder.id, tab: .overview)
         case .entity(let id):
             navigation.pendingEntityID = id

@@ -16,7 +16,7 @@ struct BindersView: View {
     @State private var writing = UserDefaults.standard.string(forKey: "open") == "newnote"
 
     enum Place: Hashable {
-        case allTodos, allTasks, allMeetings, allNotes
+        case allTodos, allTasks, allMeetings, allNotes, capture
         case binder(BinderInfo)
     }
 
@@ -57,6 +57,8 @@ struct BindersView: View {
                     }
                 }
                 Section {
+                    NavigationLink(value: Place.capture) { CaptureStatusLabel() }
+                        .accessibilityIdentifier("captureRow")
                     Button { settingUpKeyboard = true } label: { Label("Dictate in Any App", systemImage: "keyboard") }
                 }
             }
@@ -67,6 +69,7 @@ struct BindersView: View {
                 case .allTasks: CardBoardView(binder: nil).navigationTitle("Board")
                 case .allMeetings: MeetingsList(binder: nil).navigationTitle("Meetings")
                 case .allNotes: NotesList(binder: nil).navigationTitle("Notes")
+                case .capture: CaptureView()
                 case .binder(let binder): BinderDetailView(binder: binder)
                 }
             }
@@ -86,6 +89,14 @@ struct BindersView: View {
             .sheet(isPresented: $settingUpKeyboard) { KeyboardSetupView() }
             .sheet(isPresented: $writing) { NewNoteSheet() }
             .refreshable { await load() }
+            // A suggestion's notification, tapped: its conversation.
+            .onChange(of: PhoneNavigation.shared.pendingConversation) { _, id in
+                guard let id else { return }
+                PhoneNavigation.shared.pendingConversation = nil
+                path = NavigationPath()
+                path.append(Place.capture)
+                path.append(CapturedConversationLink(id: id))
+            }
             .task(id: connection.revision("binders") + connection.revision("notes") + connection.revision("meetings") + connection.revision("todos")
                   + connection.revision("tasks")) {
                 await load()
@@ -116,6 +127,7 @@ struct BindersView: View {
         case "board": path.append(Place.allTasks)
         case "meetings": path.append(Place.allMeetings)
         case "notes": path.append(Place.allNotes)
+        case "capture": path.append(Place.capture)
         default:
             if UserDefaults.standard.bool(forKey: "openFirst"),
                let fullest = binders.filter({ !$0.archived }).max(by: { $0.meetings + $0.notes < $1.meetings + $1.notes }) {

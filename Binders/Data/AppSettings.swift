@@ -80,6 +80,14 @@ final class AppSettings {
     var noteDigests: Bool { didSet { defaults.set(noteDigests, forKey: "noteDigests") } }
     /// Paired phones may connect to Binders on this Mac. Off until the user turns it on: it opens a network port.
     var phoneLink: Bool { didSet { defaults.set(phoneLink, forKey: "phoneLink") } }
+    /// All-day capture on this Mac: on until turned off, but never turned back on after a quit without asking.
+    var allDayCapture: Bool { didSet { defaults.set(allDayCapture, forKey: "allDayCapture") } }
+    /// Keep each conversation's audio for a day after it's written down, to check transcription.
+    var allDayKeepAudio: Bool { didSet { defaults.set(allDayKeepAudio, forKey: "allDayKeepAudio") } }
+    var allDayNoticeAcknowledged: Bool { didSet { defaults.set(allDayNoticeAcknowledged, forKey: "allDayNoticeAcknowledged") } }
+    /// After a conversation: offer cards for what you said you'd do, and answers, from your binders, to what you asked.
+    var suggestCards: Bool { didSet { defaults.set(suggestCards, forKey: "suggestCards") } }
+    var suggestAnswers: Bool { didSet { defaults.set(suggestAnswers, forKey: "suggestAnswers") } }
     /// "dark", "light" or "system"; Binders is dark unless told otherwise.
     var appearance: String { didSet { defaults.set(appearance, forKey: "appearance") } }
     /// The binder new meetings and notes go into: the one last opened in the window.
@@ -176,6 +184,11 @@ final class AppSettings {
         knowledgeGraph = defaults.object(forKey: "knowledgeGraph") as? Bool ?? true
         noteDigests = defaults.object(forKey: "noteDigests") as? Bool ?? true
         phoneLink = defaults.bool(forKey: "phoneLink")
+        allDayCapture = defaults.bool(forKey: "allDayCapture")
+        allDayKeepAudio = defaults.bool(forKey: "allDayKeepAudio")
+        allDayNoticeAcknowledged = defaults.bool(forKey: "allDayNoticeAcknowledged")
+        suggestCards = defaults.object(forKey: "suggestCards") as? Bool ?? true
+        suggestAnswers = defaults.object(forKey: "suggestAnswers") as? Bool ?? true
         appearance = defaults.string(forKey: "appearance") ?? "dark"
         currentBinderID = defaults.string(forKey: "currentBinderID").flatMap(UUID.init(uuidString:))
         captureApps = defaults.stringArray(forKey: "captureApps") ?? WritingCaptureService.defaultApps

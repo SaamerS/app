@@ -251,8 +251,14 @@ final class MeetingRecord {
     var createdAt: Date
     var endedAt: Date?
     var duration: Double
-    /// recording, processing, ready, failed
+    /// recording, processing, ready, failed; a conversation with nothing worth keeping is trivial (hidden, then deleted).
     var status: String
+    /// meeting, or conversation: heard by the iPhone during the day. Conversations are never shared with the team.
+    var kind: String = "meeting"
+    /// Why a conversation was filed in its binder, in the words of the model that picked it.
+    var routingReason: String?
+    /// A conversation's suggestions: cards for what you said you'd do, answers to what you asked (JSON).
+    var suggestionsJSON: String = "[]"
     var appName: String?
     var attendees: [String]
     var userNotes: String
@@ -285,6 +291,16 @@ final class MeetingRecord {
         self.speakerNamesJSON = "{}"
         self.chatJSON = "[]"
     }
+
+    static let conversationKind = "conversation"
+
+    var suggestions: [ConversationSuggestion] {
+        get { ConversationSuggestion.decodeList(suggestionsJSON) }
+        set { suggestionsJSON = ConversationSuggestion.encodeList(newValue) }
+    }
+    var isConversation: Bool { kind == Self.conversationKind }
+    /// A meeting or conversation in words: "Meeting", "Capture".
+    var kindName: String { isConversation ? "Capture" : "Meeting" }
 
     var speakerNames: [String: String] {
         get { (try? JSONDecoder().decode([String: String].self, from: Data(speakerNamesJSON.utf8))) ?? [:] }
@@ -605,22 +621,49 @@ final class Store {
         return ((try? context.fetch(FetchDescriptor<MeetingRecord>(predicate: #Predicate { $0.id == id }))) ?? []).first?.binderID
     }
 
+    /// True when the id is one of the iPhone's conversations rather than a meeting.
+    func isConversation(_ id: UUID?) -> Bool {
+        guard let id else { return false }
+        return ((try? context.fetch(FetchDescriptor<MeetingRecord>(predicate: #Predicate { $0.id == id }))) ?? []).first?.isConversation ?? false
+    }
+
     func binderID(ofNote id: UUID?) -> UUID? {
         guard let id else { return nil }
         return ((try? context.fetch(FetchDescriptor<NoteItem>(predicate: #Predicate { $0.id == id }))) ?? []).first?.binderID
     }
 
+    /// Meetings (not conversations) and notes in a binder.
     func counts(in binderID: UUID) -> (meetings: Int, notes: Int) {
-        let meetings = (try? context.fetchCount(FetchDescriptor<MeetingRecord>(predicate: #Predicate { $0.binderID == binderID }))) ?? 0
+        let meetings = (try? context.fetchCount(FetchDescriptor<MeetingRecord>(predicate: #Predicate { $0.binderID == binderID && $0.kind == "meeting" }))) ?? 0
         let notes = (try? context.fetchCount(FetchDescriptor<NoteItem>(predicate: #Predicate { $0.binderID == binderID }))) ?? 0
         return (meetings, notes)
     }
 
-    /// Moves an item into a binder; your items take on the binder's sharing.
+    /// The iPhone's conversations in a binder, less the ones kept out of sight as small talk.
+    func conversationCount(in binderID: UUID, includingTrivial: Bool = false) -> Int {
+        let kind = MeetingRecord.conversationKind
+        let descriptor = includingTrivial
+            ? FetchDescriptor<MeetingRecord>(predicate: #Predicate { $0.binderID == binderID && $0.kind == kind })
+            : FetchDescriptor<MeetingRecord>(predicate: #Predicate { $0.binderID == binderID && $0.kind == kind && $0.status != "trivial" })
+        return (try? context.fetchCount(descriptor)) ?? 0
+    }
+
+    /// Moves an item into a binder; your items take on the binder's sharing, except conversations, which stay yours.
     func move(_ meeting: MeetingRecord, to binder: BinderRecord) {
         meeting.binderID = binder.id
-        if !meeting.isTeamCopy { meeting.sharedWithTeam = binder.sharedWithTeam }
+        if !meeting.isTeamCopy { meeting.sharedWithTeam = binder.sharedWithTeam && !meeting.isConversation }
         save()
+    }
+
+    /// Conversations kept as trivial are deleted a week after they were heard; until then they can be brought back.
+    func purgeTrivialConversations(olderThan days: Int = 7, now: Date = Date()) {
+        let cutoff = now.addingTimeInterval(-Double(days) * 86_400)
+        let kind = MeetingRecord.conversationKind
+        let old = (try? context.fetch(FetchDescriptor<MeetingRecord>(predicate: #Predicate {
+            $0.kind == kind && $0.status == "trivial" && $0.createdAt < cutoff
+        }))) ?? []
+        for record in old { deleteMeeting(record) }
+        if !old.isEmpty { Log.app.info("Deleted \(old.count) trivial conversations older than \(days) days") }
     }
 
     func move(_ note: NoteItem, to binder: BinderRecord) {

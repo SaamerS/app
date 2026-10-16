@@ -301,14 +301,15 @@ final class TeamSyncService {
         status = Status()
     }
 
-    /// Sharing is decided per binder: everything in it syncs, and whatever lands in it later is shared too.
+    /// Sharing is decided per binder: everything in it syncs, and whatever lands in it later is shared too. Conversations
+    /// the iPhone heard are the exception: they stay on this Mac.
     func setShared(_ binder: BinderRecord, _ shared: Bool) {
         guard !binder.isTeamCopy else { return }
         binder.sharedWithTeam = shared
         binder.updatedAt = Date()
         let binderID = binder.id
         for meeting in (try? store.context.fetch(FetchDescriptor<MeetingRecord>(predicate: #Predicate { $0.binderID == binderID }))) ?? []
-            where !meeting.isTeamCopy { meeting.sharedWithTeam = shared }
+            where !meeting.isTeamCopy && !meeting.isConversation { meeting.sharedWithTeam = shared }
         for note in (try? store.context.fetch(FetchDescriptor<NoteItem>(predicate: #Predicate { $0.binderID == binderID }))) ?? []
             where !note.isTeamCopy { note.sharedWithTeam = shared }
         store.save()
@@ -316,7 +317,7 @@ final class TeamSyncService {
     }
 
     func setShared(_ meeting: MeetingRecord, _ shared: Bool) {
-        guard !meeting.isTeamCopy else { return }
+        guard !meeting.isTeamCopy, !meeting.isConversation else { return }
         meeting.sharedWithTeam = shared
         store.save()
         scheduleSync(after: 0.5)
@@ -437,7 +438,8 @@ final class TeamSyncService {
         for (id, record) in records where !record.isTeamCopy {
             let entry = state.meetings[id]
             let remoteItem = remote.removeValue(forKey: id)
-            guard record.sharedWithTeam else {
+            // A conversation never goes to the team folder, even in a shared binder.
+            guard record.sharedWithTeam, !record.isConversation else {
                 if entry != nil { unshareMeeting(folder, id: id, entry: entry) }
                 continue
             }
@@ -981,7 +983,7 @@ final class TeamSyncService {
         guard scan.bindersFolderExists else { return }
         for binder in binders where binder.isTeamCopy && scan.binders[binder.id.uuidString] == nil {
             let counts = store.counts(in: binder.id)
-            if counts.meetings == 0, counts.notes == 0 { store.context.delete(binder) }
+            if counts.meetings == 0, counts.notes == 0, store.conversationCount(in: binder.id, includingTrivial: true) == 0 { store.context.delete(binder) }
         }
     }
 

@@ -102,8 +102,25 @@ Force a route with `BINDERS_RELEASE_MODE=xcode` or `=local`.
   Recording and Notifications are user permissions, not entitlements.
 - Speech models are downloaded on first launch, so the DMG stays small.
 
+## Binders for iPhone
+
+The iPhone app ships through App Store Connect (record "Binders", bundle `io.binders.app`).
+
+1. Raise `CURRENT_PROJECT_VERSION` for `BindersPhone` and `BindersKeyboard` in `project.yml` (and `MARKETING_VERSION`
+   for a new version), then `xcodegen generate`.
+2. `xcodebuild archive -scheme BindersPhone -configuration Release -destination 'generic/platform=iOS'
+   -archivePath build-phone/BindersPhone.xcarchive -derivedDataPath build-phone -allowProvisioningUpdates`, then
+   `xcodebuild -exportArchive` with `method` app-store-connect and `destination` upload. The build appears in TestFlight
+   after Apple processes it.
+3. Screenshots come from the Simulator paired with a demo Mac, never from real data: start
+   `BINDERS_DATA_DIR=<empty folder> Binders --selftest-link-serve`, launch the app with `-pairURL <the PAIR_URL it
+   prints>`, take the screens that open from launch arguments (`-open board`, `-openFirst YES`,
+   `-open ask -ask "…"`) with `xcrun simctl io <device> screenshot`, and run
+   `TEST_RUNNER_BINDERS_SHOTS=1 xcodebuild test … -only-testing:BindersPhoneUITests/AppStoreShots` for All-day capture.
+   `testReviewTour` walks through every screen for the App Review video (record it with `simctl io recordVideo`). Use a
+   6.9-inch iPhone (1320 x 2868).
+4. App Review can't pair with a Mac, so the review notes explain the pairing and attach that video.
+
 ## Not covered yet
 
-- Automatic updates (Sparkle is the usual choice; it needs its own signing key and an appcast on binders.io).
-- A download page.
 - Crash reports.

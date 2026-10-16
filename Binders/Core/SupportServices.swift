@@ -169,4 +169,18 @@ enum RecordingNotice {
         NSApp.activate(ignoringOtherApps: true)
         return alert.runModal() == .alertFirstButtonReturn
     }
+
+    /// Shown once, before All-day capture first listens.
+    static func confirmAllDay() -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Binders will write down conversations around you"
+        alert.informativeText = "All-day capture listens with this Mac's microphone and keeps what's said, as text, on this Mac. "
+            + "Many places require everyone's consent before a conversation is recorded. Let the people around you know, "
+            + "and mute it or turn it off when someone objects."
+        alert.addButton(withTitle: "Turn It On")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        return alert.runModal() == .alertFirstButtonReturn
+    }
 }

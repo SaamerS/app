@@ -44,7 +44,15 @@ final class DictationSession {
                 self.text = words
             }
             try await engine.prepare()
+            // Cancelled (Cancel, or the sheet swiped away) while the engine got ready: leave the microphone, the audio
+            // session and All-day capture alone. A claim made now would never be let go, and capture would stay paused.
+            guard phase == .starting, !Task.isCancelled else {
+                if phase == .starting { phase = .idle }
+                return
+            }
             self.engine = engine
+            // All-day capture lets go of the microphone while you dictate.
+            MicrophoneUsers.claim("dictation")
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.record, mode: .measurement, options: [.duckOthers])
             try session.setActive(true, options: .notifyOthersOnDeactivation)
@@ -151,7 +159,11 @@ final class DictationSession {
     private func stopAudio() {
         if audio.isRunning { audio.stop() }
         audio.inputNode.removeTap(onBus: 0)
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        MicrophoneUsers.release("dictation")
+        // All-day capture, listening again, keeps the audio session.
+        if !MicrophoneUsers.captureNeedsSession {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        }
         level = 0
     }
 

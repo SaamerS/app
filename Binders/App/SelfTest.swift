@@ -15,6 +15,7 @@ import BindersKit
 ///     Binders --selftest-align reference.wav candidate.wav
 ///     Binders --selftest-notes <meeting id> [--save]
 ///     Binders --selftest-rescue <meeting id> --file recording.wav [--offset seconds]
+///     Binders --selftest-conversation   (in a throwaway BINDERS_DATA_DIR)
 enum SelfTest {
     static func start(arguments: [String]) {
         Task { @MainActor in
@@ -758,6 +759,12 @@ enum SelfTest {
         if args.contains("--selftest-link") {
             return await linkSelfTest()
         }
+        if args.contains("--selftest-conversation") {
+            return await conversationSelfTest()
+        }
+        if let path = value("--selftest-allday") {
+            return await allDaySelfTest(file: URL(fileURLWithPath: path))
+        }
         if args.contains("--selftest-board-tasks") {
             return await boardTasksSelfTest()
         }
@@ -1380,6 +1387,18 @@ open reports/import.html
         await danaAgain.syncNow()
         check(notes(dana.store).count == danaNoteCount && files() == beforeReset, "lost sync state brings nothing back and duplicates nothing")
 
+        // A conversation Maya's iPhone heard stays on her Mac, even marked shared by mistake.
+        let overheard = MeetingRecord(title: "Hallway chat about pricing", appName: "iPhone", templateID: "conversation")
+        overheard.kind = MeetingRecord.conversationKind
+        overheard.status = "ready"
+        overheard.summary = "## Summary\nA quick chat about pricing."
+        overheard.sharedWithTeam = true
+        maya.store.insert(overheard)
+        await maya.team.syncNow()
+        await danaAgain.syncNow()
+        check(!files().keys.contains { $0.contains(overheard.id.uuidString) || $0.localizedCaseInsensitiveContains("Hallway chat") }
+              && !meetings(dana.store).contains { $0.id == overheard.id }, "a conversation the iPhone heard never reaches the team folder")
+
         print("TEAM_FOLDER: \(folder.path)")
         for path in files().keys.sorted() { print("  \(path)") }
         if let markdown = try? String(contentsOf: folder.appendingPathComponent("Notes/Launch checklist.md"), encoding: .utf8) {
@@ -1708,6 +1727,15 @@ open reports/import.html
             } else if text.hasPrefix("note ") {
                 let result = await InboxCommands.perform(InboxRequest(action: "add_note", fields: ["text": String(text.dropFirst(5))]), controller: controller)
                 print("NOTE: \(result.message)")
+            } else if text == "conversations" {
+                // What the phone's All-day capture sent, as the Mac wrote it up.
+                let kind = MeetingRecord.conversationKind
+                for record in (try? Store.shared.context.fetch(FetchDescriptor<MeetingRecord>(predicate: #Predicate { $0.kind == kind }))) ?? [] {
+                    let lines = Store.shared.segments(for: record.id).map { "  [\(TranscriptFormatter.timestamp($0.start))] \(record.speakerNames[$0.speaker] ?? $0.speaker): \($0.text)" }
+                    print("CONVERSATION: \(record.title) · \(record.status) · \(Store.shared.binder(record.binderID)?.name ?? "?") · \(record.appName ?? "") · shared=\(record.sharedWithTeam)")
+                    print(lines.joined(separator: "\n"))
+                    print(record.summary)
+                }
             } else if text == "quit" {
                 break
             }

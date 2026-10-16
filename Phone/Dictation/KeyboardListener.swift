@@ -149,6 +149,8 @@ final class KeyboardListener {
         // Scripted words need no microphone, which the Simulator may not have.
         if !isScripted {
             guard await AVAudioApplication.requestRecordPermission() else { throw DictationError.microphone }
+            // All-day capture lets go of the microphone while the keyboard has it.
+            MicrophoneUsers.claim("keyboard")
             let session = AVAudioSession.sharedInstance()
             // Mixing, so music or a podcast keeps playing while the microphone is ready.
             try session.setCategory(.playAndRecord, mode: .default, options: [.mixWithOthers, .defaultToSpeaker])
@@ -166,6 +168,7 @@ final class KeyboardListener {
             } catch {
                 input.removeTap(onBus: 0)
                 tapped = false
+                MicrophoneUsers.release("keyboard")
                 throw error
             }
         }
@@ -189,7 +192,11 @@ final class KeyboardListener {
             audio.stop()
             audio.inputNode.removeTap(onBus: 0)
             tapped = false
-            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            MicrophoneUsers.release("keyboard")
+            // All-day capture, listening again, keeps the audio session.
+            if !MicrophoneUsers.captureNeedsSession {
+                try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            }
         }
         state = KeyboardBridge.State(phase: .off)
         publish()
@@ -197,9 +204,17 @@ final class KeyboardListener {
         if UIApplication.shared.applicationState != .active { connection?.sceneChanged(active: false) }
     }
 
-    /// Tells the keyboard it's still here, and lets the microphone go once it's been idle a while.
+    /// Lets go of the microphone it keeps ready, unless you're dictating: All-day capture wants it back.
+    func letGoIfIdle() {
+        guard state.phase == .ready || state.phase == .failed || state.phase == .done else { return }
+        turnOff()
+    }
+
+    /// Tells the keyboard it's still here, and lets the microphone go once it's been idle a while: five minutes, or half
+    /// a minute when All-day capture is waiting for it.
     private func beat() {
-        if state.phase == .ready || state.phase == .failed, Date().timeIntervalSince(lastUsed) > KeyboardBridge.warmFor {
+        let warm = CaptureSession.shared.isWaitingForMicrophone ? 30 : KeyboardBridge.warmFor
+        if state.phase == .ready || state.phase == .failed, Date().timeIntervalSince(lastUsed) > warm {
             turnOff()
         } else {
             publish()

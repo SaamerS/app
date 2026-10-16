@@ -193,11 +193,11 @@ struct QuickSwitcher: View {
             SwitcherItem(id: "n:\(note.id)", title: note.title, subtitle: ["Note", binderName(note.binderID)].filter { !$0.isEmpty }.joined(separator: " · "),
                          symbol: "note.text", date: note.updatedAt) { show(binder: note.binderID, tab: .notes) { $0.pendingNoteID = note.id } }
         }
-        items += meetings.prefix(400).map { meeting in
+        items += meetings.filter { $0.status != "trivial" }.prefix(400).map { meeting in
             SwitcherItem(id: "m:\(meeting.id)", title: meeting.title,
-                         subtitle: ["Meeting", binderName(meeting.binderID), meeting.createdAt.formatted(date: .abbreviated, time: .omitted)]
+                         subtitle: [meeting.kindName, binderName(meeting.binderID), meeting.createdAt.formatted(date: .abbreviated, time: .omitted)]
                             .filter { !$0.isEmpty }.joined(separator: " · "),
-                         symbol: "person.2.wave.2", date: meeting.createdAt) { show(binder: meeting.binderID, tab: .meetings) { $0.pendingMeetingID = meeting.id } }
+                         symbol: meeting.symbol, date: meeting.createdAt) { show(binder: meeting.binderID, tab: .listing(meeting)) { $0.pendingMeetingID = meeting.id } }
         }
         items += cards.prefix(400).map { card in
             SwitcherItem(id: "c:\(card.id)", title: card.title, subtitle: ["Card", card.column.title, binderName(card.binderID)].filter { !$0.isEmpty }.joined(separator: " · "),
@@ -234,12 +234,12 @@ struct QuickSwitcher: View {
                                       subtitle: (["Note", binderName(note.binderID)] + tags.map { "#\($0)" }).filter { !$0.isEmpty }.joined(separator: " · "),
                                       symbol: "note.text", date: note.updatedAt) { show(binder: note.binderID, tab: .notes) { $0.pendingNoteID = note.id } })
         }
-        for meeting in meetings.prefix(500) {
+        for meeting in meetings.filter({ $0.status != "trivial" }).prefix(500) {
             let tags = matches(meeting.summary + "\n" + meeting.userNotes)
             guard !tags.isEmpty else { continue }
             items.append(SwitcherItem(id: "m:\(meeting.id)", title: meeting.title,
-                                      subtitle: (["Meeting", binderName(meeting.binderID)] + tags.map { "#\($0)" }).filter { !$0.isEmpty }.joined(separator: " · "),
-                                      symbol: "person.2.wave.2", date: meeting.createdAt) { show(binder: meeting.binderID, tab: .meetings) { $0.pendingMeetingID = meeting.id } })
+                                      subtitle: ([meeting.kindName, binderName(meeting.binderID)] + tags.map { "#\($0)" }).filter { !$0.isEmpty }.joined(separator: " · "),
+                                      symbol: meeting.symbol, date: meeting.createdAt) { show(binder: meeting.binderID, tab: .listing(meeting)) { $0.pendingMeetingID = meeting.id } })
         }
         return Array(items.sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }.prefix(30))
     }

@@ -117,7 +117,7 @@ public enum NotesEditing {
         guard let range = line.range(of: taskPrefix, options: .regularExpression) else { return nil }
         let text = String(line[range.upperBound...]).replacingOccurrences(of: "**", with: "").trimmingCharacters(in: .whitespaces)
         let done = isChecked(line)
-        let dashed = #"^(You|[A-Z][\p{L}'.\-]*(?: [A-Z][\p{L}'.\-]*){0,2})\s+[—–]\s+"#
+        let dashed = #"^(You|Speaker \d{1,2}|[A-Z][\p{L}'.\-]*(?: [A-Z][\p{L}'.\-]*){0,2})\s+[—–]\s+"#
         let hyphenAfterYou = #"^You\s+-\s+"#
         if let match = text.range(of: dashed, options: .regularExpression) ?? text.range(of: hyphenAfterYou, options: .regularExpression) {
             let head = String(text[match])

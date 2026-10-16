@@ -22,6 +22,12 @@ struct LinkDevice: Codable, Identifiable, Equatable {
 @MainActor
 @Observable
 final class LinkServer {
+    /// The name the iPhone shows for this Mac. A made-up one for demo data, so screenshots never carry the real name.
+    nonisolated static var macName: String {
+        if let name = AppPaths.demoUserName { return "\(name)'s MacBook Pro" }
+        return Host.current().localizedName ?? "Mac"
+    }
+
     enum Status: Equatable {
         case off
         case listening
@@ -129,7 +135,7 @@ final class LinkServer {
         addresses = Self.currentAddresses()
         var hosts = addresses.map(\.host)
         if hosts.isEmpty { hosts = ["127.0.0.1"] }
-        let pairing = LinkPairing(name: Host.current().localizedName ?? "Mac", addresses: hosts.map { "\($0):\(port)" }, secret: secret,
+        let pairing = LinkPairing(name: LinkServer.macName, addresses: hosts.map { "\($0):\(port)" }, secret: secret,
                                   expires: Date().addingTimeInterval(Self.pairingLifetime))
         self.pairing = pairing
         pairingExpiry = Task { [weak self] in
@@ -209,7 +215,7 @@ final class LinkServer {
             let parameters = Link.parameters(keys: keys)
             parameters.allowLocalEndpointReuse = true
             let listener = try NWListener(using: parameters, on: NWEndpoint.Port(rawValue: boundPort ?? requestedPort) ?? .any)
-            listener.service = NWListener.Service(name: Host.current().localizedName, type: Link.serviceType)
+            listener.service = NWListener.Service(name: LinkServer.macName, type: Link.serviceType)
             listener.newConnectionHandler = { [weak self] connection in
                 MainActor.assumeIsolated { self?.accept(connection, pairing: false) }
             }
@@ -335,6 +341,39 @@ final class LinkServer {
                                       duration: params["duration"] as? Double ?? 0, asrMillis: 0, llmMillis: 0, engine: "iPhone",
                                       llmModel: model, usedLLM: model != nil, fallbackReason: nil, audioFileName: nil, status: "inserted")
         Store.shared.insert(record)
+    }
+
+    /// What this Mac takes besides the tools, for `binders/hello`: a phone holds back what its Mac doesn't list.
+    static let features = [ConversationPayload.feature, ConversationSuggestion.feature]
+
+    /// A conversation the phone heard, transcribed there: kept at once, written up and filed after. One sent again is kept once.
+    fileprivate func keepConversation(_ params: [String: Any]) throws -> UUID {
+        guard let controller else { throw MCPCore.ToolFailure("Binders is shutting down") }
+        let payload: ConversationPayload
+        do {
+            payload = try ConversationPayload(jsonObject: params)
+        } catch {
+            throw MCPCore.ToolFailure("That isn't a capture Binders can read: \(error.localizedDescription)")
+        }
+        switch controller.conversations.receive(payload) {
+        case .kept(let id), .known(let id): return id
+        }
+    }
+
+    /// Suggestions on the conversations the phone heard, for it to show and notify.
+    fileprivate func suggestions() -> [[String: Any]] {
+        guard let controller else { return [] }
+        return controller.conversations.suggestionsForPhone().compactMap { suggestion in
+            (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(suggestion))) as? [String: Any]
+        }
+    }
+
+    /// Yes or no to a suggestion, from the phone.
+    fileprivate func act(on suggestion: String, accept: Bool) -> (ok: Bool, message: String) {
+        guard let controller else { return (false, "Binders is shutting down") }
+        if accept { return controller.conversations.accept(suggestion) }
+        controller.conversations.dismiss(suggestion)
+        return (true, "")
     }
 
     fileprivate func runTool(_ message: [String: Any]) async -> [String: Any]? {
@@ -491,7 +530,7 @@ private final class LinkSession {
             }
             let device = server.completePairing(name: params["name"] as? String ?? "")
             return reply(MCPCore.success(id: id, result: ["device": device.id.uuidString, "key": device.key.base64EncodedString(),
-                                                          "name": Host.current().localizedName ?? "Mac",
+                                                          "name": LinkServer.macName,
                                                           "port": Int(server.boundPort ?? Link.port), "protocol": Link.protocolVersion]))
         }
 
@@ -513,8 +552,8 @@ private final class LinkSession {
             device = deviceID
             server.deviceSaidHello(deviceID)
             let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
-            reply(MCPCore.success(id: id, result: ["name": Host.current().localizedName ?? "Mac", "version": version,
-                                                   "protocol": Link.protocolVersion]))
+            reply(MCPCore.success(id: id, result: ["name": LinkServer.macName, "version": version,
+                                                   "protocol": Link.protocolVersion, "features": LinkServer.features]))
         default:
             guard device != nil else {
                 return reply(MCPCore.failure(id: id, code: -32001, message: "Say hello first"))
@@ -532,6 +571,22 @@ private final class LinkSession {
             if method == "binders/dictation" {
                 server.keepDictation(params)
                 return reply(MCPCore.success(id: id, result: [String: Any]()))
+            }
+            if method == ConversationSuggestion.listMethod {
+                return reply(MCPCore.success(id: id, result: ["suggestions": server.suggestions()]))
+            }
+            if method == ConversationSuggestion.actMethod {
+                let result = server.act(on: params["id"] as? String ?? "", accept: params["action"] as? String == "accept")
+                return reply(result.ok ? MCPCore.success(id: id, result: ["message": result.message])
+                             : MCPCore.failure(id: id, code: -32602, message: result.message))
+            }
+            if method == ConversationPayload.method {
+                do {
+                    let kept = try server.keepConversation(params)
+                    return reply(MCPCore.success(id: id, result: ["id": kept.uuidString]))
+                } catch {
+                    return reply(MCPCore.failure(id: id, code: -32602, message: (error as? MCPCore.ToolFailure)?.message ?? error.localizedDescription))
+                }
             }
             reply(await server.runTool(message))
         }

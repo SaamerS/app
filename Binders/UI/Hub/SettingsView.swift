@@ -2,11 +2,12 @@ import AppKit
 import CoreImage.CIFilterBuiltins
 import ServiceManagement
 import SwiftUI
+import UniformTypeIdentifiers
 import BindersKit
 
 /// The categories down the left of Settings. Each is a short page rather than a stop on one long scroll.
 enum SettingsPage: String, CaseIterable, Identifiable {
-    case general, shortcuts, dictation, ai, meetings, knowledge, writing, automations, mcp, phone, team, privacy
+    case general, shortcuts, dictation, ai, meetings, allDay, knowledge, writing, automations, mcp, phone, team, privacy
 
     var id: String { rawValue }
 
@@ -24,6 +25,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         case .dictation: "Dictation"
         case .ai: "AI"
         case .meetings: "Meetings"
+        case .allDay: "All-day capture"
         case .knowledge: "Knowledge"
         case .writing: "Writing capture"
         case .automations: "Automations"
@@ -41,6 +43,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         case .dictation: "mic"
         case .ai: "sparkles"
         case .meetings: "person.wave.2"
+        case .allDay: "waveform.and.mic"
         case .knowledge: "point.3.connected.trianglepath.dotted"
         case .writing: "pencil.line"
         case .automations: "bolt"
@@ -59,6 +62,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         case .dictation: "Microphone and speech recognition."
         case .ai: "The language model that formats, answers and links."
         case .meetings: "Taking notes on calls."
+        case .allDay: "Conversations heard through the day, on this Mac and on your iPhone."
         case .knowledge: "Search, the graph and note digests."
         case .writing: "What you write in messages and mail, kept once it is sent."
         case .automations: "Rules that run Shortcuts, scripts and web hooks, and links from other apps."
@@ -111,6 +115,7 @@ struct SettingsView: View {
         case .dictation: DictationSettings()
         case .ai: AISettings()
         case .meetings: MeetingsSettings()
+        case .allDay: AllDayCaptureSettings()
         case .knowledge: KnowledgeSettings()
         case .writing: WritingCaptureSettings()
         case .automations: AutomationsSettings()
@@ -730,6 +735,71 @@ private struct MeetingsSettings: View {
                 Text("Records your mic and the call's audio on this Mac — no bot joins. Transcripts, speaker labels and notes are all produced locally.")
             }
         }
+    }
+}
+
+private struct AllDayCaptureSettings: View {
+    @Environment(DictationController.self) private var controller
+    @Environment(AppSettings.self) private var settings
+    @State private var importing = false
+    @State private var imported: String?
+
+    var body: some View {
+        @Bindable var settings = settings
+        let capture = controller.allDay
+        SettingsPageForm(page: .allDay) {
+            Section {
+                Toggle("Listen for conversations on this Mac", isOn: Binding(get: { capture.isOn }, set: { on in
+                    if on { Task { await capture.turnOn() } } else { capture.turnOff() }
+                }))
+                if capture.isOn {
+                    LabeledContent("Now") {
+                        HStack(spacing: 8) {
+                            Text(capture.status.title + (capture.inConversation ? " · in a conversation" : ""))
+                            Button(capture.isMuted ? "Unmute" : "Mute") {
+                                if capture.isMuted { capture.unmute() } else { capture.mute() }
+                            }
+                        }
+                    }
+                }
+                if let error = capture.error {
+                    Text(error).font(.callout).foregroundStyle(.orange)
+                }
+                LabeledContent("Today", value: "\(Self.duration(capture.onToday())) listening · \(Int((capture.speechSeconds / 60).rounded())) min of speech")
+                if let activity = capture.activity {
+                    LabeledContent("Writing down", value: activity)
+                }
+                Toggle("Keep audio for 24 hours", isOn: $settings.allDayKeepAudio)
+            } footer: {
+                Text("Binders listens through the day and cuts it into conversations. Only speech is written to disk, with a second either side, and the audio is deleted once it's written down. Each conversation is summarized, its promises become to-dos, and it's filed in the binder it belongs to, never shared with your team. It pauses while a meeting is recorded, and what you dictate isn't part of a conversation. If your iPhone listens too, a conversation near both is written down twice.")
+            }
+            Section {
+                Toggle("Offer cards for what you said you'd do", isOn: $settings.suggestCards)
+                Toggle("Answer questions you asked, from your binders", isOn: $settings.suggestAnswers)
+            } header: {
+                Text("After a capture")
+            } footer: {
+                Text("Once a capture is written up, Binders offers to put the things you said you'd do on the binder's board, and answers a question you asked if your notes, meetings or earlier conversations hold the answer. They come as notifications on the device that heard it, and wait on the capture's page.")
+            }
+            Section {
+                Text("Binders for iPhone sends its captures over the phone link. When the network can't, share them from the iPhone by AirDrop, or save them to Files, and open the file here.")
+                    .foregroundStyle(.secondary)
+                Button("Open a Binders File…") { importing = true }
+                if let imported { Text(imported).font(.callout).foregroundStyle(.secondary) }
+            } header: {
+                Text("From your iPhone")
+            }
+        }
+        .fileImporter(isPresented: $importing, allowedContentTypes: [UTType(exportedAs: BindersTransfer.typeIdentifier)],
+                      allowsMultipleSelection: true) { result in
+            guard case .success(let urls) = result else { return }
+            imported = urls.map { BindersFiles.open($0, controller: controller) }.last
+        }
+    }
+
+    static func duration(_ seconds: TimeInterval) -> String {
+        let minutes = Int(seconds / 60)
+        return minutes < 60 ? "\(minutes) min" : "\(minutes / 60) h \(minutes % 60) min"
     }
 }
 

@@ -18,21 +18,27 @@ enum MCPServer {
         ask_on_task if you need the user, and complete_task with a summary when you're done. Say who you are with `agent`.
         """
 
+    /// What All-day capture keeps is stored as kind "conversation" and called a capture: tools take and give "capture",
+    /// and still take "conversation".
+    static func storedKind(_ kind: String) -> String { kind == "capture" ? MeetingRecord.conversationKind : kind }
+    static func shownKind(_ kind: String) -> String { kind == MeetingRecord.conversationKind ? "capture" : kind }
+
     static let tools: [MCPTool] = [
-        MCPTool(name: "search_knowledge", readOnly: true, description: "Search meetings, notes, dictations and captured writing by keywords and meaning. Returns the best-matching passages with their source.", parameters: [
+        MCPTool(name: "search_knowledge", readOnly: true, description: "Search meetings, captures (conversations All-day capture wrote down), notes, dictations and captured writing by keywords and meaning. Returns the best-matching passages with their source.", parameters: [
             MCPToolParameter(name: "query", description: "What to look for.", required: true),
             MCPToolParameter(name: "limit", type: "integer", description: "How many passages, up to 30. Default 10."),
-            MCPToolParameter(name: "kind", description: "Only this kind of source.", options: ["meeting", "note", "writing", "dictation"]),
+            MCPToolParameter(name: "kind", description: "Only this kind of source.", options: ["meeting", "capture", "note", "writing", "dictation"]),
         ]),
         MCPTool(name: "ask_knowledge", readOnly: true, description: "Answer a question from the knowledge base, with the passages the answer drew on. Uses the user's local language model, so it can take several seconds.", parameters: [
             MCPToolParameter(name: "question", description: "The question, in plain words.", required: true),
         ]),
         MCPTool(name: "list_binders", readOnly: true, description: "The user's binders: one per project or area, each holding meetings and notes."),
-        MCPTool(name: "list_meetings", readOnly: true, description: "Recent meetings, newest first, with a preview of their notes.", parameters: [
+        MCPTool(name: "list_meetings", readOnly: true, description: "Recent meetings, newest first, with a preview of their notes. Captures, the conversations All-day capture heard on the user's iPhone or Mac, are listed with kind capture.", parameters: [
             MCPToolParameter(name: "limit", type: "integer", description: "How many, up to 50. Default 20."),
             MCPToolParameter(name: "binder", description: "Only meetings in the binder with this name."),
+            MCPToolParameter(name: "kind", description: "Meetings (the default), captures, or both.", options: ["meeting", "capture", "all"]),
         ]),
-        MCPTool(name: "get_meeting", readOnly: true, description: "One meeting in full: notes, the user's own notes, attendees, and the transcript if asked.", parameters: [
+        MCPTool(name: "get_meeting", readOnly: true, description: "One meeting or capture in full: notes, the user's own notes, attendees, and the transcript if asked.", parameters: [
             MCPToolParameter(name: "id", description: "The meeting's id, from list_meetings or a search result.", required: true),
             MCPToolParameter(name: "include_transcript", type: "boolean", description: "Also return the transcript with speakers and timestamps."),
         ]),
@@ -234,7 +240,7 @@ enum MCPServer {
         case "search_knowledge":
             let query = string("query")
             guard !query.isEmpty else { throw MCPCore.ToolFailure("query is required") }
-            let kinds: Set<KnowledgeKind>? = KnowledgeKind(rawValue: string("kind")).map { [$0] }
+            let kinds: Set<KnowledgeKind>? = KnowledgeKind(rawValue: Self.storedKind(string("kind"))).map { [$0] }
             let hits = await knowledge.search(query, kinds: kinds, limit: integer("limit", default: 10, max: 30))
             let corrections = knowledge.corrections()
             return json(hits.map { hit in
@@ -260,12 +266,20 @@ enum MCPServer {
             let binder = binderID(named: string("binder"))
             if !string("binder").isEmpty, binder == nil { throw MCPCore.ToolFailure("No binder named “\(string("binder"))”. list_binders shows the names.") }
             var descriptor = FetchDescriptor<MeetingRecord>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
-            // Filtered as it's read: a binder nobody has added to lately still has its meetings.
-            if let binder { descriptor.predicate = #Predicate { $0.binderID == binder } }
+            // Filtered as it's read: a binder nobody has added to lately still has its meetings. Small talk the iPhone
+            // heard is never listed.
+            let kind = string("kind").isEmpty ? "meeting" : Self.storedKind(string("kind"))
+            guard ["meeting", MeetingRecord.conversationKind, "all"].contains(kind) else { throw MCPCore.ToolFailure("kind is meeting, capture or all") }
+            let any = kind == "all"
+            if let binder {
+                descriptor.predicate = #Predicate { $0.binderID == binder && (any || $0.kind == kind) && $0.status != "trivial" }
+            } else {
+                descriptor.predicate = #Predicate { (any || $0.kind == kind) && $0.status != "trivial" }
+            }
             descriptor.fetchLimit = integer("limit", default: 20, max: 50)
             let meetings = (try? Store.shared.context.fetch(descriptor)) ?? []
             return json(meetings.map { meeting in
-                ["id": meeting.id.uuidString, "title": meeting.title, "date": AutomationPayload.iso(meeting.createdAt),
+                ["id": meeting.id.uuidString, "kind": Self.shownKind(meeting.kind), "title": meeting.title, "date": AutomationPayload.iso(meeting.createdAt),
                  "duration_minutes": Int(meeting.duration / 60), "attendees": meeting.attendees, "app": meeting.appName ?? "",
                  "binder": Store.shared.binder(meeting.binderID)?.name ?? "", "status": meeting.status,
                  "preview": String(meeting.summary.prefix(300))] as [String: Any]
@@ -275,7 +289,7 @@ enum MCPServer {
             guard let meeting = (try? Store.shared.context.fetch(FetchDescriptor<MeetingRecord>(predicate: #Predicate { $0.id == id })))?.first else {
                 throw MCPCore.ToolFailure("No meeting with that id")
             }
-            var result: [String: Any] = ["id": meeting.id.uuidString, "title": meeting.title, "date": AutomationPayload.iso(meeting.createdAt),
+            var result: [String: Any] = ["id": meeting.id.uuidString, "kind": Self.shownKind(meeting.kind), "title": meeting.title, "date": AutomationPayload.iso(meeting.createdAt),
                                          "duration_minutes": Int(meeting.duration / 60), "attendees": meeting.attendees, "app": meeting.appName ?? "",
                                          "binder": Store.shared.binder(meeting.binderID)?.name ?? "",
                                          "notes": meeting.isTeamCopy ? TeamSyncService.shown(meeting.summary, by: meeting.teamAuthorName) : meeting.summary,
@@ -504,7 +518,7 @@ enum MCPServer {
             }
         }
         for meeting in (try? context.fetch(meetingsQuery)) ?? [] {
-            scan(meeting.summary, place: .meeting, id: meeting.id, kind: "meeting", title: meeting.title, date: meeting.createdAt, binderID: meeting.binderID,
+            scan(meeting.summary, place: .meeting, id: meeting.id, kind: meeting.kind, title: meeting.title, date: meeting.createdAt, binderID: meeting.binderID,
                  author: meeting.isTeamCopy ? meeting.teamAuthorName : nil)
         }
         for note in (try? context.fetch(notesQuery)) ?? [] {
@@ -516,7 +530,7 @@ enum MCPServer {
     }
 
     private static func describe(_ hit: KnowledgeHit) -> [String: Any] {
-        ["kind": hit.kind.rawValue, "source_id": hit.sourceID, "title": hit.title, "date": AutomationPayload.iso(hit.createdAt),
+        ["kind": Self.shownKind(hit.kind.rawValue), "source_id": hit.sourceID, "title": hit.title, "date": AutomationPayload.iso(hit.createdAt),
          "speaker": hit.speaker ?? "", "author": hit.author ?? "", "binder": Store.shared.binder(hit.binderID.flatMap(UUID.init))?.name ?? "",
          "text": hit.text, "score": (hit.score * 1000).rounded() / 1000]
     }

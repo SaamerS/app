@@ -182,6 +182,9 @@ final class TaskLineTests: XCTestCase {
                        TaskLine(owner: "Samir Haddad", text: "run the smoke suite", done: true))
         XCTAssertEqual(NotesEditing.task(from: "- [ ] You - share the opencode config"),
                        TaskLine(owner: "You", text: "share the opencode config", done: false))
+        // Someone the notes couldn't name yet still owns what they said they'd do.
+        XCTAssertEqual(NotesEditing.task(from: "- [ ] Speaker 2 — update the plan names on the website"),
+                       TaskLine(owner: "Speaker 2", text: "update the plan names on the website", done: false))
         // Prose with a hyphen keeps its whole text; a capitalised first word is not an owner.
         XCTAssertEqual(NotesEditing.task(from: "- [ ] Check with auditors - only if needed"),
                        TaskLine(owner: nil, text: "Check with auditors - only if needed", done: false))

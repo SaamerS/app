@@ -34,6 +34,27 @@ final class MacConnection {
     private(set) var revisions: [String: Int] = [:]
     /// Notes and to-dos saved while the Mac was out of reach, sent when it's back.
     private(set) var outbox: [PendingSave] = Outbox.load()
+    /// What the Mac said it takes besides the tools, at hello: "conversation". Remembered for when it's out of reach.
+    private(set) var macFeatures: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "macFeatures") ?? [])
+    /// The Mac has said it takes the conversations All-day capture hears.
+    var takesConversations: Bool { macFeatures.contains(ConversationPayload.feature) }
+    /// The Mac offers cards and answers once it has written a conversation up.
+    var hasSuggestions: Bool { macFeatures.contains(ConversationSuggestion.feature) }
+    /// Told when something changed on the Mac that's worth asking about again: a conversation written up.
+    @ObservationIgnored var onMeetingsChanged: (() -> Void)?
+    /// Stay connected in the background while All-day capture listens, so what the Mac offers about a conversation
+    /// arrives while you're out.
+    @ObservationIgnored var keepsConnected = false {
+        didSet {
+            guard keepsConnected, !oldValue, client == nil, mac != nil else { return }
+            isActive = true
+            Task { await connect() }
+        }
+    }
+    /// Told when a conversation has reached the Mac (every part of it), so All-day capture can mark it sent.
+    @ObservationIgnored var onConversationSent: ((UUID) -> Void)?
+    /// Told when the Mac refused one (it couldn't read it), so it isn't lost without a word.
+    @ObservationIgnored var onConversationRefused: ((UUID) -> Void)?
 
     @ObservationIgnored private var client: LinkClient?
     @ObservationIgnored private var connecting = false
@@ -51,6 +72,9 @@ final class MacConnection {
         }
     }
     @ObservationIgnored private var lastAttempt = Date.distantPast
+    /// Background work waiting on the Mac (All-day capture sending what it processed): stay connected until it's done.
+    @ObservationIgnored private var errands = 0
+    private var isHeld: Bool { holdOpen || keepsConnected || errands > 0 }
 
     init() {
         mac = Self.loadMac()
@@ -130,7 +154,9 @@ final class MacConnection {
         for candidate in candidates {
             do {
                 try await candidate.client.connect(timeout: 4)
-                try await candidate.client.hello(device: mac.device, key: key, name: UIDevice.current.name)
+                let hello = try await candidate.client.hello(device: mac.device, key: key, name: UIDevice.current.name)
+                macFeatures = Set(hello["features"] as? [String] ?? [])
+                UserDefaults.standard.set(Array(macFeatures), forKey: "macFeatures")
                 let link = candidate.client
                 link.onNotification { [weak self] message in
                     let kinds = ((message["params"] as? [String: Any])?["kinds"] as? [String]) ?? ["all"]
@@ -170,7 +196,7 @@ final class MacConnection {
 
     /// Foreground: connect and refresh. Background: let go; iOS would suspend the connection anyway.
     func sceneChanged(active: Bool) {
-        if !active, holdOpen { return }
+        if !active, isHeld { return }
         isActive = active
         if active {
             Task { await connect() }
@@ -202,6 +228,20 @@ final class MacConnection {
 
     private func changed(_ kinds: [String]) {
         for kind in kinds { revisions[kind, default: 0] += 1 }
+        if kinds.contains("meetings") || kinds.contains("all") { onMeetingsChanged?() }
+    }
+
+    /// A request to the Mac from wherever the app is: connects for it in the background, and lets go after. Nil when the
+    /// Mac can't be reached.
+    func request(_ method: String, _ params: [String: Any] = [:]) async throws -> Any? {
+        errands += 1
+        defer {
+            errands -= 1
+            if !isHeld, UIApplication.shared.applicationState != .active { sceneChanged(active: false) }
+        }
+        if client == nil, mac != nil { Task { await connect() } }
+        guard await ready(), let client else { return nil }
+        return try await client.request(method, params, timeout: 30)
     }
 
     // MARK: Dictation
@@ -219,6 +259,42 @@ final class MacConnection {
     @discardableResult
     func save(_ tool: String, text: String, binder: String?) async -> Bool {
         await deliver(PendingSave(id: UUID(), tool: tool, text: text, binder: binder, created: Date()))
+    }
+
+    /// A conversation All-day capture heard, transcribed here, for the Mac: now, or once the Mac is back (and takes them).
+    /// Saved before this returns, so the audio can go. A long one goes in parts that each fit in a message.
+    @discardableResult
+    func keepConversation(_ payload: ConversationPayload) async -> Bool {
+        let items = payload.parts().compactMap { part -> PendingSave? in
+            guard let data = try? part.encoded() else { return nil }
+            return PendingSave(id: part.id, tool: PendingSave.conversation, text: "", binder: nil, created: part.started,
+                               conversation: payload.id, payload: data)
+        }
+        guard !items.isEmpty else { return false }
+        outbox.removeAll { $0.conversation == payload.id }
+        outbox += items
+        Outbox.save(outbox)
+        guard await ready() else { return false }
+        await sendOutbox()
+        return !outbox.contains { $0.conversation == payload.id }
+    }
+
+    /// Takes a conversation that hasn't gone yet out of the outbox.
+    func forgetConversation(_ id: UUID) {
+        outbox.removeAll { $0.conversation == id }
+        Outbox.save(outbox)
+    }
+
+    /// From the background: connects for as long as it takes to send what's waiting, then lets go again.
+    func flushOutbox() async {
+        guard !outbox.isEmpty, mac != nil else { return }
+        errands += 1
+        defer {
+            errands -= 1
+            if !isHeld, UIApplication.shared.applicationState != .active { sceneChanged(active: false) }
+        }
+        if client == nil { Task { await connect() } }
+        if await ready() { await sendOutbox() }
     }
 
     /// Keeps a dictation made on this iPhone with the Mac's own, in its history and its search: now, or once the Mac is
@@ -250,7 +326,12 @@ final class MacConnection {
     private func send(_ item: PendingSave) async -> Sent {
         guard let client else { return .kept }
         do {
-            if item.tool == PendingSave.dictation {
+            if item.tool == PendingSave.conversation {
+                // A Mac that doesn't take them yet keeps them waiting here until it's updated.
+                guard takesConversations, let data = item.payload,
+                      let params = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return .kept }
+                _ = try await client.request(ConversationPayload.method, params, timeout: 60)
+            } else if item.tool == PendingSave.dictation {
                 var params: [String: Any] = ["id": item.id.uuidString, "text": item.text, "raw": item.raw ?? item.text,
                                              "app": item.app ?? "iPhone", "date": ISO8601DateFormatter().string(from: item.created)]
                 if let model = item.model { params["model"] = model }
@@ -262,7 +343,7 @@ final class MacConnection {
             }
             return .sent
         } catch LinkClient.Failure.rejected {
-            return item.tool == PendingSave.dictation ? .dropped : .kept
+            return item.tool == PendingSave.dictation || item.tool == PendingSave.conversation ? .dropped : .kept
         } catch {
             return .kept
         }
@@ -272,13 +353,13 @@ final class MacConnection {
     /// there's none and none has been tried for a while, it tries once more, briefly, as something is waiting on it.
     private func ready() async -> Bool {
         var wait: TimeInterval = 8
-        if client == nil, mac != nil, !connecting, state != .connecting, isActive || holdOpen, Date().timeIntervalSince(lastAttempt) > 20 {
+        if client == nil, mac != nil, !connecting, state != .connecting, isActive || isHeld, Date().timeIntervalSince(lastAttempt) > 20 {
             state = .connecting
             wait = 3
             Task { await connect() }
         }
         let deadline = Date().addingTimeInterval(wait)
-        while client == nil, mac != nil, isActive || holdOpen, connecting || state == .connecting || state == .offline("Not connected yet"),
+        while client == nil, mac != nil, isActive || isHeld, connecting || state == .connecting || state == .offline("Not connected yet"),
               Date() < deadline {
             try? await Task.sleep(for: .milliseconds(150))
         }
@@ -287,9 +368,17 @@ final class MacConnection {
 
     private func sendOutbox() async {
         for item in outbox {
-            guard await send(item) != .kept else { break }
+            // Taken out while the others went (a capture deleted on this iPhone): it doesn't go.
+            guard outbox.contains(where: { $0.id == item.id }) else { continue }
+            // Conversations wait for a Mac that takes them; everything else still goes.
+            if item.tool == PendingSave.conversation, !takesConversations { continue }
+            let result = await send(item)
+            guard result != .kept else { break }
             outbox.removeAll { $0.id == item.id }
             Outbox.save(outbox)
+            if let conversation = item.conversation, !outbox.contains(where: { $0.conversation == conversation }) {
+                if result == .sent { onConversationSent?(conversation) } else { onConversationRefused?(conversation) }
+            }
         }
     }
 
@@ -399,10 +488,10 @@ enum Cache {
     static func clear() { try? FileManager.default.removeItem(at: folder) }
 }
 
-/// A note, to-do or dictation waiting for the Mac.
+/// A note, to-do, dictation or conversation waiting for the Mac.
 struct PendingSave: Codable, Identifiable, Equatable {
     let id: UUID
-    /// add_note, add_todo, or `dictation`.
+    /// add_note, add_todo, `dictation` or `conversation`.
     let tool: String
     let text: String
     let binder: String?
@@ -411,8 +500,12 @@ struct PendingSave: Codable, Identifiable, Equatable {
     var raw: String? = nil
     var app: String? = nil
     var model: String? = nil
+    /// A conversation's id (shared by its parts), and the part itself as the JSON the Mac reads.
+    var conversation: UUID? = nil
+    var payload: Data? = nil
 
     static let dictation = "dictation"
+    static let conversation = "conversation"
 }
 
 /// The outbox, kept in a file so it survives the app being closed.
@@ -428,6 +521,13 @@ enum Outbox {
     }
 
     static func save(_ items: [PendingSave]) {
-        try? JSONEncoder().encode(items).write(to: file, options: [.atomic, .completeFileProtection])
+        // Written while the phone is locked too, when All-day capture finishes a conversation in the background.
+        var url = file
+        try? JSONEncoder().encode(items).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        // It holds what captures heard, on its way to your Mac: not for iCloud backups. An atomic write makes a new file,
+        // so it's marked again each time.
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? url.setResourceValues(values)
     }
 }

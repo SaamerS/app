@@ -33,9 +33,36 @@ Newline-delimited JSON-RPC 2.0, the same framing as `Binders --mcp`. One message
 |---|---|---|
 | `binders/pair` `{name}` | pairing port only | `{device, key, name, protocol}` (the key is base64) |
 | `binders/challenge` | first, on 7447 | `{challenge}` (base64, 32 bytes) |
-| `binders/hello` `{device, proof, name, protocol}` | after the challenge | `{name, version, protocol}` |
+| `binders/hello` `{device, proof, name, protocol}` | after the challenge | `{name, version, protocol, features}` |
 | `binders/subscribe` | after hello | `{}`; the Mac then sends `binders/changed` |
+| `binders/format` `{text}` | after hello | `{text, used_model, model}`: dictation cleaned up the way the Mac cleans its own |
+| `binders/dictation` `{id, text, raw, app, date, model?}` | after hello | `{}`; kept with the Mac's dictations, once per `id` |
+| `binders/conversation` (a conversation, below) | after hello, when `features` lists `conversation` | `{id}`; kept once per `id` |
+| `binders/suggestions` | after hello, when `features` lists `suggestions` | `{suggestions}`: cards and answers offered about the phone's conversations of the last three days |
+| `binders/suggestion` `{id, action}` | the same | `{message}`; `action` is `accept` (a card goes on its board) or `dismiss` |
 | `initialize`, `tools/list`, `tools/call` | after hello | the same tools as the MCP server (see [AUTOMATIONS.md](AUTOMATIONS.md)) |
+
+`features` lists what the Mac takes besides the tools. A client holds back what its Mac doesn't list, and sends it once the
+Mac is updated: a phone keeps All-day capture's conversations in its outbox until it sees `conversation`.
+
+### Conversations
+
+All-day capture on the iPhone transcribes and labels speakers on the phone, then sends the text. The audio never leaves the
+phone. Segment times are seconds since `started` on the wall clock; `speakers` names the labels it could
+(see [CAPTURE-ALLDAY.md](CAPTURE-ALLDAY.md)).
+
+```json
+{"id": "3A02EC85-6FEF-4AF9-9231-14713C1AEB2F", "started": "2026-10-15T14:42:00Z", "ended": "2026-10-15T14:45:10Z",
+ "device": "iPhone", "engine": "parakeet-v2", "speakers": {"Speaker 2": "You"},
+ "segments": [
+  {"id": "6F1D…", "channel": "microphone", "start": 2.0, "end": 6.1, "speaker": "Speaker 1",
+   "text": "Hey, have you got a minute? It's about the launch email."},
+  {"id": "0B7A…", "channel": "microphone", "start": 9.4, "end": 14.2, "speaker": "Speaker 2",
+   "text": "Sure. I'll send Sam the final pricing email by Friday."}]}
+```
+
+A 90-minute conversation is a few hundred kilobytes. One that would go past the 8 MB message cap is split by time into parts,
+each with an id derived from the conversation's, so a part sent again is still recognised.
 
 Notifications from the Mac: `binders/changed` `{kinds: ["notes", "todos", "meetings", "binders", "dictations", "other"]}`,
 sent whenever the database saves, grouped over a quarter of a second. A checklist lives in a note or a meeting, so a
@@ -51,4 +78,5 @@ BINDERS_DATA_DIR=$(mktemp -d) build/Build/Products/Release/Binders.app/Contents/
 ```
 
 It pairs, checks the code can't be reused, proves the device, uses the tools, hears a change, and is shut out by a wrong
-key and by removal.
+key and by removal. `--selftest-conversation` plays a phone sending the day's conversations: kept once, written up with the
+language model in Settings, filed in a binder, never shared, and small talk kept out of sight.

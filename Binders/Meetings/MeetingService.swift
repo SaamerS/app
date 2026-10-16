@@ -180,6 +180,12 @@ private final class LiveMeeting {
 @Observable
 final class MeetingService {
     static let placeholderPrefix = "Meeting · "
+    static let conversationPlaceholderPrefix = "Capture · "
+
+    /// Still the title it was given before notes were written, which the notes' own title replaces.
+    static func hasPlaceholderTitle(_ record: MeetingRecord) -> Bool {
+        record.title.hasPrefix(placeholderPrefix) || (record.isConversation && (record.title.hasPrefix(conversationPlaceholderPrefix) || record.title.hasPrefix("Conversation · ")))
+    }
 
     private(set) var recordingMeetingID: UUID?
     private(set) var liveSegments: [TranscriptSegment] = []
@@ -198,6 +204,8 @@ final class MeetingService {
     @ObservationIgnored private var promptedAt: [String: Date] = [:]
     @ObservationIgnored private var diarizer: OfflineDiarizerManager?
     @ObservationIgnored private var draining = false
+    /// Where the iPhone's conversations are written up, for the views that show them alongside meetings.
+    @ObservationIgnored weak var conversations: ConversationService?
 
     private var settings: AppSettings { AppSettings.shared }
 
@@ -484,10 +492,10 @@ final class MeetingService {
         }
     }
 
-    /// Finishes meetings left recording or half-processed by a quit or crash.
+    /// Finishes meetings left recording or half-processed by a quit or crash. Conversations have their own recovery.
     private func recoverInterruptedMeetings() {
         let descriptor = FetchDescriptor<MeetingRecord>(predicate: #Predicate { $0.status == "recording" || $0.status == "processing" })
-        let stuck = (try? Store.shared.context.fetch(descriptor)) ?? []
+        let stuck = ((try? Store.shared.context.fetch(descriptor)) ?? []).filter { !$0.isConversation }
         guard !stuck.isEmpty else { return }
         Task {
             for record in stuck where record.id != recordingMeetingID && !busyMeetingIDs.contains(record.id) {
@@ -696,14 +704,30 @@ final class MeetingService {
 
             // The notes themselves, cut off the moment the model starts repeating itself.
             activity[meetingID] = "Writing notes…"
-            let hasRealTitle = !record.title.hasPrefix(Self.placeholderPrefix)
-            let user = MeetingPrompts.summaryUserPrompt(title: hasRealTitle ? record.title : nil,
-                                                        date: record.createdAt.formatted(date: .complete, time: .shortened),
+            let date = record.createdAt.formatted(date: .complete, time: .shortened)
+            let system: String, user: String
+            if record.isConversation {
+                system = ConversationPrompts.summarySystemPrompt()
+                user = ConversationPrompts.summaryUserPrompt(date: date, duration: record.duration, transcript: transcript, partNotes: partNotes)
+            } else {
+                let hasRealTitle = !Self.hasPlaceholderTitle(record)
+                system = MeetingPrompts.summarySystemPrompt(template: template)
+                user = MeetingPrompts.summaryUserPrompt(title: hasRealTitle ? record.title : nil, date: date,
                                                         appName: record.appName, attendees: record.attendees,
                                                         userNotes: record.userNotes, transcript: transcript, partNotes: partNotes)
-            let output = try await client.stream(system: MeetingPrompts.summarySystemPrompt(template: template), user: user,
-                                                 maxTokens: 3000, temperature: 0.3, timeout: 900, stopWhen: stopWhenLooping)
+            }
+            let output = try await client.stream(system: system, user: user, maxTokens: 3000, temperature: 0.3, timeout: 900,
+                                                 stopWhen: stopWhenLooping)
             guard exists(record) else { return }
+            // A conversation with nothing worth keeping: kept out of sight for a week, in case the model got it wrong.
+            if record.isConversation, ConversationPrompts.isTrivial(output) {
+                record.status = "trivial"
+                record.speakerNames = names
+                record.errorMessage = nil
+                activity[meetingID] = nil
+                Store.shared.save()
+                return
+            }
             let parsed = SummaryParser.parse(output)
             guard !parsed.body.isEmpty else { throw LLMError.emptyResponse }
             if parsed.droppedRepeats > 0 {
@@ -712,12 +736,12 @@ final class MeetingService {
             // Rewriting the notes keeps the action items already ticked off.
             record.summary = NotesEditing.carryOverTicks(from: record.summary, into: parsed.body)
             // Keep a title the user typed while notes were being written.
-            if record.title.hasPrefix(Self.placeholderPrefix) {
+            if Self.hasPlaceholderTitle(record) {
                 if let title = parsed.title {
                     record.title = title
                 } else if let output = try? await client.complete(system: MeetingPrompts.titleSystemPrompt(), user: parsed.body,
                                                                   maxTokens: 40, temperature: 0.2, timeout: 60),
-                          let title = MeetingPrompts.cleanTitle(output), exists(record), record.title.hasPrefix(Self.placeholderPrefix) {
+                          let title = MeetingPrompts.cleanTitle(output), exists(record), Self.hasPlaceholderTitle(record) {
                     record.title = title
                 }
             }

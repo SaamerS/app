@@ -119,7 +119,7 @@ struct HomeView: View {
                     Text("Binders").font(BindersTheme.columnTitle)
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 210), spacing: 12)], spacing: 12) {
                         ForEach(binders) { binder in
-                            let mine = meetings.filter { $0.binderID == binder.id }
+                            let mine = meetings.filter { $0.binderID == binder.id && !$0.isConversation }
                             let theirs = notes.filter { $0.binderID == binder.id }
                             BinderCard(binder: binder, openCount: tasks.filter { !$0.done && $0.binderID == binder.id }.count,
                                        meetingCount: mine.count, noteCount: theirs.count,
@@ -204,7 +204,7 @@ struct HomeView: View {
     private func open(meeting: MeetingRecord) {
         navigation.binderID = meeting.binderID ?? Store.shared.defaultBinder().id
         navigation.pendingMeetingID = meeting.id
-        navigation.pendingBinderTab = .meetings
+        navigation.pendingBinderTab = .listing(meeting)
         navigation.selection = .binder
     }
 

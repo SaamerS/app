@@ -1,18 +1,27 @@
 import SwiftUI
 
+/// What an iPhone without a Mac opens on: how to pair one, and what works on this iPhone alone in the meantime.
 struct PairingView: View {
     @Environment(MacConnection.self) private var connection
+    @State private var dictating = false
+    @State private var settingUpKeyboard = false
+    @State private var capturing = false
+    @State private var capture = CaptureSession.shared
+    @State private var store = CaptureStore.shared
+    /// `-open` is honored once, so Back from what it opened stays here.
+    private static var openedForDevelopment = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
+                KeyboardMicBanner()
                 VStack(alignment: .leading, spacing: 10) {
                     Image(systemName: "laptopcomputer.and.iphone")
                         .font(.system(size: 44))
                         .foregroundStyle(.tint)
                     Text("Pair with your Mac")
                         .font(.largeTitle.bold())
-                    Text("Binders on your iPhone is a window onto Binders on your Mac: your to-dos, notes, meetings and everything you can ask. It all stays on your own devices.")
+                    Text("Pair with Binders on your Mac to have your to-dos, notes and meetings here, and to ask about them. It all stays on your own devices.")
                         .foregroundStyle(.secondary)
                 }
                 VStack(alignment: .leading, spacing: 16) {
@@ -41,9 +50,59 @@ struct PairingView: View {
                 Text("Away from home, your iPhone reaches your Mac through Tailscale, if both use it. The Mac needs to be awake.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                onThisIPhone
+                Link("Privacy Policy", destination: URL(string: "https://binders.io/privacy.html")!)
+                    .font(.footnote)
             }
             .padding(24)
         }
+        .navigationTitle("Binders")
+        .navigationBarTitleDisplayMode(.inline)
+        .navigationDestination(isPresented: $capturing) { CaptureView() }
+        .sheet(isPresented: $dictating) { DictationSheet() }
+        .sheet(isPresented: $settingUpKeyboard) { KeyboardSetupView() }
+        .onAppear(perform: openForDevelopment)
+    }
+
+    /// For development, as on the paired home: `-open capture|dictate|keyboard` opens that straight away.
+    private func openForDevelopment() {
+        #if DEBUG
+        guard !Self.openedForDevelopment else { return }
+        Self.openedForDevelopment = true
+        switch UserDefaults.standard.string(forKey: "open") {
+        case "capture": capturing = true
+        case "dictate": dictating = true
+        case "keyboard": settingUpKeyboard = true
+        default: break
+        }
+        #endif
+    }
+
+    /// Dictation, the keyboard and All-day capture all work without a Mac: what they write waits here until one is paired.
+    private var onThisIPhone: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("On this iPhone").font(.headline).accessibilityAddTraits(.isHeader)
+            Button { dictating = true } label: {
+                AloneRow(symbol: "mic.fill", title: "Dictate", detail: "Say something, then copy it or share it.")
+            }
+            .accessibilityIdentifier("aloneDictate")
+            Button { settingUpKeyboard = true } label: {
+                AloneRow(symbol: "keyboard", title: "Dictate in Any App", detail: "The Binders keyboard writes down what you say, on this iPhone.")
+            }
+            .accessibilityIdentifier("aloneKeyboard")
+            NavigationLink { CaptureView() } label: {
+                AloneRow(symbol: "waveform.and.mic", title: "All-day capture", detail: captureDetail)
+            }
+            .accessibilityIdentifier("aloneCapture")
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Whether it's on, as on the paired home.
+    private var captureDetail: String {
+        guard capture.isOn else { return "Writes your conversations down on this iPhone. Audio never leaves it." }
+        let count = store.today().count
+        return capture.status.title + (count > 0 ? " · \(count) today" : "")
     }
 
     private func step(_ number: Int, _ text: String) -> some View {
@@ -54,6 +113,34 @@ struct PairingView: View {
                 .background(Circle().fill(Color.accentColor.opacity(0.15)))
             Text(text)
         }
+    }
+}
+
+/// One thing that works without a Mac, as a tappable row.
+private struct AloneRow: View {
+    let symbol: String
+    let title: String
+    let detail: String
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Image(systemName: symbol)
+                .font(.title3)
+                .foregroundStyle(.tint)
+                .frame(width: 30)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.body.weight(.semibold)).foregroundStyle(.primary)
+                Text(detail).font(.footnote).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+            Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
+        }
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color(.secondarySystemBackground)))
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -88,6 +175,9 @@ struct MacSheet: View {
                     Button("Unpair this iPhone", role: .destructive) { confirmUnpair = true }
                 } footer: {
                     Text("Unpairing deletes this iPhone's key. To remove it on the Mac too, use Settings › iPhone there.")
+                }
+                Section {
+                    Link("Privacy Policy", destination: URL(string: "https://binders.io/privacy.html")!)
                 }
             }
             .navigationTitle("Your Mac")

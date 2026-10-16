@@ -12,6 +12,7 @@ extension KnowledgeKind {
         case .writing: "pencil.line"
         case .dictation: "waveform"
         case .command: "command"
+        case .conversation: "bubble.left.and.bubble.right"
         }
     }
 
@@ -22,6 +23,7 @@ extension KnowledgeKind {
         case .writing: "Message"
         case .dictation: "Dictation"
         case .command: "Voice command"
+        case .conversation: "Capture"
         }
     }
 }
@@ -195,7 +197,7 @@ final class KnowledgeService {
         guard AppPaths.isDemo else { return }
         await store.reset()
         await syncDocuments()
-        while let job = await store.nextEntityJob(kinds: [.meeting, .note, .writing]) {
+        while let job = await store.nextEntityJob(kinds: [.meeting, .conversation, .note, .writing]) {
             let result = byTitle[job.title] ?? byTitle.first { job.title.hasPrefix($0.key) }?.value ?? ExtractionResult()
             await store.saveEntities(job: job, result: EntityExtraction.clean(result))
         }
@@ -507,7 +509,7 @@ final class KnowledgeService {
     private func extractEntities() async {
         var learnedNames = false
         if settings.knowledgeGraph, let client = settings.makeLLMClient() {
-            while let job = await store.nextEntityJob(kinds: [.meeting, .note, .writing]) {
+            while let job = await store.nextEntityJob(kinds: [.meeting, .conversation, .note, .writing]) {
                 while isAppBusy() { try? await Task.sleep(for: .seconds(3)) }
                 let text = String(job.chunks.map(\.text).joined(separator: "\n").prefix(20_000))
                 do {
@@ -552,7 +554,8 @@ final class KnowledgeService {
             chunks += KnowledgeChunker.transcriptChunks(TranscriptFormatter.blocks(Store.shared.segments(for: meeting.id), names: meeting.speakerNames))
             guard !chunks.isEmpty else { continue }
             let author = meeting.isTeamCopy ? (meeting.teamAuthorName ?? "a teammate") : nil
-            documents.append((KnowledgeDocument(id: "meeting:\(meeting.id.uuidString)", kind: .meeting, sourceID: meeting.id.uuidString,
+            let kind: KnowledgeKind = meeting.isConversation ? .conversation : .meeting
+            documents.append((KnowledgeDocument(id: "\(kind.rawValue):\(meeting.id.uuidString)", kind: kind, sourceID: meeting.id.uuidString,
                                                 title: meeting.title, createdAt: meeting.createdAt,
                                                 contentHash: Self.hash([meeting.title] + chunks.map(\.text) + Self.authorPart(author)
                                                                        + [meeting.binderID?.uuidString ?? ""]),
@@ -620,11 +623,11 @@ enum KnowledgeNavigator {
     static func openSource(kind: KnowledgeKind, sourceID: String, text: String = "") {
         let hub = HubWindowController.shared
         switch kind {
-        case .meeting:
+        case .meeting, .conversation:
             let id = UUID(uuidString: sourceID)
             hub.navigation.pendingMeetingID = id
             hub.navigation.binderID = Store.shared.binderID(ofMeeting: id) ?? hub.navigation.binderID ?? Store.shared.defaultBinder().id
-            hub.navigation.pendingBinderTab = .meetings
+            hub.navigation.pendingBinderTab = kind == .conversation ? .conversations : .meetings
             hub.show(section: .binder)
         case .note:
             let id = UUID(uuidString: sourceID)
