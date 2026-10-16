@@ -1,3 +1,4 @@
+import AppKit
 import SwiftData
 import SwiftUI
 import BindersKit
@@ -32,7 +33,15 @@ enum LinkTargets {
         (try? Store.shared.context.fetch(FetchDescriptor<MeetingRecord>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)]))) ?? []
     }
 
+    /// What a link's target is: a note, meeting, binder or person by its whole name, or else by the page before a
+    /// "#Heading" ("Launch plan#Risks" is the note "Launch plan").
     static func resolve(_ title: String) -> Target? {
+        if let whole = find(title) { return whole }
+        let page = WikiTarget(title).page
+        return page.isEmpty || WikiLinks.key(page) == WikiLinks.key(title) ? nil : find(page)
+    }
+
+    private static func find(_ title: String) -> Target? {
         let key = WikiLinks.key(title)
         guard !key.isEmpty else { return nil }
         if let note = notes.first(where: { WikiLinks.key($0.title) == key }) { return .note(note) }
@@ -47,7 +56,18 @@ enum LinkTargets {
             keys = Set(notes.map { WikiLinks.key($0.title) } + meetings.map { WikiLinks.key($0.title) }
                        + Store.shared.binders(includeArchived: true).map { WikiLinks.key($0.name) } + entities.map { WikiLinks.key($0.name) })
         }
-        return keys.contains(WikiLinks.key(title))
+        if keys.contains(WikiLinks.key(title)) { return true }
+        let destination = WikiTarget(title)
+        // A heading in the same note is the editor's to find.
+        if destination.page.isEmpty { return true }
+        if keys.contains(WikiLinks.key(destination.page)) { return true }
+        return destination.isFile && attachment(destination.page) != nil
+    }
+
+    /// The file a link names, when it's in the attachments folder.
+    private static func attachment(_ name: String) -> URL? {
+        guard let url = Attachments.url(for: name), FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return url
     }
 
     /// Titles to offer after "[[", best first: the most recent notes and meetings when nothing's typed yet.
@@ -63,9 +83,18 @@ enum LinkTargets {
             .map(\.0)
     }
 
-    /// Opens what a link points to, in the Binders window. A link to nothing yet makes a note of that name in `binderID`.
-    /// `navigation` is the window's unless given.
+    /// Opens what a link points to, in the Binders window, at the heading or block it names. A link to a file opens the
+    /// file. A link to nothing yet makes a note of that name in `binderID`. `navigation` is the window's unless given.
     static func open(_ title: String, from binderID: UUID?, in given: HubNavigation? = nil) {
+        let destination = WikiTarget(title)
+        let whole = find(title)
+        // A place in the same note is the editor's to go to.
+        guard whole != nil || !destination.page.isEmpty else { return }
+        if whole == nil, resolve(title) == nil, destination.isFile || attachment(destination.page) != nil {
+            if let file = attachment(destination.page) { NSWorkspace.shared.open(file) } else { NSSound.beep() }
+            return
+        }
+        let place = whole == nil ? destination.place : nil
         let navigation: HubNavigation
         if let given {
             navigation = given
@@ -79,8 +108,12 @@ enum LinkTargets {
             then(navigation)
             navigation.selection = .binder
         }
-        switch resolve(title) {
-        case .note(let note): show(binder: note.binderID, tab: .notes) { $0.pendingNoteID = note.id }
+        switch whole ?? resolve(title) {
+        case .note(let note):
+            show(binder: note.binderID, tab: .notes) {
+                $0.pendingNoteID = note.id
+                $0.pendingNotePlace = place
+            }
         case .meeting(let meeting): show(binder: meeting.binderID, tab: .meetings) { $0.pendingMeetingID = meeting.id }
         case .binder(let binder): show(binder: binder.id, tab: .overview)
         case .entity(let id):
@@ -88,7 +121,7 @@ enum LinkTargets {
             navigation.selection = .knowledge
         case nil:
             let binder = Store.shared.binder(binderID) ?? Store.shared.defaultBinder()
-            let note = NoteItem(text: "# \(title.trimmingCharacters(in: .whitespaces))\n\n")
+            let note = NoteItem(text: "# \(destination.page)\n\n")
             note.binderID = binder.id
             note.sharedWithTeam = binder.sharedWithTeam
             Store.shared.insert(note)
@@ -101,6 +134,147 @@ enum LinkTargets {
     static func forEditor(in binderID: UUID?) -> NoteLinks {
         NoteLinks(suggestions: { suggestions(for: $0) }, exists: { exists($0) }, open: { open($0, from: binderID) })
     }
+
+    /// The same for the editor of a note, whose first line is its title: a new title renames the links to it.
+    /// `renamed` hears how many changed.
+    static func forNote(_ note: NoteItem, renamed: ((LinkRename) -> Void)? = nil) -> NoteLinks {
+        var links = forEditor(in: note.binderID)
+        let id = note.id
+        links.rename = { old, new, itself in
+            let rename = renameNote(id, from: old, to: new, itself: itself)
+            if let rename, rename.links > 0 { renamed?(rename) }
+            return rename
+        }
+        return links
+    }
+
+    // MARK: Renaming
+
+    /// Points the links to a note that was `old` and is now `new` at its new title, everywhere else; with `itself`, in
+    /// the note too, which its open editor otherwise does. Nil when the note isn't called `new` (it has gone, say).
+    @discardableResult
+    static func renameNote(_ id: UUID, from old: String, to new: String, itself: Bool) -> LinkRename? {
+        guard let note = Store.shared.note(id), WikiLinks.key(note.title) == WikiLinks.key(new) else { return nil }
+        return renameLinks(from: old, to: new, except: itself ? nil : id)
+    }
+
+    /// Points every link to `old`, something just renamed, at `new`: in notes, in your meetings' notes and summaries,
+    /// and on cards. Nothing changes while something else still goes by `old`, as the links may be to that. Nil when
+    /// nothing should change; otherwise what did, which `undo(_:)` puts back.
+    @discardableResult
+    static func renameLinks(from old: String, to new: String, except: UUID? = nil) -> LinkRename? {
+        let old = old.trimmingCharacters(in: .whitespaces), new = new.trimmingCharacters(in: .whitespaces)
+        guard WikiLinks.key(old) != WikiLinks.key(new), WikiLinks.canLink(old), WikiLinks.canLink(new),
+              ![old, new].contains("Untitled note") else { return nil }
+        keysBuilt = .distantPast
+        guard find(old) == nil else { return nil }
+        // Typing not yet handed to its note would be lost when the note changes under it.
+        MarkdownEditor.flushAll()
+        var rename = LinkRename(old: old, new: new)
+        func rewrite(_ kind: LinkRename.Kind, _ id: UUID, _ text: String, _ set: (String) -> Void) {
+            guard let renamed = WikiLinks.renaming(from: old, to: new, in: text) else { return }
+            rename.changes.append(.init(kind: kind, id: id, before: text, after: renamed.text))
+            rename.links += renamed.links
+            set(renamed.text)
+        }
+        for note in notes where note.id != except {
+            rewrite(.note, note.id, note.text) { text in
+                NoteHistory.willChange(note, to: text, always: true)
+                note.text = text
+            }
+        }
+        for meeting in meetings where !meeting.isTeamCopy {
+            rewrite(.meetingNotes, meeting.id, meeting.userNotes) { meeting.userNotes = $0 }
+            rewrite(.meetingSummary, meeting.id, meeting.summary) { meeting.summary = $0 }
+        }
+        for card in (try? Store.shared.context.fetch(FetchDescriptor<TaskCard>())) ?? [] {
+            rewrite(.card, card.id, card.details) { card.details = $0 }
+        }
+        if !rename.changes.isEmpty { Store.shared.save() }
+        return rename
+    }
+
+    /// Takes a rename's links back to the old name, or with `redo` to the new one again. Text changed since is left as it is.
+    static func undo(_ rename: LinkRename, redo: Bool = false) {
+        MarkdownEditor.flushAll()
+        let context = Store.shared.context
+        for change in rename.changes {
+            let (from, to) = redo ? (change.before, change.after) : (change.after, change.before)
+            let id = change.id
+            switch change.kind {
+            case .note:
+                guard let note = Store.shared.note(id), note.text == from else { continue }
+                note.text = to
+            case .meetingNotes, .meetingSummary:
+                guard let meeting = try? context.fetch(FetchDescriptor<MeetingRecord>(predicate: #Predicate { $0.id == id })).first else { continue }
+                if change.kind == .meetingNotes, meeting.userNotes == from { meeting.userNotes = to }
+                if change.kind == .meetingSummary, meeting.summary == from { meeting.summary = to }
+            case .card:
+                guard let card = try? context.fetch(FetchDescriptor<TaskCard>(predicate: #Predicate { $0.id == id })).first, card.details == from else { continue }
+                card.details = to
+            }
+        }
+        keysBuilt = .distantPast
+        Store.shared.save()
+    }
+}
+
+/// The links a rename pointed at the new name, to say how many and to undo.
+struct LinkRename {
+    enum Kind { case note, meetingNotes, meetingSummary, card }
+
+    struct Change {
+        let kind: Kind
+        let id: UUID
+        let before: String
+        let after: String
+    }
+
+    let old: String
+    let new: String
+    var changes: [Change] = []
+    var links = 0
+
+    /// "Updated 3 links in 2 notes and 1 meeting".
+    var summary: String { "Updated " + counted }
+
+    /// "3 links in 2 notes and 1 meeting".
+    var counted: String {
+        func count(_ n: Int, _ one: String, _ many: String) -> String { n == 1 ? "1 \(one)" : "\(n) \(many)" }
+        let notes = Set(changes.filter { $0.kind == .note }.map(\.id)).count
+        let meetings = Set(changes.filter { $0.kind == .meetingNotes || $0.kind == .meetingSummary }.map(\.id)).count
+        let cards = Set(changes.filter { $0.kind == .card }.map(\.id)).count
+        let places = [notes > 0 ? count(notes, "note", "notes") : nil, meetings > 0 ? count(meetings, "meeting", "meetings") : nil,
+                      cards > 0 ? count(cards, "card", "cards") : nil].compactMap { $0 }
+        let listed = places.count > 1 ? places.dropLast().joined(separator: ", ") + " and " + places.last! : places.first ?? "this note"
+        return "\(count(links, "link", "links")) in \(listed)"
+    }
+}
+
+/// A name typed into a field renames the links to it once the field is done with: on Return, or when it loses focus.
+private struct RenamesLinks: ViewModifier {
+    let name: String
+    @FocusState private var focused: Bool
+    @State private var before: String?
+
+    func body(content: Content) -> some View {
+        content
+            .focused($focused)
+            .onChange(of: focused) { _, focused in
+                if focused { before = name } else { commit() }
+            }
+            .onSubmit(commit)
+    }
+
+    private func commit() {
+        if let before { LinkTargets.renameLinks(from: before, to: name) }
+        before = focused ? name : nil
+    }
+}
+
+extension View {
+    /// Renaming what this field names (a meeting's title, say) renames the links to it.
+    func renamesLinks(of name: String) -> some View { modifier(RenamesLinks(name: name)) }
 }
 
 /// Where a title is linked or named in each note and meeting, looked for again only when the text or the title changes:
@@ -117,7 +291,7 @@ private enum MentionCache {
         if let known = found[key], known.hash == hash { return known.hit }
         let wanted = WikiLinks.key(title)
         let hit: (linked: Bool, range: NSRange)?
-        if let link = WikiLinks.links(in: text).first(where: { WikiLinks.key($0.target) == wanted }) {
+        if let link = WikiLinks.links(in: text).first(where: { WikiLinks.links($0, to: wanted) }) {
             hit = (true, link.range)
         } else if let range = WikiLinks.plainMention(of: title, in: text) {
             hit = (false, range)

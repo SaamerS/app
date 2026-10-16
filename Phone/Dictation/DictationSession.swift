@@ -113,6 +113,7 @@ final class DictationSession {
         text = raw
         (text, cleanedBy) = await Self.cleanUp(raw, connection: connection)
         phase = .done
+        await connection.keepDictation(text, heard: raw, app: "Binders on iPhone")
     }
 
     /// The best engine this iPhone has, once it's allowed to use it.

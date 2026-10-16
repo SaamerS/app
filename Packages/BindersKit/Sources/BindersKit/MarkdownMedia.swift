@@ -22,6 +22,19 @@ public enum MarkdownMedia {
     public static let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "heic", "heif", "webp", "tif", "tiff", "bmp"]
     public static let videoExtensions: Set<String> = ["mov", "mp4", "m4v"]
 
+    /// Other files people keep with notes. A link to one opens the file, and never makes a note of that name.
+    static let fileExtensions: Set<String> = [
+        "pdf", "txt", "rtf", "csv", "json", "html", "svg", "zip", "epub", "canvas",
+        "doc", "docx", "xls", "xlsx", "ppt", "pptx", "pages", "numbers", "key",
+        "m4a", "mp3", "wav", "aac", "aiff", "flac", "ogg", "opus", "webm", "mkv", "avi",
+    ]
+
+    /// Whether `name` is a file, like "report.pdf" or "photo.png", by its extension.
+    public static func isFile(_ name: String) -> Bool {
+        let ext = (name as NSString).pathExtension.lowercased()
+        return kind(of: name) != .other || fileExtensions.contains(ext)
+    }
+
     public static func kind(of source: String) -> Kind {
         let path = source.split(separator: "?").first.map(String.init) ?? source
         let ext = (path as NSString).pathExtension.lowercased()

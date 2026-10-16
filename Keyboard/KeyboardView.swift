@@ -1,3 +1,4 @@
+import BindersKit
 import SwiftUI
 import UIKit
 
@@ -31,11 +32,15 @@ private struct Strip: View {
                 Button { model.controller?.undoTapped() } label: { Label("Undo", systemImage: "arrow.uturn.backward") }
                     .font(.callout)
             }
-            Text(message)
-                .font(.caption)
-                .foregroundStyle(model.state.phase == .failed ? .orange : .secondary)
-                .lineLimit(2)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            if model.note == nil, model.state.phase != .failed, !model.suggestions.isEmpty {
+                Suggestions(model: model)
+            } else {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(model.state.phase == .failed ? .orange : .secondary)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             Button {
                 UIDevice.current.playInputClick()
                 model.controller?.micTapped()
@@ -61,6 +66,35 @@ private struct Strip: View {
         case .done, .ready: return model.undoable == nil ? "Tap the mic to dictate" : "Typed"
         default: return "Tap the mic to dictate"
         }
+    }
+}
+
+/// Up to three words to tap: the word as typed (in quotes, when it's about to be corrected), the correction in bold, or
+/// ways to finish the word.
+private struct Suggestions: View {
+    let model: KeyboardModel
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(Array(model.suggestions.enumerated()), id: \.element) { index, suggestion in
+                if index > 0 { Divider().frame(height: 22) }
+                Button { model.controller?.choose(suggestion) } label: {
+                    Text(suggestion.isTyped ? "“\(suggestion.text)”" : suggestion.text)
+                        .font(.system(size: 16, weight: suggestion.isCorrection ? .semibold : .regular))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(suggestion.isCorrection ? KeyStyle.letter.fill : .clear))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.primary)
+                .accessibilityLabel(suggestion.isTyped ? "Keep \(suggestion.text)" : suggestion.text)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 6)
     }
 }
 
@@ -167,7 +201,7 @@ private struct TypingKeys: View {
                         Spacer(minLength: 0)
                         row(Self.letters[2], unit: unit, height: height)
                         Spacer(minLength: 0)
-                        DeleteKey(width: unit * 1.5, height: height) { model.controller?.deleteBackward() }
+                        DeleteKey(width: unit * 1.5, height: height) { model.controller?.deleteBackward($0) }
                     }
                 case .numbers, .symbols:
                     let rows = model.layer == .numbers ? Self.numbers : Self.symbols
@@ -182,7 +216,7 @@ private struct TypingKeys: View {
                             Key(title: key, style: .letter, width: unit * 1.4, height: height) { model.controller?.typeKey(key) }
                         }
                         Spacer(minLength: 0)
-                        DeleteKey(width: unit * 1.5, height: height) { model.controller?.deleteBackward() }
+                        DeleteKey(width: unit * 1.5, height: height) { model.controller?.deleteBackward($0) }
                     }
                 }
                 bottomRow(unit: unit, height: height)
@@ -301,41 +335,68 @@ private struct KeyPress: ButtonStyle {
     }
 }
 
-/// Deletes once on touch, then keeps deleting while held.
+/// Deletes once on touch, then keeps deleting while held: faster the longer it's held, then a word at a time.
 private struct DeleteKey: View {
     let width: CGFloat
     let height: CGFloat
-    let action: () -> Void
-    @State private var repeating: Timer?
+    let action: (KeyboardTyping.DeleteUnit) -> Void
+    /// Resets however the touch ends, cancelled included, so it never keeps deleting by itself.
+    @GestureState private var held = false
+    @State private var repeater = DeleteRepeater()
 
     var body: some View {
         Image(systemName: "delete.left")
             .font(.system(size: 18))
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill((repeating == nil ? KeyStyle.function : KeyStyle.letter).fill)
+                .fill((held ? KeyStyle.letter : KeyStyle.function).fill)
                 .shadow(color: .black.opacity(0.3), radius: 0, x: 0, y: 1))
             .padding(.horizontal, 3)
             .padding(.vertical, 5.5)
             .frame(width: width, height: height)
             .contentShape(Rectangle())
-            .gesture(DragGesture(minimumDistance: 0)
-                .onChanged { _ in
-                    guard repeating == nil else { return }
+            .gesture(DragGesture(minimumDistance: 0).updating($held) { _, held, _ in held = true })
+            .onChange(of: held) { _, held in
+                if held {
                     UIDevice.current.playInputClick()
-                    action()
-                    repeating = Timer.scheduledTimer(withTimeInterval: 0.45, repeats: false) { _ in
-                        MainActor.assumeIsolated {
-                            repeating = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { _ in MainActor.assumeIsolated { action() } }
-                        }
-                    }
+                    action(.character)
+                    repeater.start(action)
+                } else {
+                    repeater.stop()
                 }
-                .onEnded { _ in
-                    repeating?.invalidate()
-                    repeating = nil
-                })
+            }
+            .onDisappear { repeater.stop() }
             .accessibilityLabel("Delete")
             .accessibilityAddTraits(.isButton)
-            .accessibilityAction { action() }
+            .accessibilityAction { action(.character) }
+    }
+}
+
+/// The steps of a held delete key, on the schedule in `KeyboardTyping.deleteStep`.
+@MainActor
+private final class DeleteRepeater {
+    private var timer: Timer?
+    private var started = Date()
+
+    func start(_ action: @escaping (KeyboardTyping.DeleteUnit) -> Void) {
+        stop()
+        started = Date()
+        schedule(after: KeyboardTyping.repeatDelay, action)
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    private func schedule(after delay: TimeInterval, _ action: @escaping (KeyboardTyping.DeleteUnit) -> Void) {
+        timer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.timer != nil else { return }
+                let step = KeyboardTyping.deleteStep(held: Date().timeIntervalSince(self.started))
+                action(step.unit)
+                self.schedule(after: step.next, action)
+            }
+        }
     }
 }

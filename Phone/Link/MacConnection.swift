@@ -42,8 +42,15 @@ final class MacConnection {
     @ObservationIgnored private let browser = MacBrowser()
     @ObservationIgnored var isActive = true
     /// Stay connected in the background, while the microphone is on for the keyboard, so its dictations are cleaned up by
-    /// the Mac.
-    @ObservationIgnored var holdOpen = false
+    /// the Mac. Turned on after the app had let go in the background, it connects again.
+    @ObservationIgnored var holdOpen = false {
+        didSet {
+            guard holdOpen, !oldValue, client == nil, mac != nil else { return }
+            isActive = true
+            Task { await connect() }
+        }
+    }
+    @ObservationIgnored private var lastAttempt = Date.distantPast
 
     init() {
         mac = Self.loadMac()
@@ -99,6 +106,7 @@ final class MacConnection {
             return
         }
         connecting = true
+        lastAttempt = Date()
         defer { connecting = false }
         retry?.cancel()
         state = .connecting
@@ -210,18 +218,67 @@ final class MacConnection {
     /// went straight to the Mac.
     @discardableResult
     func save(_ tool: String, text: String, binder: String?) async -> Bool {
-        var arguments: [String: Any] = ["text": text]
-        if let binder { arguments["binder"] = binder }
-        if await ready(), (try? await call(tool, arguments)) != nil { return true }
-        outbox.append(PendingSave(id: UUID(), tool: tool, text: text, binder: binder, created: Date()))
+        await deliver(PendingSave(id: UUID(), tool: tool, text: text, binder: binder, created: Date()))
+    }
+
+    /// Keeps a dictation made on this iPhone with the Mac's own, in its history and its search: now, or once the Mac is
+    /// back. `app` says where it was made.
+    @discardableResult
+    func keepDictation(_ text: String, heard raw: String, app: String) async -> Bool {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return true }
+        return await deliver(PendingSave(id: UUID(), tool: PendingSave.dictation, text: text, binder: nil, created: Date(), raw: raw, app: app))
+    }
+
+    /// Sends it, or keeps it in the outbox. True when it went straight to the Mac.
+    private func deliver(_ item: PendingSave) async -> Bool {
+        if await ready() {
+            switch await send(item) {
+            case .sent: return true
+            case .dropped: return false
+            case .kept: break
+            }
+        }
+        outbox.append(item)
         Outbox.save(outbox)
         return false
     }
 
-    /// Connected, or soon: waits a few seconds for a connection that's on its way, as when the app has just opened.
+    private enum Sent { case sent, kept, dropped }
+
+    /// One item to the Mac. A Mac too old to take it says no, and the item goes; a lost connection keeps it for later.
+    private func send(_ item: PendingSave) async -> Sent {
+        guard let client else { return .kept }
+        do {
+            if item.tool == PendingSave.dictation {
+                var params: [String: Any] = ["id": item.id.uuidString, "text": item.text, "raw": item.raw ?? item.text,
+                                             "app": item.app ?? "iPhone", "date": ISO8601DateFormatter().string(from: item.created)]
+                if let model = item.model { params["model"] = model }
+                _ = try await client.request("binders/dictation", params, timeout: 15)
+            } else {
+                var arguments: [String: Any] = ["text": item.text]
+                if let binder = item.binder { arguments["binder"] = binder }
+                _ = try await client.callTool(item.tool, arguments)
+            }
+            return .sent
+        } catch LinkClient.Failure.rejected {
+            return item.tool == PendingSave.dictation ? .dropped : .kept
+        } catch {
+            return .kept
+        }
+    }
+
+    /// Connected, or soon: waits a few seconds for a connection that's on its way, as when the app has just opened. When
+    /// there's none and none has been tried for a while, it tries once more, briefly, as something is waiting on it.
     private func ready() async -> Bool {
-        let deadline = Date().addingTimeInterval(8)
-        while client == nil, mac != nil, isActive, connecting || state == .connecting || state == .offline("Not connected yet"),
+        var wait: TimeInterval = 8
+        if client == nil, mac != nil, !connecting, state != .connecting, isActive || holdOpen, Date().timeIntervalSince(lastAttempt) > 20 {
+            state = .connecting
+            wait = 3
+            Task { await connect() }
+        }
+        let deadline = Date().addingTimeInterval(wait)
+        while client == nil, mac != nil, isActive || holdOpen, connecting || state == .connecting || state == .offline("Not connected yet"),
               Date() < deadline {
             try? await Task.sleep(for: .milliseconds(150))
         }
@@ -230,9 +287,7 @@ final class MacConnection {
 
     private func sendOutbox() async {
         for item in outbox {
-            var arguments: [String: Any] = ["text": item.text]
-            if let binder = item.binder { arguments["binder"] = binder }
-            guard (try? await call(item.tool, arguments)) != nil else { break }
+            guard await send(item) != .kept else { break }
             outbox.removeAll { $0.id == item.id }
             Outbox.save(outbox)
         }
@@ -344,13 +399,20 @@ enum Cache {
     static func clear() { try? FileManager.default.removeItem(at: folder) }
 }
 
-/// A note or to-do waiting for the Mac.
+/// A note, to-do or dictation waiting for the Mac.
 struct PendingSave: Codable, Identifiable, Equatable {
     let id: UUID
+    /// add_note, add_todo, or `dictation`.
     let tool: String
     let text: String
     let binder: String?
     let created: Date
+    /// A dictation's words as heard, before cleanup, and where it was made.
+    var raw: String? = nil
+    var app: String? = nil
+    var model: String? = nil
+
+    static let dictation = "dictation"
 }
 
 /// The outbox, kept in a file so it survives the app being closed.

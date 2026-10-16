@@ -78,7 +78,7 @@ private struct ScratchpadView: View {
     var body: some View {
         VStack(spacing: 0) {
             MarkdownNoteEditor(text: $note.text, fontSize: 14, placeholder: "Hold fn and talk, or type.",
-                               inset: NSSize(width: 12, height: 10), compactToolbar: true, links: LinkTargets.forEditor(in: note.binderID))
+                               inset: NSSize(width: 12, height: 10), compactToolbar: true, links: LinkTargets.forNote(note))
                 .padding(.top, 26)
                 .onChange(of: note.text) { previous, _ in
                     note.updatedAt = Date()

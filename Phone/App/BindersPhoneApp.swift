@@ -12,6 +12,8 @@ struct BindersPhoneApp: App {
                 .onOpenURL { url in
                     // The Binders keyboard opens binders://keyboard to have the app listen for it.
                     if url == KeyboardBridge.listenURL {
+                        // Opened cold by the keyboard, this can come before .task.
+                        KeyboardListener.shared.connection = connection
                         KeyboardListeningWindow.show()
                         Task { await KeyboardListener.shared.listen() }
                     } else {

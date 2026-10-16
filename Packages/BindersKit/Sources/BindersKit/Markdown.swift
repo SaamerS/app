@@ -118,6 +118,26 @@ public enum MarkdownSyntax {
             .split(separator: " ").first.map { String($0).lowercased() } ?? ""
     }
 
+    /// Where `text` is code: fenced blocks, fences included, and `inline code`.
+    static func codeRanges(in text: String) -> [NSRange] {
+        let string = text as NSString
+        var code: [NSRange] = []
+        var inFence = false
+        string.enumerateSubstrings(in: NSRange(location: 0, length: string.length), options: [.byLines, .substringNotRequired]) { _, line, _, _ in
+            let fence = isFence(string, line: line)
+            if fence || inFence { code.append(line) }
+            if fence { inFence.toggle() }
+        }
+        return code + inlineCodePattern.matches(in: text, range: NSRange(location: 0, length: string.length)).map(\.range)
+    }
+
+    private static let inlineCodePattern = try! NSRegularExpression(pattern: "`[^`\n]*`")
+
+    /// A note's title: its first line as `plainTitle(_:)` gives it, at most 80 characters. Empty when there's none.
+    public static func noteTitle(_ text: String) -> String {
+        String(plainTitle(text.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? "").prefix(80))
+    }
+
     /// The same as `isFence(_:)`, without making a string of the line.
     static func isFence(_ string: NSString, line: NSRange) -> Bool {
         var index = line.location

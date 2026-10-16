@@ -319,6 +319,8 @@ struct NotesView: View {
     @State private var selection: UUID?
     /// A note just made, whose editor takes the cursor.
     @State private var focusID: UUID?
+    /// A heading or block to show in a note, from a link to it.
+    @State private var reveal: (note: UUID, place: EditorReveal)?
     @State private var noteToDelete: NoteItem?
     /// Show only notes with this status, or this #tag.
     @State private var statusFilter: String?
@@ -379,6 +381,8 @@ struct NotesView: View {
         guard let pending = navigation.pendingNoteID else { return }
         if navigation.pendingNoteIsNew { focusID = pending }
         navigation.pendingNoteIsNew = false
+        reveal = navigation.pendingNotePlace.map { (pending, EditorReveal(place: $0)) }
+        navigation.pendingNotePlace = nil
         selection = pending
         navigation.pendingNoteID = nil
     }
@@ -506,7 +510,9 @@ struct NotesView: View {
             Divider()
             if let note = notes.first(where: { $0.id == selection }) {
                 // A fresh editor per note: reusing one would take the switch for an edit and move the note to the top.
-                NoteEditor(note: note, focused: note.id == focusID) { selection = neighbour(of: note)?.id }
+                NoteEditor(note: note, focused: note.id == focusID, reveal: reveal?.note == note.id ? reveal?.place : nil) {
+                    selection = neighbour(of: note)?.id
+                }
                     .id(note.id)
             } else {
                 ContentUnavailableView("Select a note", systemImage: "note.text",
@@ -642,6 +648,8 @@ struct NoteEditor: View {
     @Bindable var note: NoteItem
     /// Just made: the editor takes the cursor.
     var focused = false
+    /// A heading or block to show, from a link to it.
+    var reveal: EditorReveal? = nil
     var onDelete: () -> Void
     @State private var confirmDelete = false
     @State private var showingHistory = false
@@ -649,6 +657,8 @@ struct NoteEditor: View {
     @AppStorage("notesShowDigest") private var digestVisible = true
     @AppStorage("notesDigestWidth") private var digestWidth: Double = 300
     @State private var digestCopied = false
+    /// "Updated 3 links in 2 notes", for a moment after a new title.
+    @State private var renameNotice: String?
 
     private var digesting: Bool { knowledge.digestingNoteIDs.contains(note.id) }
     private var digestStale: Bool { !note.digest.isEmpty && note.digestHash != KnowledgeService.noteContentHash(note.text) }
@@ -665,7 +675,7 @@ struct NoteEditor: View {
             }
             HStack(spacing: 0) {
                 MarkdownNoteEditor(text: $note.text, fontSize: 15, placeholder: "Write, or hold fn to dictate.",
-                                   links: LinkTargets.forEditor(in: note.binderID), focused: focused, accessories: AnyView(noteButtons))
+                                   links: LinkTargets.forNote(note) { renamed($0) }, focused: focused, reveal: reveal, accessories: AnyView(noteButtons))
                     .onChange(of: note.text) { previous, _ in
                         note.updatedAt = Date()
                         NoteHistory.changed(note.id, previous: previous)
@@ -679,6 +689,14 @@ struct NoteEditor: View {
             }
             HStack {
                 Text("\(note.text.wordCount) words").font(.caption).foregroundStyle(.secondary)
+                if let renameNotice {
+                    Label(renameNotice, systemImage: "link")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 8)
+                        .transition(.opacity)
+                        .help("They follow the note's new title. Undo, with the cursor in the note, puts them back.")
+                }
                 if !note.isTeamCopy, let binder = Store.shared.binder(note.binderID) {
                     Menu {
                         MoveToBinderItems(current: note.binderID) { target in
@@ -713,6 +731,17 @@ struct NoteEditor: View {
         .sheet(isPresented: $showingHistory) { NoteHistorySheet(note: note) }
         .confirmationDialog("Delete this note for everyone on the team?", isPresented: $confirmDelete) {
             Button("Delete for Everyone", role: .destructive, action: delete)
+        }
+    }
+
+    /// Says how many links a new title changed, for a few seconds.
+    private func renamed(_ rename: LinkRename) {
+        let notice = rename.summary
+        DispatchQueue.main.async {
+            withAnimation { renameNotice = notice }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
+                if renameNotice == notice { withAnimation { renameNotice = nil } }
+            }
         }
     }
 

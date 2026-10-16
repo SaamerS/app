@@ -30,18 +30,15 @@ final class MarkdownEditorModel {
 
     /// Puts the cursor at a heading and scrolls it to the top.
     func jump(to location: Int) {
-        guard let textView, let layout = textView.layoutManager, let container = textView.textContainer else { return }
-        let length = (textView.string as NSString).length
-        let place = NSRange(location: min(location, length), length: 0)
-        textView.window?.makeFirstResponder(textView)
-        textView.setSelectedRange(place)
-        let glyphs = layout.glyphRange(forCharacterRange: NSRange(location: place.location, length: min(1, length - place.location)), actualCharacterRange: nil)
-        let rect = layout.boundingRect(forGlyphRange: glyphs, in: container)
-        if let scroll = textView.enclosingScrollView {
-            scroll.contentView.scroll(to: NSPoint(x: 0, y: max(0, rect.minY + textView.textContainerOrigin.y - 12)))
-            scroll.reflectScrolledClipView(scroll.contentView)
-        }
+        textView?.jump(to: location)
     }
+}
+
+/// A place to show as a note opens: a heading, or "^" and a block's id, that a link points at. Each is new, so following
+/// the same link twice goes there twice.
+struct EditorReveal: Equatable {
+    let place: String
+    let id = UUID()
 }
 
 /// What a note's [[links]] reach: the titles to suggest after "[[" for what's been typed, whether a title exists, and
@@ -50,6 +47,9 @@ struct NoteLinks {
     var suggestions: (String) -> [String]
     var exists: (String) -> Bool
     var open: (String) -> Void
+    /// For a note, whose first line is its title: points the links to its old title at the new one, and in the note too
+    /// when told (its editor is going away). Nil when nothing should change.
+    var rename: ((_ old: String, _ new: String, _ itself: Bool) -> LinkRename?)? = nil
 }
 
 /// The editor with its formatting toolbar above it.
@@ -63,6 +63,8 @@ struct MarkdownNoteEditor: View {
     var links: NoteLinks? = nil
     /// Takes the cursor as it appears: a note just made, ready to be typed in.
     var focused = false
+    /// A heading or block to go to, from a link to it.
+    var reveal: EditorReveal? = nil
     /// Buttons for the note as a whole, at the right end of the toolbar: its panels, popping it out.
     var accessories: AnyView? = nil
     @State private var model = MarkdownEditorModel()
@@ -77,7 +79,7 @@ struct MarkdownNoteEditor: View {
                             accessories: accessories)
             Divider().opacity(0.5)
             MarkdownEditor(text: $text, model: model, fontSize: (fontSize * (zoom == 0 ? 1 : zoom)).rounded(), placeholder: placeholder, inset: inset,
-                           showsMarkup: showsMarkup, links: links, focused: focused)
+                           showsMarkup: showsMarkup, links: links, focused: focused, reveal: reveal)
         }
     }
 }
@@ -174,6 +176,7 @@ struct MarkdownEditor: NSViewRepresentable {
     var showsMarkup = false
     var links: NoteLinks? = nil
     var focused = false
+    var reveal: EditorReveal? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -220,11 +223,16 @@ struct MarkdownEditor: NSViewRepresentable {
         textView.typingAttributes = textView.styler.baseAttributes
         storage.delegate = textView
         textView.string = text
+        textView.settledTitle = MarkdownSyntax.noteTitle(text)
         textView.restyle()
         model.textView = textView
         context.coordinator.textView = textView
         context.coordinator.known = text
         if focused { Self.focus(textView) }
+        if let reveal {
+            context.coordinator.revealed = reveal.id
+            Self.go(textView, to: reveal.place)
+        }
 
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
@@ -241,6 +249,10 @@ struct MarkdownEditor: NSViewRepresentable {
         textView.links = links
         textView.styler.linkExists = links?.exists
         textView.showsMarkup = showsMarkup
+        if let reveal, reveal.id != context.coordinator.revealed {
+            context.coordinator.revealed = reveal.id
+            Self.go(textView, to: reveal.place)
+        }
         // Zoomed: everything restyled at the new size.
         if textView.styler.fontSize != fontSize {
             var styler = MarkdownStyler(fontSize: fontSize)
@@ -259,6 +271,7 @@ struct MarkdownEditor: NSViewRepresentable {
         if textView.string != text {
             let selection = textView.selectedRange()
             textView.string = text
+            textView.settledTitle = MarkdownSyntax.noteTitle(text)
             // What was there to undo was typed into other text; undone now, it would land in the wrong places.
             textView.ownUndoManager.removeAllActions()
             textView.restyle()
@@ -283,7 +296,20 @@ struct MarkdownEditor: NSViewRepresentable {
         }
     }
 
+    /// Goes to a heading or block once the editor is in its window and laid out.
+    private static func go(_ textView: MarkdownTextView, to place: String, tries: Int = 20) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak textView] in
+            guard let textView else { return }
+            guard textView.window != nil else {
+                if tries > 0 { go(textView, to: place, tries: tries - 1) }
+                return
+            }
+            textView.reveal(place)
+        }
+    }
+
     static func dismantleNSView(_ scroll: NSScrollView, coordinator: Coordinator) {
+        (scroll.documentView as? MarkdownTextView)?.settleTitle(closing: .later)
         coordinator.flush()
         (scroll.documentView as? MarkdownTextView)?.ownUndoManager.removeAllActions()
     }
@@ -304,6 +330,8 @@ struct MarkdownEditor: NSViewRepresentable {
         /// The note's text as this editor last saw it, written by the editor or from elsewhere.
         var known = ""
         var isEditing = false
+        /// The last place shown from a link, so it's gone to once.
+        var revealed: UUID?
         private var pending: DispatchWorkItem?
         private var observers: [NSObjectProtocol] = []
 
@@ -319,6 +347,10 @@ struct MarkdownEditor: NSViewRepresentable {
                     MainActor.assumeIsolated {
                         guard let self else { return }
                         if notification.name == NSWindow.willCloseNotification, (notification.object as? NSWindow) !== self.textView?.window { return }
+                        // Closing or quitting with a new title: the links follow it now, as there's no later.
+                        if [NSWindow.willCloseNotification, NSApplication.willTerminateNotification].contains(notification.name) {
+                            self.textView?.settleTitle(closing: .now)
+                        }
                         self.flush()
                     }
                 })
@@ -506,9 +538,13 @@ struct MarkdownStyler {
                                        .backgroundColor: NSColor.controlAccentColor.withAlphaComponent(0.1)], range: target)
             case .wikiLink(let title):
                 let found = linkExists?(title) ?? true
+                let destination = WikiTarget(title)
+                let tip = destination.page.isEmpty ? "Click to go to \(destination.heading ?? "this block")"
+                    : found ? "Click to open \(title)"
+                    : destination.isFile ? "\(destination.page) isn't in this Mac's attachments"
+                    : "Click to make a note called “\(destination.page)”"
                 storage.addAttributes([.foregroundColor: found ? NSColor.controlAccentColor : NSColor.controlAccentColor.withAlphaComponent(0.55),
-                                       .markdownWikiLink: title, .cursor: NSCursor.pointingHand,
-                                       .toolTip: found ? "Click to open \(title)" : "Click to make a note called “\(title)”"], range: target)
+                                       .markdownWikiLink: title, .cursor: NSCursor.pointingHand, .toolTip: tip], range: target)
             default:
                 break
             }
@@ -753,6 +789,12 @@ final class MarkdownTextView: NSTextView, NSTextStorageDelegate, NSLayoutManager
         super.setSelectedRanges(ranges, affinity: affinity, stillSelecting: stillSelecting)
         updateRevealed()
         if slashMenu != nil { updateSlashMenu() }
+        if !stillSelecting, links?.rename != nil, !inTitle, MarkdownSyntax.noteTitle(string) != settledTitle {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.inTitle else { return }
+                self.settleTitle()
+            }
+        }
     }
 
     override func becomeFirstResponder() -> Bool {
@@ -766,6 +808,7 @@ final class MarkdownTextView: NSTextView, NSTextStorageDelegate, NSLayoutManager
         if resigned {
             updateRevealed(focused: false)
             closeSlashMenu()
+            if links?.rename != nil { DispatchQueue.main.async { [weak self] in self?.settleTitle() } }
         }
         return resigned
     }
@@ -1009,16 +1052,106 @@ final class MarkdownTextView: NSTextView, NSTextStorageDelegate, NSLayoutManager
         return true
     }
 
+    // MARK: Renaming
+
+    /// The note's title as it was when it opened or came in from elsewhere, or last renamed the links to it. Once the
+    /// cursor leaves the first line with another title there, those links go to the new one.
+    var settledTitle = ""
+    private var renamingLinks = false
+
+    /// Whether the cursor is on the first line, the title.
+    private var inTitle: Bool {
+        let string = self.string as NSString
+        let line = string.lineRange(for: NSRange(location: 0, length: 0))
+        let end = NSMaxRange(line) - (line.length > 0 && string.character(at: NSMaxRange(line) - 1) == 0x0A ? 1 : 0)
+        return selectedRange().location <= end
+    }
+
+    enum Closing { case now, later }
+
+    /// Points the links to the old title at the new one, if the title has changed since it last settled. Undo puts them
+    /// back. An editor `closing` can't keep an undo: the note's own links change in the note, now or once it has gone.
+    func settleTitle(closing: Closing? = nil) {
+        guard let rename = links?.rename, !hasMarkedText() else { return }
+        let old = settledTitle, title = MarkdownSyntax.noteTitle(string)
+        // A cleared title (or one a link can't hold) isn't a rename yet; the next one is, from the last.
+        guard title != old, WikiLinks.canLink(title) else { return }
+        settledTitle = title
+        guard !old.isEmpty, WikiLinks.key(old) != WikiLinks.key(title) else { return }
+        (delegate as? MarkdownEditor.Coordinator)?.flush()
+        switch closing {
+        case .now: _ = rename(old, title, true)
+        case .later: DispatchQueue.main.async { _ = rename(old, title, true) }
+        case nil:
+            guard let renamed = rename(old, title, false) else { return }
+            // Its own links, as an edit, so the one undo takes everything back.
+            let edits = WikiLinks.renameEdits(from: old, to: title, in: string)
+            guard !edits.isEmpty || !renamed.changes.isEmpty else { return }
+            breakUndoCoalescing()
+            ownUndoManager.beginUndoGrouping()
+            if !edits.isEmpty, shouldChangeText(inRanges: edits.map { NSValue(range: $0.range) }, replacementStrings: edits.map(\.replacement)) {
+                renamingLinks = true
+                textStorage?.beginEditing()
+                for edit in edits.reversed() { textStorage?.replaceCharacters(in: edit.range, with: edit.replacement) }
+                textStorage?.endEditing()
+                didChangeText()
+                renamingLinks = false
+            }
+            registerUndo(of: renamed, undoing: true)
+            ownUndoManager.setActionName("Update Links")
+            ownUndoManager.endUndoGrouping()
+        }
+    }
+
+    private func registerUndo(of rename: LinkRename, undoing: Bool) {
+        guard !rename.changes.isEmpty else { return }
+        ownUndoManager.registerUndo(withTarget: self) { textView in
+            LinkTargets.undo(rename, redo: !undoing)
+            textView.registerUndo(of: rename, undoing: !undoing)
+        }
+    }
+
+    // MARK: Going to a heading
+
+    /// Puts the cursor at `location` and scrolls its line to the top.
+    func jump(to location: Int) {
+        guard let layout = layoutManager, let container = textContainer else { return }
+        let length = (string as NSString).length
+        let place = NSRange(location: min(location, length), length: 0)
+        window?.makeFirstResponder(self)
+        setSelectedRange(place)
+        let glyphs = layout.glyphRange(forCharacterRange: NSRange(location: place.location, length: min(1, length - place.location)), actualCharacterRange: nil)
+        let rect = layout.boundingRect(forGlyphRange: glyphs, in: container)
+        if let scroll = enclosingScrollView {
+            scroll.contentView.scroll(to: NSPoint(x: 0, y: max(0, rect.minY + textContainerOrigin.y - 12)))
+            scroll.reflectScrolledClipView(scroll.contentView)
+        }
+    }
+
+    /// Goes to a heading, or "^" and a block's id, that a link points at. A beep when the note has no such place.
+    func reveal(_ place: String) {
+        guard let location = WikiTarget.location(of: place, in: string) else { return NSSound.beep() }
+        jump(to: location)
+    }
+
     // MARK: Checkboxes
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         if clickedEmbed(event, at: point) { return }
-        // A [[link]] opens on a click, unless its line is being edited; ⌘-click opens it anyway.
-        if let links, let (title, index) = wikiLink(at: point),
+        // A [[link]] opens on a click, unless its line is being edited; ⌘-click opens it anyway. One to a heading in this
+        // note ([[#Risks]]) goes there.
+        if let (title, index) = wikiLink(at: point),
            event.modifierFlags.contains(.command) || window?.firstResponder !== self || !NSLocationInRange(index, revealed) {
-            links.open(title)
-            return
+            let destination = WikiTarget(title)
+            if destination.page.isEmpty {
+                if let place = destination.place { reveal(place) }
+                return
+            }
+            if let links {
+                links.open(title)
+                return
+            }
         }
         if event.modifierFlags.contains(.command), let address = link(at: point),
            let url = address.hasPrefix(MarkdownMedia.folder + "/") ? Attachments.url(for: address.removingPercentEncoding ?? address) : URL(string: address),
@@ -1055,7 +1188,8 @@ final class MarkdownTextView: NSTextView, NSTextStorageDelegate, NSLayoutManager
         // without this, the line just left (after a Return, say) kept showing its markup until the cursor moved again.
         updateRevealed()
         if slashMenu != nil { updateSlashMenu() }
-        guard let links, !completing, !hasMarkedText(),
+        // Only for typing: undo, redo or links following a new title can leave the cursor in a link too.
+        guard let links, !completing, !hasMarkedText(), !ownUndoManager.isUndoing, !ownUndoManager.isRedoing, !renamingLinks,
               let partial = WikiLinks.partialLink(before: selectedRange().location, in: string),
               !links.suggestions((string as NSString).substring(with: partial)).isEmpty else { return }
         DispatchQueue.main.async { [weak self] in

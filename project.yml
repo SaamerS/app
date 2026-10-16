@@ -185,6 +185,9 @@ targets:
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_IDENTITY: "Apple Development"
         APPLICATION_EXTENSION_API_ONLY: YES
+    dependencies:
+      # Its typing rules: deleting while held, the word being typed, which corrections are safe.
+      - package: BindersKit
   BindersPhoneUITests:
     type: bundle.ui-testing
     platform: iOS

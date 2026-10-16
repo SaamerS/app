@@ -144,15 +144,10 @@ struct TodoBoard: View {
         adding = true
         Task {
             defer { adding = false }
-            do {
-                var arguments: [String: Any] = ["text": text]
-                if let binder { arguments["binder"] = binder }
-                _ = try await connection.call("add_todo", arguments)
-                newTodo = ""
-                await load()
-            } catch {
-                problem = error.localizedDescription
-            }
+            // Out of reach, it waits on this iPhone and goes to the Mac when it's back, as dictated ones do.
+            let sent = await connection.save("add_todo", text: text, binder: binder)
+            newTodo = ""
+            if sent { await load() } else { problem = "Kept on this iPhone; it goes to your Mac when it's back." }
         }
     }
 }

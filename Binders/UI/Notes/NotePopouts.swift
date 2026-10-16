@@ -363,7 +363,7 @@ private struct PopoutNoteView: View {
 
     var body: some View {
         MarkdownNoteEditor(text: $note.text, fontSize: 14, placeholder: "Write, or hold fn to dictate.", inset: NSSize(width: 14, height: 10),
-                           compactToolbar: true, links: LinkTargets.forEditor(in: note.binderID), focused: focused)
+                           compactToolbar: true, links: LinkTargets.forNote(note), focused: focused)
             .onChange(of: note.text) { previous, _ in
                 note.updatedAt = Date()
                 NoteHistory.changed(note.id, previous: previous)

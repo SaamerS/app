@@ -74,10 +74,14 @@ enum InboxCommands {
             guard updated != note.text else { return InboxResult(ok: true, id: note.id.uuidString, message: "“\(note.title)” already says that") }
             // What it said before stays in its history, so the change can be undone.
             NoteHistory.willChange(note, to: updated, always: true)
+            let oldTitle = MarkdownSyntax.noteTitle(note.text)
             note.text = updated
             note.updatedAt = Date()
             store.save()
-            return InboxResult(ok: true, id: note.id.uuidString, message: "Updated “\(note.title)”; the earlier version is in its history")
+            // A new title: links to the old one follow it.
+            let renamed = oldTitle.isEmpty ? nil : LinkTargets.renameNote(note.id, from: oldTitle, to: note.title, itself: true)
+            let links = renamed.map { $0.links > 0 ? ". Links that follow the new title: \($0.counted)" : "" } ?? ""
+            return InboxResult(ok: true, id: note.id.uuidString, message: "Updated “\(note.title)”; the earlier version is in its history\(links)")
 
         case "correct_knowledge":
             let correction = KnowledgeCorrection(wrong: field("wrong"), right: field("right"), reason: field("reason"))

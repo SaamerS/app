@@ -57,6 +57,7 @@ struct LiveMeetingView: View {
                 TextField("Title", text: $meeting.title)
                     .textFieldStyle(.plain)
                     .font(.headline)
+                    .renamesLinks(of: meeting.title)
                 if let start = service.liveStartedAt {
                     TimelineView(.periodic(from: .now, by: 1)) { context in
                         Text(TranscriptFormatter.timestamp(context.date.timeIntervalSince(start)))
@@ -362,6 +363,7 @@ struct MeetingDetailView: View {
                     TextField("Title", text: $meeting.title)
                         .textFieldStyle(.plain)
                         .font(.title.weight(.bold))
+                        .renamesLinks(of: meeting.title)
                 }
                 HStack(spacing: 10) {
                     Text(metaLine).foregroundStyle(.secondary)

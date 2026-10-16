@@ -36,6 +36,8 @@ struct BinderPage: View {
     /// The name is text until you click it or choose Rename…: a field there would take the focus whenever the page
     /// opens, and what you meant for a new note would rename the binder.
     @State private var renaming = false
+    /// The name as it was before renaming, for the links to it.
+    @State private var nameBefore = ""
 
     private var binder: BinderRecord? {
         binders.first { $0.id == binderID } ?? binders.first(where: \.isDefault)
@@ -82,11 +84,15 @@ struct BinderPage: View {
                             .font(BindersTheme.title())
                             .focused($nameFocused)
                             .onSubmit { nameFocused = false }
-                            .onAppear { DispatchQueue.main.async { nameFocused = true } }
+                            .onAppear {
+                                nameBefore = binder.name
+                                DispatchQueue.main.async { nameFocused = true }
+                            }
                             .onChange(of: nameFocused) { _, focused in
                                 guard !focused else { return }
                                 binder.updatedAt = Date()
                                 renaming = false
+                                LinkTargets.renameLinks(from: nameBefore, to: binder.name)
                             }
                     } else {
                         Text(binder.name)

@@ -258,11 +258,12 @@ enum MCPServer {
             })
         case "list_meetings":
             let binder = binderID(named: string("binder"))
+            if !string("binder").isEmpty, binder == nil { throw MCPCore.ToolFailure("No binder named “\(string("binder"))”. list_binders shows the names.") }
             var descriptor = FetchDescriptor<MeetingRecord>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
-            descriptor.fetchLimit = integer("limit", default: 20, max: 50) * (binder == nil ? 1 : 4)
-            let meetings = ((try? Store.shared.context.fetch(descriptor)) ?? [])
-                .filter { binder == nil || $0.binderID == binder }
-                .prefix(integer("limit", default: 20, max: 50))
+            // Filtered as it's read: a binder nobody has added to lately still has its meetings.
+            if let binder { descriptor.predicate = #Predicate { $0.binderID == binder } }
+            descriptor.fetchLimit = integer("limit", default: 20, max: 50)
+            let meetings = (try? Store.shared.context.fetch(descriptor)) ?? []
             return json(meetings.map { meeting in
                 ["id": meeting.id.uuidString, "title": meeting.title, "date": AutomationPayload.iso(meeting.createdAt),
                  "duration_minutes": Int(meeting.duration / 60), "attendees": meeting.attendees, "app": meeting.appName ?? "",
@@ -289,13 +290,15 @@ enum MCPServer {
             return json(result)
         case "list_notes":
             let binder = binderID(named: string("binder"))
+            if !string("binder").isEmpty, binder == nil { throw MCPCore.ToolFailure("No binder named “\(string("binder"))”. list_binders shows the names.") }
             var descriptor = FetchDescriptor<NoteItem>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
-            descriptor.fetchLimit = integer("limit", default: 20, max: 50) * (binder == nil ? 1 : 4)
+            // Filtered as it's read: a binder nobody has written in lately still has its notes.
+            if let binder { descriptor.predicate = #Predicate { $0.binderID == binder } }
+            descriptor.fetchLimit = integer("limit", default: 20, max: 50)
             let tag = string("tag").trimmingCharacters(in: CharacterSet(charactersIn: "# ")).lowercased()
             let status = string("status")
             if !tag.isEmpty || !status.isEmpty { descriptor.fetchLimit = 1000 }
             let notes = ((try? Store.shared.context.fetch(descriptor)) ?? [])
-                .filter { binder == nil || $0.binderID == binder }
                 .filter { tag.isEmpty || NoteTags.tags(in: $0.text).contains(tag) }
                 .filter { status.isEmpty || $0.status?.localizedCaseInsensitiveCompare(status) == .orderedSame }
                 .prefix(integer("limit", default: 20, max: 50))
@@ -462,7 +465,8 @@ enum MCPServer {
         components.host = "apply"
         components.queryItems = [URLQueryItem(name: "file", value: name)]
         guard let url = components.url else { throw MCPCore.ToolFailure("Couldn't build the link") }
-        NSWorkspace.shared.open(url)
+        // In a throwaway folder, `--selftest-board-serve` picks the request up; the link would go to the real app.
+        if !AppPaths.isDemo { NSWorkspace.shared.open(url) }
         for _ in 0..<300 {
             if let data = try? Data(contentsOf: resultURL), let result = try? JSONDecoder().decode(InboxResult.self, from: data) {
                 try? FileManager.default.removeItem(at: resultURL)

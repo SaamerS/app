@@ -65,4 +65,12 @@ public enum DictionaryMatcher {
         }
         return Result(text: output, replacements: count)
     }
+
+    /// Whether a replacement turned another form of a term into the term itself: "Sparks" into "Spark", "Qwen's" into
+    /// "Qwen". Recognition boosting only knows the exact spelling, so it takes the ending off.
+    public static func dropsAnEnding(from original: String, to term: String) -> Bool {
+        let original = TextNorm.compact(original), term = TextNorm.compact(term)
+        guard !term.isEmpty, original.count > term.count, original.hasPrefix(term) else { return false }
+        return ["s", "es"].contains(String(original.dropFirst(term.count)))
+    }
 }

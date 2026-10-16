@@ -35,6 +35,14 @@ enum SelfTest {
                                  textBeforeCursor: value("--before"), selectedText: value("--selection"))
         print("LLM: \(settings.llmProvider.rawValue) \(settings.llmModelName) · AI formatting \(settings.aiFormatting ? "on" : "off")")
         print("CATEGORY: \(StyleResolver.category(for: context, overrides: settings.styles.appOverrides).rawValue)")
+        // --vocab "Term=heard as,heard as;Other term" tries dictionary words without touching the store.
+        let vocabulary = value("--vocab").map { list in
+            list.split(separator: ";").map { entry in
+                let parts = entry.split(separator: "=", maxSplits: 1)
+                return VocabularyTerm(term: String(parts[0]).trimmed,
+                                      aliases: parts.count > 1 ? parts[1].split(separator: ",").map { String($0).trimmed } : [])
+            }
+        } ?? Store.shared.vocabulary()
 
         if let path = value("--selftest-audio") {
             let model = value("--model").flatMap(SpeechModelID.init(rawValue:)) ?? settings.speechModel
@@ -54,7 +62,6 @@ enum SelfTest {
                 let samples = try AudioRecorder.readSamples(from: URL(fileURLWithPath: path))
                 print("AUDIO_SECONDS: \(String(format: "%.2f", Double(samples.count) / AudioRecorder.sampleRate)) silent=\(AudioMath.isSilent(samples))")
                 let audio = AudioMath.normalize(samples)
-                let vocabulary = Store.shared.vocabulary()
                 var raw = ""
                 for pass in 1...2 {
                     let start = Date()
@@ -62,7 +69,7 @@ enum SelfTest {
                     print("ASR_MS_PASS\(pass): \(ms(since: start))")
                 }
                 print("RAW: \(raw)")
-                await printFormatted(raw: raw, context: context)
+                await printFormatted(raw: raw, context: context, vocabulary: vocabulary)
                 return 0
             } catch {
                 print("ERROR: \(error.localizedDescription)")
@@ -71,7 +78,7 @@ enum SelfTest {
         }
 
         if let raw = value("--selftest-text") {
-            await printFormatted(raw: raw, context: context)
+            await printFormatted(raw: raw, context: context, vocabulary: vocabulary)
             return 0
         }
 
@@ -739,6 +746,12 @@ enum SelfTest {
         if args.contains("--selftest-board") {
             return await boardSelfTest()
         }
+        if let directory = value("--selftest-board-serve") {
+            // The app's side of real agents on the Harbor board in a throwaway folder, drawing the board as it changes.
+            let size = NSSize(width: Double(value("--width") ?? "") ?? 1600, height: Double(value("--height") ?? "") ?? 1000)
+            return await boardServe(to: URL(fileURLWithPath: directory), empty: args.contains("--empty-board"), size: size,
+                                    keep: args.contains("--keep"))
+        }
         if args.contains("--selftest-link-serve") {
             return await linkServe()
         }
@@ -772,6 +785,24 @@ enum SelfTest {
                   "list_notes finds a note by its tag, with its properties: \(byTag.count)")
             let byStatus = list((try? await MCPServer.call("list_notes", ["status": "done"], knowledge: controller.knowledge, write: MCPServer.writeInApp(controller: controller))) ?? "")
             check(byStatus.isEmpty, "and filters by status")
+            // A binder nobody has written in lately still lists its notes, however busy the others are.
+            let quiet = BinderRecord(name: "Quiet binder", colorIndex: 2)
+            Store.shared.insert(quiet)
+            let old = NoteItem(text: "# Archive index\n\nWhere last year's files went.")
+            old.binderID = quiet.id
+            old.updatedAt = Date(timeIntervalSinceNow: -400 * 86_400)
+            Store.shared.insert(old)
+            Store.shared.save()
+            let inQuiet = list((try? await MCPServer.call("list_notes", ["binder": "quiet BINDER", "limit": 1], knowledge: controller.knowledge, write: MCPServer.writeInApp(controller: controller))) ?? "")
+            check(inQuiet.count == 1 && inQuiet.first?["title"] as? String == "Archive index", "list_notes lists a quiet binder's notes: \(inQuiet.count)")
+            let meetingsIn = list((try? await MCPServer.call("list_meetings", ["binder": harbor.name, "limit": 1], knowledge: controller.knowledge, write: MCPServer.writeInApp(controller: controller))) ?? "")
+            check(meetingsIn.count == 1 && meetingsIn.first?["binder"] as? String == harbor.name, "list_meetings lists a binder's meetings")
+            var refused = 0
+            for tool in ["list_notes", "list_meetings"] {
+                do { _ = try await MCPServer.call(tool, ["binder": "No such binder"], knowledge: controller.knowledge, write: MCPServer.writeInApp(controller: controller)) }
+                catch { refused += 1 }
+            }
+            check(refused == 2, "a binder that doesn't exist is an error, rather than every binder's notes and meetings")
 
             let navigation = HubNavigation()
             navigation.binderID = harbor.id
@@ -1359,9 +1390,9 @@ open reports/import.html
     }
 
     @MainActor
-    static func printFormatted(raw: String, context: AppContext) async {
+    static func printFormatted(raw: String, context: AppContext, vocabulary: [VocabularyTerm]? = nil) async {
         let start = Date()
-        let result = await TextFormatter.format(raw: raw, context: context)
+        let result = await TextFormatter.format(raw: raw, context: context, vocabulary: vocabulary)
         print("FORMAT_MS: \(ms(since: start))")
         print("USED_LLM: \(result.usedLLM)\(result.fallbackReason.map { " (fallback: \($0))" } ?? "")")
         print("PRESS_ENTER: \(result.pressEnter)")
@@ -1489,6 +1520,147 @@ open reports/import.html
         return failures == 0 ? 0 : 1
     }
 
+    /// Plays the running app for real agents on the Harbor board in a throwaway folder (BINDERS_DATA_DIR). `Binders --mcp`
+    /// there leaves each write in the inbox and waits; this performs them one at a time, as the app does. One window shows
+    /// the board the whole time and is drawn to `board-NNNN.png` after each change; a question, a finished card and a new
+    /// note are also drawn on their own. `events.jsonl` says who did what, when. You act through files in the folder:
+    /// `answer-<card id>.txt` answers a question, `approve-<card id>` moves a card to Done, `note-<id>` and `card-<id>`
+    /// draw that note or card on their own, `stop` ends it.
+    @MainActor
+    private static func boardServe(to directory: URL, empty: Bool, size: NSSize, keep: Bool) async -> Int32 {
+        let controller = DictationController()
+        // `--keep` opens a folder from an earlier run as it is, to draw more of it.
+        let seeded = keep ? true : await DemoData.seed(knowledge: controller.knowledge)
+        guard seeded, let harbor = Store.shared.binders().first(where: { $0.name == DemoData.binderName }) else { return 1 }
+        if empty { controller.board.cards(in: harbor.id).forEach(controller.board.delete) }
+        let manager = FileManager.default, inbox = InboxCommands.directory
+        try? manager.createDirectory(at: inbox, withIntermediateDirectories: true)
+        try? manager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let started = Date()
+        let events = directory.appendingPathComponent("events.jsonl")
+        manager.createFile(atPath: events.path, contents: Data())
+        let log = try? FileHandle(forWritingTo: events)
+
+        func environment<V: View>(_ view: V) -> some View {
+            view.environment(controller).environment(controller.meetings).environment(controller.knowledge)
+                .environment(controller.team).environment(controller.capture).environment(controller.commitments)
+                .environment(AppSettings.shared).modelContainer(Store.shared.container)
+        }
+        let navigation = HubNavigation()
+        navigation.binderID = harbor.id
+        navigation.selection = .binder
+        navigation.pendingBinderTab = .board
+        let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.titled, .fullSizeContentView],
+                              backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.alphaValue = 0
+        let hosting = NSHostingView(rootView: environment(HubView().environment(navigation)))
+        window.contentView = hosting
+        window.orderFrontRegardless()
+        try? await Task.sleep(for: .milliseconds(1500))
+
+        // Layer drawing leaves the sidebar's list out, and the sidebar doesn't change during a run: draw the window once
+        // through each view's own drawing, which gets the sidebar right (and not the rest), to put it back afterwards.
+        if let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) {
+            hosting.cacheDisplay(in: hosting.bounds, to: rep)
+            try? rep.representation(using: .png, properties: [:])?.write(to: directory.appendingPathComponent("sidebar.png"))
+        }
+        func splitViews(_ view: NSView) -> [NSSplitView] { (view as? NSSplitView).map { [$0] } ?? view.subviews.flatMap(splitViews) }
+        if let sidebar = splitViews(hosting).first?.arrangedSubviews.first { print("SIDEBAR_WIDTH: \(Int(sidebar.frame.width))") }
+
+        var frame = 0
+        func draw() async {
+            try? await Task.sleep(for: .milliseconds(250))
+            frame += 1
+            capture(hosting, name: String(format: "board-%04d", frame), directory: directory)
+        }
+        func say(_ line: String) {
+            print("\(Date().formatted(date: .omitted, time: .standard)) \(line)")
+            fflush(stdout)
+        }
+        func record(_ fields: [String: Any]) {
+            var entry = fields
+            entry["ms"] = Int(Date().timeIntervalSince(started) * 1000)
+            entry["frame"] = frame
+            if let data = try? JSONSerialization.data(withJSONObject: entry) { log?.write(data + Data("\n".utf8)) }
+        }
+        func asYou(_ tool: String, _ arguments: [String: Any]) async {
+            do {
+                let reply = try await MCPServer.call(tool, arguments, knowledge: controller.knowledge,
+                                                     write: MCPServer.writeInApp(controller: controller), actor: .you)
+                say("You: \(tool) \(arguments["id"] ?? "") → \(reply)")
+                record(["who": "You", "action": tool, "card": arguments["id"] ?? "", "ok": true, "text": arguments["text"] ?? ""])
+            } catch {
+                say("You: \(tool) refused → \((error as? MCPCore.ToolFailure)?.message ?? error.localizedDescription)")
+            }
+        }
+        await draw()
+        record(["who": "", "action": "start"])
+        say("SERVING: \(inbox.path)")
+        let suffix = Inbox.requestFile("")
+        while !manager.fileExists(atPath: directory.appendingPathComponent("stop").path) {
+            var changed = false, closeUps: [(name: String, view: AnyView, size: NSSize)] = []
+            let requests = ((try? manager.contentsOfDirectory(at: inbox, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [])
+                .filter { $0.lastPathComponent.hasSuffix(suffix) && Inbox.isValidName(String($0.lastPathComponent.dropLast(suffix.count))) }
+                .sorted { ((try? $0.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast)
+                    < ((try? $1.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast) }
+            for url in requests {
+                let name = String(url.lastPathComponent.dropLast(suffix.count))
+                guard let data = try? Data(contentsOf: url), let request = try? JSONDecoder().decode(InboxRequest.self, from: data) else { continue }
+                let result = await InboxCommands.perform(request, controller: controller)
+                try? JSONEncoder().encode(result).write(to: inbox.appendingPathComponent(Inbox.resultFile(name)), options: .atomic)
+                try? manager.removeItem(at: url)
+                let who = request.fields["actor"] ?? ""
+                say("\(who.isEmpty ? "?" : who): \(request.action) \(request.fields["id"] ?? request.fields["title"] ?? "") → "
+                    + (result.ok ? result.message : "REFUSED \(result.error ?? "")")
+                    + (request.action == "ask_on_task" ? " QUESTION: \(request.fields["text"] ?? "")" : ""))
+                changed = true
+                record(["who": who, "action": request.action, "card": request.fields["id"] ?? "", "ok": result.ok,
+                        "text": result.ok ? result.message : (result.error ?? ""), "made": result.id ?? "",
+                        "question": request.action == "ask_on_task" ? (request.fields["text"] ?? "") : ""])
+                let tag = String(format: "%04d", frame + 1)
+                if result.ok, ["ask_on_task", "complete_task"].contains(request.action),
+                   let id = UUID(uuidString: request.fields["id"] ?? ""), let card = controller.board.card(id) {
+                    closeUps.append(("card-\(tag)-\(request.action)", AnyView(environment(CardDetailView(card: card))), NSSize(width: 760, height: 640)))
+                }
+                if result.ok, request.action == "add_note", let id = result.id.flatMap(UUID.init(uuidString:)) {
+                    let notes = HubNavigation()
+                    notes.binderID = harbor.id
+                    notes.selection = .binder
+                    notes.pendingBinderTab = .notes
+                    notes.pendingNoteID = id
+                    closeUps.append(("note-\(tag)", AnyView(environment(HubView().environment(notes))), size))
+                }
+            }
+            for file in (try? manager.contentsOfDirectory(atPath: directory.path)) ?? [] {
+                let path = directory.appendingPathComponent(file)
+                if file.hasPrefix("answer-"), file.hasSuffix(".txt"), let text = try? String(contentsOf: path, encoding: .utf8) {
+                    await asYou("comment_task", ["id": String(file.dropFirst(7).dropLast(4)), "text": text.trimmed])
+                } else if file.hasPrefix("approve-") {
+                    await asYou("update_task", ["id": String(file.dropFirst(8)), "column": "done"])
+                } else if file.hasPrefix("note-"), let id = UUID(uuidString: String(file.dropFirst(5))) {
+                    let notes = HubNavigation()
+                    notes.binderID = harbor.id
+                    notes.selection = .binder
+                    notes.pendingBinderTab = .notes
+                    notes.pendingNoteID = id
+                    closeUps.append(("note-\(id.uuidString.prefix(8))", AnyView(environment(HubView().environment(notes))), size))
+                } else if file.hasPrefix("card-"), let id = UUID(uuidString: String(file.dropFirst(5))), let card = controller.board.card(id) {
+                    closeUps.append(("card-\(id.uuidString.prefix(8))", AnyView(environment(CardDetailView(card: card))), NSSize(width: 760, height: 640)))
+                } else { continue }
+                try? manager.removeItem(at: path)
+                changed = true
+            }
+            controller.board.sweep()
+            if changed { await draw() }
+            for closeUp in closeUps { await render(closeUp.view, size: closeUp.size, name: closeUp.name, directory: directory.appendingPathComponent("close-ups")) }
+            try? await Task.sleep(for: .milliseconds(150))
+        }
+        window.close()
+        say("STOPPED after \(frame) frames")
+        return 0
+    }
+
     /// For developing the iPhone app: the fictional demo data behind a real phone link, a pairing link on standard output
     /// (with 127.0.0.1 first, for the Simulator), and commands on standard input: "todo <text>", "note <text>", "pair".
     @MainActor
@@ -1597,6 +1769,16 @@ open reports/import.html
             let cleaned = formatted?["text"] as? String ?? ""
             check(!cleaned.isEmpty && !cleaned.lowercased().contains("um ") && cleaned.lowercased().contains("thursday") && !cleaned.lowercased().contains("friday"),
                   "the Mac cleans up the phone's dictation: “\(cleaned)”")
+            // And keeps it with its own dictations, once, however many times it's sent.
+            let dictationID = UUID().uuidString
+            for _ in 0..<2 {
+                _ = try await phone.request("binders/dictation", ["id": dictationID, "text": "Send it by Thursday.", "raw": "um so send it by thursday",
+                                                                  "app": "iPhone keyboard", "date": "2026-10-13T09:30:00Z"])
+            }
+            let recent = try await phone.callTool("recent_dictations")
+            let kept = ((try? Store.shared.context.fetch(FetchDescriptor<TranscriptRecord>())) ?? []).filter { $0.id.uuidString == dictationID }
+            check(kept.count == 1 && kept.first?.appName == "iPhone keyboard" && kept.first?.rawText == "um so send it by thursday"
+                  && recent.contains("Send it by Thursday."), "a dictation made on the phone is kept on the Mac, once: \(kept.count)")
 
             let heard = LinkEvents()
             phone.onNotification { heard.add($0) }
@@ -1718,6 +1900,40 @@ open reports/import.html
         check(made != nil && made?.binderID == harbor.id && navigation.pendingNoteID == made?.id && navigation.selection == .binder,
               "clicking a link to nothing makes a note of that name and opens it")
 
+        // A heading or block in a note: the note, opened there. Never a note named "…#Heading".
+        func allNotes() -> [NoteItem] { (try? Store.shared.context.fetch(FetchDescriptor<NoteItem>())) ?? [] }
+        let plan = NoteItem(text: "# Rollout plan\n\nIntro.\n\n" + String(repeating: "A line to scroll past.\n", count: 60)
+                            + "\n## Risks: what could slip\n\nVendor is late. ^vendor\n")
+        plan.binderID = harbor.id
+        Store.shared.insert(plan)
+        if case .note(let found) = LinkTargets.resolve("rollout PLAN#Risks what could slip"), found.id == plan.id { check(true, "a link to a heading finds its note") }
+        else { check(false, "a link to a heading finds its note") }
+        check(LinkTargets.exists("Rollout plan#Anything") && LinkTargets.exists("#Anything"), "and isn't shown as a link to nothing")
+        let toHeading = HubNavigation()
+        LinkTargets.open("Rollout plan#Risks what could slip", from: harbor.id, in: toHeading)
+        check(toHeading.pendingNoteID == plan.id && toHeading.pendingNotePlace == "Risks what could slip", "opening it opens the note at the heading")
+        let toBlock = HubNavigation()
+        LinkTargets.open("Rollout plan#^vendor", from: harbor.id, in: toBlock)
+        check(toBlock.pendingNoteID == plan.id && toBlock.pendingNotePlace == "^vendor", "and a block at the block")
+        let toTitle = HubNavigation()
+        LinkTargets.open("Rollout plan", from: harbor.id, in: toTitle)
+        check(toTitle.pendingNoteID == plan.id && toTitle.pendingNotePlace == nil, "a plain link opens the note at the top")
+        LinkTargets.open("A plan nobody wrote#Budget", from: harbor.id, in: HubNavigation())
+        check(allNotes().contains { $0.title == "A plan nobody wrote" } && !allNotes().contains { $0.title.contains("#Budget") },
+              "a link to a heading in a note that doesn't exist makes the note, named without the heading")
+        let counted = allNotes().count
+        LinkTargets.open("#Risks", from: harbor.id, in: HubNavigation())
+        check(allNotes().count == counted, "a link to a heading in the same note makes nothing")
+
+        // Files: opened, never made into notes.
+        let missingFile = HubNavigation()
+        LinkTargets.open("minutes.pdf", from: harbor.id, in: missingFile)
+        check(allNotes().count == counted && missingFile.pendingNoteID == nil, "a link to a missing file makes no note")
+        check(!LinkTargets.exists("minutes.pdf"), "and shows as missing")
+        try? FileManager.default.createDirectory(at: Attachments.folder, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: Attachments.folder.appendingPathComponent("agenda.pdf").path, contents: Data("%PDF-1.4".utf8))
+        check(LinkTargets.exists("agenda.pdf") && LinkTargets.exists("folder/agenda.pdf"), "a link to a file in the attachments is found, wherever Obsidian kept it")
+
         // The editor: a click on a link opens it; [[ completes to a title and closes the link.
         var opened: [String] = []
         let links = NoteLinks(suggestions: { LinkTargets.suggestions(for: $0) }, exists: { LinkTargets.exists($0) }, open: { opened.append($0) })
@@ -1752,6 +1968,22 @@ open reports/import.html
                   "after [[, the editor offers the titles that match: \(offered.prefix(3))")
             textView.insertCompletion("Launch readiness review", forPartialWordRange: partial, movement: NSReturnTextMovement, isFinal: true)
             check(textView.string == "Notes from [[Launch readiness review]]", "choosing one finishes the link: \(textView.string)")
+
+            // A link to a heading in the same note goes to it.
+            textView.string = "# Plan\n\nSee [[#Risks]] below.\n\n" + String(repeating: "Filler.\n", count: 40) + "## Risks\n\nVendor is late."
+            textView.restyle()
+            window.makeFirstResponder(nil)
+            let link = (textView.string as NSString).range(of: "#Risks]]")
+            var spot = layout.boundingRect(forGlyphRange: layout.glyphRange(forCharacterRange: NSRange(location: link.location + 1, length: 4), actualCharacterRange: nil), in: container)
+            spot.origin.x += textView.textContainerOrigin.x
+            spot.origin.y += textView.textContainerOrigin.y
+            let linkPoint = textView.convert(NSPoint(x: spot.midX, y: spot.midY), to: nil)
+            if let click = NSEvent.mouseEvent(with: .leftMouseDown, location: linkPoint, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                              windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) {
+                textView.mouseDown(with: click)
+            }
+            check(textView.selectedRange().location == (textView.string as NSString).range(of: "## Risks").location && opened == ["Pricing page walkthrough"],
+                  "clicking a link to a heading in the same note goes there: \(textView.selectedRange().location)")
         } else {
             check(false, "the editor renders")
         }
@@ -1774,6 +2006,133 @@ open reports/import.html
             .environment(controller).environment(controller.meetings).environment(controller.knowledge).environment(controller.team)
             .environment(controller.capture).environment(controller.commitments).environment(hub).environment(AppSettings.shared)
             .modelContainer(Store.shared.container), size: NSSize(width: 1300, height: 900), name: "links-note", directory: directory)
+        // A note opened from a link to its heading has the cursor there.
+        let opening = HubNavigation()
+        opening.binderID = harbor.id
+        opening.selection = .binder
+        opening.pendingBinderTab = .notes
+        opening.pendingNoteID = plan.id
+        opening.pendingNotePlace = "Risks what could slip"
+        let hubHosting = NSHostingView(rootView: HubView()
+            .environment(controller).environment(controller.meetings).environment(controller.knowledge).environment(controller.team)
+            .environment(controller.capture).environment(controller.commitments).environment(opening).environment(AppSettings.shared)
+            .modelContainer(Store.shared.container))
+        let hubWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1300, height: 900), styleMask: [.titled], backing: .buffered, defer: false)
+        hubWindow.isReleasedWhenClosed = false
+        hubWindow.alphaValue = 0
+        hubWindow.contentView = hubHosting
+        hubWindow.orderFrontRegardless()
+        try? await Task.sleep(for: .milliseconds(1500))
+        let planEditor = textViews(in: hubHosting).first { $0.string.hasPrefix("# Rollout plan") }
+        let heading = (plan.text as NSString).range(of: "## Risks").location
+        check(planEditor?.selectedRange().location == heading && (planEditor?.enclosingScrollView?.contentView.bounds.minY ?? 0) > 100,
+              "a note opened from a link to its heading has the cursor at the heading, scrolled to it: \(planEditor?.selectedRange().location ?? -1)")
+        capture(hubHosting, name: "links-heading", directory: directory)
+        hubWindow.close()
+
+        // A new title: the links to the old one follow it, once the cursor leaves the first line.
+        let faq = NoteItem(text: "# Pricing FAQ\n\nSee [[Pricing FAQ#Refunds]] below.\n\n## Refunds\n\nWithin 30 days.")
+        let sales = NoteItem(text: "# Sales notes\n\nAsk about [[Pricing FAQ]], [[pricing faq|the FAQ]] and [[Pricing FAQ#Refunds]]. Not `[[Pricing FAQ]]`.")
+        for item in [faq, sales] {
+            item.binderID = harbor.id
+            Store.shared.insert(item)
+        }
+        let review = meetings.first { $0.title == DemoData.meetingTitle }
+        review?.userNotes += "\n\nFollow up on [[Pricing FAQ]]."
+        let card = TaskCard(title: "Answer refund questions", binderID: harbor.id)
+        card.details = "Use [[Pricing FAQ#Refunds]]."
+        Store.shared.insert(card)
+        var renames: [LinkRename] = []
+        let faqHosting = NSHostingView(rootView: MarkdownNoteEditor(text: Binding(get: { faq.text }, set: { faq.text = $0 }),
+                                                                    links: LinkTargets.forNote(faq) { renames.append($0) })
+            .frame(width: 700, height: 300))
+        let faqWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 300), styleMask: [.titled], backing: .buffered, defer: false)
+        faqWindow.isReleasedWhenClosed = false
+        faqWindow.alphaValue = 0
+        faqWindow.contentView = faqHosting
+        faqWindow.orderFrontRegardless()
+        try? await Task.sleep(for: .milliseconds(600))
+        if let editor = textViews(in: faqHosting).first {
+            faqWindow.makeFirstResponder(editor)
+            func type(_ words: String, atEndOfLine line: String) {
+                let range = (editor.string as NSString).range(of: line)
+                editor.setSelectedRange(NSRange(location: NSMaxRange(range), length: 0))
+                editor.insertText(words, replacementRange: NSRange(location: NSNotFound, length: 0))
+            }
+            // Undo steps end with each event, as when a person types and clicks; this test sends none of its own.
+            func leaveTitle() async {
+                if let event = NSEvent.otherEvent(with: .applicationDefined, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0,
+                                                  context: nil, subtype: 0, data1: 0, data2: 0) { NSApp.postEvent(event, atStart: false) }
+                try? await Task.sleep(for: .milliseconds(100))
+                editor.setSelectedRange(NSRange(location: (editor.string as NSString).length, length: 0))
+                try? await Task.sleep(for: .milliseconds(300))
+            }
+            type(" for buyers", atEndOfLine: "# Pricing FAQ")
+            try? await Task.sleep(for: .milliseconds(500))
+            check(sales.text.contains("[[Pricing FAQ]],"), "typing a new title changes no links while the cursor is still on it")
+            await leaveTitle()
+            check(sales.text == "# Sales notes\n\nAsk about [[Pricing FAQ for buyers]], [[Pricing FAQ for buyers|the FAQ]] and [[Pricing FAQ for buyers#Refunds]]. Not `[[Pricing FAQ]]`.",
+                  "leaving the title points the links at it, keeping what they show and their headings: \(sales.text)")
+            check(review?.userNotes.contains("[[Pricing FAQ for buyers]]") == true && card.details == "Use [[Pricing FAQ for buyers#Refunds]].",
+                  "in meeting notes and on cards too")
+            check(editor.string.contains("See [[Pricing FAQ for buyers#Refunds]] below."), "and in the note itself")
+            check(renames.count == 1 && renames.first?.summary == "Updated 5 links in 1 note, 1 meeting and 1 card", "it says what it changed: \(renames.map(\.summary))")
+            if case .note(let found) = LinkTargets.resolve("Pricing FAQ for buyers#Refunds"), found.id == faq.id { check(true, "the links still reach the note") }
+            else { check(false, "the links still reach the note") }
+
+            editor.ownUndoManager.undo()
+            check(sales.text.contains("Ask about [[Pricing FAQ]], [[pricing faq|the FAQ]]") && card.details == "Use [[Pricing FAQ#Refunds]]."
+                  && editor.string.contains("See [[Pricing FAQ#Refunds]]") && MarkdownSyntax.noteTitle(editor.string) == "Pricing FAQ for buyers",
+                  "one undo puts every link back, and leaves the title: \(editor.string.prefix(30))")
+            editor.ownUndoManager.redo()
+            check(sales.text.contains("[[Pricing FAQ for buyers|the FAQ]]") && editor.string.contains("See [[Pricing FAQ for buyers#Refunds]]"), "redo points them at it again")
+
+            // A title cleared on the way to a new one: the links go from the last title to the next.
+            let titleLine = (editor.string as NSString).lineRange(for: NSRange(location: 0, length: 0))
+            editor.setSelectedRange(NSRange(location: 2, length: titleLine.length - 3))
+            editor.deleteBackward(nil)
+            await leaveTitle()
+            check(sales.text.contains("[[Pricing FAQ for buyers]],"), "an empty title changes nothing")
+            type("Refund FAQ", atEndOfLine: "# ")
+            await leaveTitle()
+            check(sales.text.contains("Ask about [[Refund FAQ]], [[Refund FAQ|the FAQ]]"), "the next title does: \(sales.text)")
+
+            // Closing the window with a new title still on the first line.
+            type(" v2", atEndOfLine: "# Refund FAQ")
+            faqWindow.close()
+            check(sales.text.contains("Ask about [[Refund FAQ v2]]") && faq.text.contains("See [[Refund FAQ v2#Refunds]]"), "closing the note with a new title points the links at it")
+        } else {
+            check(false, "the note's editor renders")
+        }
+        faqWindow.close()
+
+        // Nothing changes while something else goes by the old name, or for a title that can't go in a link.
+        let reviewLink = NoteItem(text: "# Prep\n\nRead [[\(DemoData.meetingTitle)]] first.")
+        reviewLink.binderID = harbor.id
+        Store.shared.insert(reviewLink)
+        check(LinkTargets.renameLinks(from: DemoData.meetingTitle, to: "Launch review v2") == nil && reviewLink.text.contains("[[\(DemoData.meetingTitle)]]"),
+              "links stay while something else still has the old name")
+        check(LinkTargets.renameLinks(from: "Refund FAQ v2", to: "Refunds [draft]") == nil, "a title with brackets changes no links")
+
+        // Through MCP, and for binders and meetings.
+        let result = await InboxCommands.perform(InboxRequest(action: "update_note", fields: ["id": faq.id.uuidString, "find": "# Refund FAQ v2", "replace": "# Refund policy"]),
+                                                 controller: controller)
+        check(result.ok && sales.text.contains("Ask about [[Refund policy]]") && faq.text.contains("See [[Refund policy#Refunds]]")
+              && result.message.contains("Links that follow the new title: 6 links in 2 notes, 1 meeting and 1 card"), "an agent's new title moves the links too: \(result.message)")
+        let side = BinderRecord(name: "Side project")
+        Store.shared.insert(side)
+        let sideNote = NoteItem(text: "# Ideas\n\nFor [[Side project]].")
+        sideNote.binderID = side.id
+        Store.shared.insert(sideNote)
+        side.name = "Side quest"
+        LinkTargets.renameLinks(from: "Side project", to: side.name)
+        check(sideNote.text.contains("[[Side quest]]"), "renaming a binder moves the links to it")
+        if let review {
+            review.title = "Launch readiness review, final"
+            LinkTargets.renameLinks(from: DemoData.meetingTitle, to: review.title)
+            check(reviewLink.text.contains("[[Launch readiness review, final]]"), "and renaming a meeting")
+        }
+
         print(failures == 0 ? "LINKS_OK" : "LINKS_FAILED: \(failures)")
         return failures == 0 ? 0 : 1
     }

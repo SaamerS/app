@@ -1,3 +1,4 @@
+import BindersKit
 import SwiftUI
 import UIKit
 
@@ -9,6 +10,15 @@ final class KeyboardViewController: UIInputViewController {
     private var poll: Timer?
     private var lastShift = Date.distantPast
     private var lastWasSpace = false
+    private let checker = UITextChecker()
+    private let language = KeyboardViewController.checkerLanguage()
+    /// Your contacts' names and text replacements, from iOS: names aren't corrected, shortcuts expand.
+    private var lexicon: [UILexiconEntry] = []
+    /// The word just corrected, while one delete would put it back.
+    private var lastCorrection: (typed: String, replaced: String)?
+    /// Words put back after a correction, or kept from the suggestions: not corrected again while the keyboard is up. Not
+    /// taught to iOS, whose dictionary the system keyboard shares.
+    private var kept = Set<String>()
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -29,6 +39,11 @@ final class KeyboardViewController: UIInputViewController {
         height.priority = UILayoutPriority(999)
         height.isActive = true
         observer = DarwinObserver(KeyboardBridge.stateChanged) { [weak self] in self?.refresh() }
+        // The answer comes on another queue.
+        requestSupplementaryLexicon { [weak self] lexicon in
+            let entries = lexicon.entries
+            DispatchQueue.main.async { self?.lexicon = entries }
+        }
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -56,10 +71,12 @@ final class KeyboardViewController: UIInputViewController {
         textChanged()
     }
 
-    /// A new field, or the text moved under the keyboard: capitals and the return key follow it.
+    /// A new field, or the text moved under the keyboard: capitals, the return key and the suggestions follow it.
     private func textChanged() {
         model.returnTitle = Self.returnTitle(textDocumentProxy.returnKeyType)
+        lastCorrection = nil
         autoShift()
+        suggest()
     }
 
     private func refresh() {
@@ -111,8 +128,10 @@ final class KeyboardViewController: UIInputViewController {
         textDocumentProxy.insertText(typed)
         model.undoable = typed
         lastWasSpace = false
+        lastCorrection = nil
         KeyboardBridge.send(.typed)
         autoShift()
+        suggest()
     }
 
     func undoTapped() {
@@ -120,19 +139,23 @@ final class KeyboardViewController: UIInputViewController {
         for _ in typed { textDocumentProxy.deleteBackward() }
         model.undoable = nil
         autoShift()
+        suggest()
     }
 
     func typeKey(_ key: String) {
         model.undoable = nil
         lastWasSpace = false
+        // A word ends at punctuation, corrected first if it needs to be.
+        if [".", ",", "?", "!", ";", ":"].contains(key) { correctWord() } else { lastCorrection = nil }
         let shifted = model.layer == .letters && model.shift != .off
         textDocumentProxy.insertText(shifted ? key.uppercased() : key)
         if model.shift == .once { model.shift = .off }
         // After an apostrophe, back to letters, as the system keyboard does.
         if key == "'", model.layer != .letters { model.layer = .letters }
+        suggest()
     }
 
-    /// Two spaces after a word end the sentence.
+    /// Two spaces after a word end the sentence. One corrects the word, if it needs it.
     func space() {
         model.undoable = nil
         let before = textDocumentProxy.documentContextBeforeInput ?? ""
@@ -140,26 +163,150 @@ final class KeyboardViewController: UIInputViewController {
             textDocumentProxy.deleteBackward()
             textDocumentProxy.insertText(". ")
             lastWasSpace = false
+            lastCorrection = nil
         } else {
+            correctWord()
             textDocumentProxy.insertText(" ")
             lastWasSpace = true
         }
         if model.layer != .letters { model.layer = .letters }
         autoShift()
+        suggest()
     }
 
     func returnTapped() {
         model.undoable = nil
         lastWasSpace = false
+        correctWord()
         textDocumentProxy.insertText("\n")
         autoShift()
+        suggest()
     }
 
-    func deleteBackward() {
+    /// One character, or a whole word once the key has been held a while. Straight after a correction, it puts back
+    /// what was typed instead.
+    func deleteBackward(_ unit: KeyboardTyping.DeleteUnit = .character) {
         model.undoable = nil
         lastWasSpace = false
-        textDocumentProxy.deleteBackward()
+        if unit == .character, revertCorrection() { return }
+        lastCorrection = nil
+        let count = unit == .word ? max(1, KeyboardTyping.wordDeletionCount(before: textDocumentProxy.documentContextBeforeInput ?? "")) : 1
+        for _ in 0..<count { textDocumentProxy.deleteBackward() }
         autoShift()
+        suggest()
+    }
+
+    // MARK: Corrections and suggestions
+
+    /// Puts the corrected word in place of the one just typed, before the space or punctuation that ends it.
+    private func correctWord() {
+        lastCorrection = nil
+        guard let correction = model.suggestions.first(where: \.isCorrection) else { return }
+        let typed = KeyboardTyping.currentWord(before: textDocumentProxy.documentContextBeforeInput ?? "")
+        guard typed == model.typedWord, !typed.isEmpty else { return }
+        replaceWord(typed, with: correction.text)
+        lastCorrection = (typed, correction.text)
+    }
+
+    /// Delete right after a correction: the word as it was typed, and it's left alone from then on.
+    private func revertCorrection() -> Bool {
+        guard let correction = lastCorrection else { return false }
+        lastCorrection = nil
+        let before = textDocumentProxy.documentContextBeforeInput ?? ""
+        // The correction, then the one space or mark that ended it.
+        guard !before.isEmpty, before.dropLast().hasSuffix(correction.replaced) else { return false }
+        for _ in 0..<(correction.replaced.count + 1) { textDocumentProxy.deleteBackward() }
+        textDocumentProxy.insertText(correction.typed)
+        kept.insert(correction.typed.lowercased())
+        autoShift()
+        suggest()
+        return true
+    }
+
+    /// A suggestion tapped: in place of the word being typed, with a space after it.
+    func choose(_ suggestion: KeyboardModel.Suggestion) {
+        UIDevice.current.playInputClick()
+        let typed = KeyboardTyping.currentWord(before: textDocumentProxy.documentContextBeforeInput ?? "")
+        if suggestion.isTyped {
+            kept.insert(typed.lowercased())
+        } else {
+            replaceWord(typed, with: suggestion.text)
+        }
+        lastCorrection = nil
+        textDocumentProxy.insertText(" ")
+        lastWasSpace = true
+        autoShift()
+        suggest()
+    }
+
+    private func replaceWord(_ typed: String, with replacement: String) {
+        for _ in 0..<typed.count { textDocumentProxy.deleteBackward() }
+        textDocumentProxy.insertText(replacement)
+    }
+
+    /// What to offer for the word being typed: the correction it'll get at the space (and the word as typed, to keep it),
+    /// or ways to finish it. A text replacement's phrase comes first.
+    private func suggest() {
+        let before = textDocumentProxy.documentContextBeforeInput ?? ""
+        let word = KeyboardTyping.currentWord(before: before)
+        model.typedWord = word
+        guard !word.isEmpty, wantsCorrections else {
+            model.suggestions = []
+            return
+        }
+        var suggestions: [KeyboardModel.Suggestion] = []
+        if let shortcut = lexicon.first(where: { $0.userInput.caseInsensitiveCompare(word) == .orderedSame && $0.documentText != $0.userInput }) {
+            suggestions.append(.init(text: shortcut.documentText, isCorrection: true))
+        }
+        let range = NSRange(location: 0, length: (word as NSString).length)
+        let isName = lexicon.contains { $0.userInput.caseInsensitiveCompare(word) == .orderedSame }
+        // Words this could be the start of, likeliest first: half a word reads as a misspelling until it's finished.
+        let completions = word.count < 2 ? [] : (checker.completions(forPartialWordRange: range, in: word, language: language) ?? [])
+            .filter { $0.caseInsensitiveCompare(word) != .orderedSame }
+            .map { KeyboardTyping.matchingCase($0, like: word) }
+        let misspelled = KeyboardTyping.isCheckable(word) && !isName && !kept.contains(word.lowercased()) && !UITextChecker.hasLearnedWord(word)
+            && checker.rangeOfMisspelledWord(in: word, range: range, startingAt: 0, wrap: false, language: language).location != NSNotFound
+        if misspelled {
+            let guesses = (checker.guesses(forWordRange: range, in: word, language: language) ?? []).map { KeyboardTyping.matchingCase($0, like: word) }
+            // A capital in the middle of a sentence is likely a name: offered, never put in by itself.
+            let sentenceStart = Self.startsSentence(String(before.dropLast(word.count)))
+            let deliberateCapital = word.first?.isUppercase == true && !sentenceStart
+            // The likeliest word it's the start of ("tomorr" is "tomorrow", not "tumor"), else the checker's best guess:
+            // only when it's a near miss, never a lesser guess because it's close.
+            let best = deliberateCapital || !suggestions.isEmpty ? nil
+                : [completions.first, guesses.first].compactMap { $0 }.first { KeyboardTyping.isSafeCorrection(of: word, to: $0) }
+            suggestions.insert(.init(text: word, isTyped: true), at: 0)
+            if let best { suggestions.append(.init(text: best, isCorrection: true)) }
+            for other in completions + guesses where !suggestions.contains(where: { $0.text == other }) {
+                suggestions.append(.init(text: other))
+            }
+        } else if suggestions.isEmpty {
+            suggestions = completions.prefix(3).map { .init(text: $0) }
+        }
+        model.suggestions = Array(suggestions.prefix(3))
+    }
+
+    /// Fields that want words as typed: addresses, passwords, codes, numbers.
+    private var wantsCorrections: Bool {
+        let proxy = textDocumentProxy
+        if proxy.autocorrectionType == .no || proxy.spellCheckingType == .no || proxy.isSecureTextEntry == true { return false }
+        if let type = proxy.keyboardType, [.URL, .emailAddress, .webSearch, .twitter, .numberPad, .phonePad, .decimalPad, .asciiCapableNumberPad,
+                                           .namePhonePad].contains(type) { return false }
+        if let content = proxy.textContentType, [.username, .password, .newPassword, .oneTimeCode, .emailAddress, .URL].contains(content) { return false }
+        return true
+    }
+
+    private static func startsSentence(_ before: String) -> Bool {
+        let trimmed = before.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty || trimmed.hasSuffix("\n") || [".", "!", "?"].contains(trimmed.last)
+    }
+
+    /// The keyboard types English: the iPhone's English (British spelling, say) when it has one, American otherwise.
+    private static func checkerLanguage() -> String {
+        let available = UITextChecker.availableLanguages
+        let english = Locale.preferredLanguages.map { $0.replacingOccurrences(of: "-", with: "_") }.first { $0.hasPrefix("en") }
+        if let english, available.contains(english) { return english }
+        return available.contains("en_US") ? "en_US" : available.first ?? "en_US"
     }
 
     /// Once for a capital, twice quickly to keep capitals on.
@@ -242,6 +389,18 @@ final class KeyboardModel {
     var starting = false
     /// What was just typed, until something else is.
     var undoable: String?
+    /// Above the keys while typing a word: ways to finish it, or the correction it gets at the space.
+    var suggestions: [Suggestion] = []
+    /// The word they're for.
+    var typedWord = ""
+
+    struct Suggestion: Hashable {
+        let text: String
+        /// Put in at the space or punctuation, unless another is tapped.
+        var isCorrection = false
+        /// The word as typed, to keep it.
+        var isTyped = false
+    }
     /// Something to say that isn't the app's state.
     var note: String?
     var layer = Layer.letters

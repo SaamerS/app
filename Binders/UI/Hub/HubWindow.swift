@@ -48,6 +48,8 @@ final class HubNavigation {
     var pendingNoteID: UUID?
     /// The pending note was just made: its editor takes the cursor.
     var pendingNoteIsNew = false
+    /// A heading, or "^" and a block's id, to show in the pending note: where a link to it points.
+    var pendingNotePlace: String?
     /// The note open on the Notes page, for the Note menu.
     var currentNoteID: UUID?
     var pendingHistorySearch: String?
@@ -359,9 +361,11 @@ struct HubSidebar: View {
                 Button("Rename") {
                     let name = renameDraft.trimmed
                     guard !name.isEmpty else { return }
+                    let old = binder.name
                     binder.name = name
                     binder.updatedAt = Date()
                     Store.shared.save()
+                    LinkTargets.renameLinks(from: old, to: name)
                 }
                 .disabled(renameDraft.trimmed.isEmpty)
                 Button("Cancel", role: .cancel) {}

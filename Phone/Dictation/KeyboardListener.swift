@@ -16,7 +16,10 @@ final class KeyboardListener {
     /// The microphone is on for the keyboard.
     var isOn: Bool { state.phase != .off }
 
-    @ObservationIgnored var connection: MacConnection?
+    /// Set as the app starts, which can be after the keyboard has already turned the microphone on.
+    @ObservationIgnored var connection: MacConnection? {
+        didSet { if isOn { connection?.holdOpen = true } }
+    }
     @ObservationIgnored private let audio = AVAudioEngine()
     @ObservationIgnored private let sink = AudioSink()
     @ObservationIgnored private var engine: SpeechEngine?
@@ -106,6 +109,8 @@ final class KeyboardListener {
         state.phase = .done
         lastUsed = Date()
         publish()
+        // Typed where you are, and kept on the Mac with its own dictations.
+        await connection?.keepDictation(cleaned.text, heard: raw, app: "iPhone keyboard")
     }
 
     func cancel() {

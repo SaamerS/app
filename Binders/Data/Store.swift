@@ -159,8 +159,8 @@ final class NoteItem {
     }
 
     var title: String {
-        let firstLine = MarkdownSyntax.plainTitle(text.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? "")
-        return firstLine.isEmpty ? "Untitled note" : String(firstLine.prefix(80))
+        let title = MarkdownSyntax.noteTitle(text)
+        return title.isEmpty ? "Untitled note" : title
     }
 }
 

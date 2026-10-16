@@ -85,7 +85,8 @@ actor ParakeetEngine: SpeechEngine {
         if boost, !boostable.isEmpty, let timings = result.tokenTimings, !timings.isEmpty {
             do {
                 let session = try await vocabularySession(for: boostable)
-                if let output = await session.rescore(text: text, tokenTimings: timings, audioSamples: audio), output.wasModified {
+                if let output = await session.rescore(text: text, tokenTimings: timings, audioSamples: audio), output.wasModified,
+                   !output.replacements.contains(where: { $0.shouldReplace && DictionaryMatcher.dropsAnEnding(from: $0.originalWord, to: $0.replacementWord ?? "") }) {
                     text = output.text
                 }
             } catch {
@@ -100,10 +101,14 @@ actor ParakeetEngine: SpeechEngine {
         if ctcModels == nil {
             ctcModels = try await CtcModels.downloadAndLoad()
         }
+        // A personal dictionary is a few names. FluidAudio's acoustic rescue swaps a word for one of them on sound alone
+        // ("Whenever" became "Qwen"), so it's off, and a word has to be spelled close to a term (0.65, up from 0.50)
+        // unless it's one of the term's "heard as" spellings.
         let context = CustomVocabularyContext(terms: terms.map {
             CustomVocabularyTerm(text: $0.term, aliases: $0.aliases.isEmpty ? nil : $0.aliases)
-        })
-        let session = try await VocabularyBoostingSession(vocabulary: context, ctcModels: ctcModels!)
+        }, minSimilarity: 0.65)
+        let session = try await VocabularyBoostingSession(vocabulary: context, ctcModels: ctcModels!,
+                                                          config: VocabularyRescorer.Config(spotterRescueEnabled: false))
         boostSession = (terms, session)
         return session
     }

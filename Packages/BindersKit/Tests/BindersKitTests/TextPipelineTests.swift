@@ -26,6 +26,15 @@ final class DictionaryMatcherTests: XCTestCase {
         let result = DictionaryMatcher.apply([VocabularyTerm(term: "Ollama")], to: "Run Ollama now")
         XCTAssertEqual(result.replacements, 0)
     }
+
+    func testKnowsWhenBoostingTakesAnEndingOff() {
+        XCTAssertTrue(DictionaryMatcher.dropsAnEnding(from: "Sparks", to: "Spark"))
+        XCTAssertTrue(DictionaryMatcher.dropsAnEnding(from: "Qwen's", to: "Qwen"))
+        XCTAssertTrue(DictionaryMatcher.dropsAnEnding(from: "boxes", to: "Box"))
+        XCTAssertFalse(DictionaryMatcher.dropsAnEnding(from: "Quen", to: "Qwen"), "a misheard spelling")
+        XCTAssertFalse(DictionaryMatcher.dropsAnEnding(from: "Sparkle", to: "Spark"), "a different word")
+        XCTAssertFalse(DictionaryMatcher.dropsAnEnding(from: "Spark", to: "Spark"))
+    }
 }
 
 final class SnippetTests: XCTestCase {

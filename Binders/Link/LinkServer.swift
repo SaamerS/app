@@ -320,6 +320,23 @@ final class LinkServer {
         await TextFormatter.format(raw: text, context: AppContext(appName: "Binders on iPhone"))
     }
 
+    /// A dictation made on the phone, kept with this Mac's own: in its history, in recent_dictations and in search. One
+    /// sent again (its answer was lost on the way) is kept once.
+    fileprivate func keepDictation(_ params: [String: Any]) {
+        let text = (params["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        let id = (params["id"] as? String).flatMap(UUID.init(uuidString:)) ?? UUID()
+        let known = (try? Store.shared.context.fetch(FetchDescriptor<TranscriptRecord>(predicate: #Predicate { $0.id == id }))) ?? []
+        guard known.isEmpty else { return }
+        let model = (params["model"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        let record = TranscriptRecord(id: id, createdAt: (params["date"] as? String).flatMap { ISO8601DateFormatter().date(from: $0) } ?? Date(),
+                                      mode: "dictation", rawText: params["raw"] as? String ?? text, finalText: text,
+                                      appName: params["app"] as? String ?? "iPhone", bundleID: nil, category: nil,
+                                      duration: params["duration"] as? Double ?? 0, asrMillis: 0, llmMillis: 0, engine: "iPhone",
+                                      llmModel: model, usedLLM: model != nil, fallbackReason: nil, audioFileName: nil, status: "inserted")
+        Store.shared.insert(record)
+    }
+
     fileprivate func runTool(_ message: [String: Any]) async -> [String: Any]? {
         guard let controller else { return MCPCore.failure(id: message["id"], code: -32603, message: "Binders is shutting down") }
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
@@ -511,6 +528,10 @@ private final class LinkSession {
                 let result = await server.formatDictation(params["text"] as? String ?? "")
                 return reply(MCPCore.success(id: id, result: ["text": result.text, "used_model": result.usedLLM,
                                                               "model": result.usedLLM ? AppSettings.shared.llmModelName : ""]))
+            }
+            if method == "binders/dictation" {
+                server.keepDictation(params)
+                return reply(MCPCore.success(id: id, result: [String: Any]()))
             }
             reply(await server.runTool(message))
         }
