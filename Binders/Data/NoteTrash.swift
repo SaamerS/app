@@ -22,6 +22,12 @@ final class NoteTrash {
         let status: String?
         let owner: String?
         let dueAt: Date?
+        /// An agent's words in it stay the agent's: Undo doesn't make the note yours.
+        let madeBy: String?
+        let editedBy: String?
+        let editedAt: Date?
+        /// Made from what you said, it stays unshared when Undo puts it back.
+        let staysUnshared: Bool
 
         var title: String {
             let firstLine = MarkdownSyntax.plainTitle(text.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? "")
@@ -39,6 +45,10 @@ final class NoteTrash {
             status = note.status
             owner = note.owner
             dueAt = note.dueAt
+            madeBy = note.madeBy
+            editedBy = note.editedBy
+            editedAt = note.editedAt
+            staysUnshared = note.staysUnshared
         }
     }
 
@@ -81,6 +91,10 @@ final class NoteTrash {
         note.status = entry.status
         note.owner = entry.owner
         note.dueAt = entry.dueAt
+        note.madeBy = entry.madeBy
+        note.editedBy = entry.editedBy
+        note.editedAt = entry.editedAt
+        note.staysUnshared = entry.staysUnshared
         Store.shared.insert(note)
         undoManager?.registerUndo(withTarget: self) { [weak undoManager] trash in
             if let note = Store.shared.note(entry.id) { trash.delete(note, undoManager: undoManager) }

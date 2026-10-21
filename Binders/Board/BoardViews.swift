@@ -8,11 +8,14 @@ struct BoardView: View {
     @Environment(HubNavigation.self) private var navigation
     @Bindable var binder: BinderRecord
     @Query private var cards: [TaskCard]
-    @State private var selected: TaskCard?
     @State private var drafting: BoardColumn?
     @State private var draft = ""
     @State private var target: BoardColumn?
     @State private var problem: String?
+    /// Folded columns you opened: they stay open until you fold them again.
+    @State private var opened: Set<BoardColumn> = []
+    /// For self-tests: the layout the board last drew, and the width it had for it.
+    nonisolated(unsafe) static var lastLayout: (layout: BoardLayout, width: Double)?
 
     init(binder: BinderRecord) {
         self.binder = binder
@@ -35,48 +38,66 @@ struct BoardView: View {
             }
             .padding(.horizontal, 24)
             .padding(.vertical, 12)
-            ScrollView(.horizontal) {
-                HStack(alignment: .top, spacing: 12) {
-                    ForEach(BoardColumn.allCases, id: \.self) { column($0) }
+            // Columns narrow to fit the window, down to a width a card still reads at. Short of that, Done and then Backlog
+            // fold to strips with their counts, so Ready, In progress, and Blocked and Review, the ones waiting on you,
+            // show without scrolling sideways.
+            GeometryReader { geometry in
+                let width = geometry.size.width
+                let layout = BoardLayout.fit(width: width, opened: opened)
+                ScrollView(.horizontal) {
+                    HStack(alignment: .top, spacing: layout.spacing) {
+                        ForEach(BoardColumn.allCases, id: \.self) { column in
+                            if layout.folded.contains(column) {
+                                strip(column)
+                            } else {
+                                // One you opened shows how to fold it again while there's no room for it.
+                                let foldable = opened.contains(column)
+                                    && BoardLayout.fit(width: width, opened: opened.subtracting([column])).folded.contains(column)
+                                self.column(column, width: layout.columnWidth, foldable: foldable)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, layout.margin)
+                    .padding(.bottom, 20)
+                    .frame(maxHeight: .infinity, alignment: .top)
                 }
-                .padding(.horizontal, 24)
-                .padding(.bottom, 20)
-                .frame(maxHeight: .infinity, alignment: .top)
+                .onAppear { Self.lastLayout = (layout, width) }
+                .onChange(of: layout) { Self.lastLayout = (layout, width) }
             }
         }
         // Fill the space the binder gives the board, and no more, so the header above stays put.
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .sheet(item: $selected) { card in
-            CardDetailView(card: card).environment(controller)
-        }
-        .onAppear(perform: openPendingCard)
-        .onChange(of: navigation.pendingCardID) { openPendingCard() }
         .alert("Couldn't do that", isPresented: Binding(get: { problem != nil }, set: { if !$0 { problem = nil } })) {
             Button("OK", role: .cancel) {}
         } message: { Text(problem ?? "") }
+        // Column counts roll once the board has drawn what it first read.
+        .settlesAfterAppearing()
+        // What the runs Binders started say they're doing, on their cards.
+        .followingAgentDoing()
     }
 
-    /// A card asked for from elsewhere, such as the quick switcher.
-    private func openPendingCard() {
-        guard let id = navigation.pendingCardID, let card = cards.first(where: { $0.id == id }) else { return }
-        navigation.pendingCardID = nil
-        selected = card
-    }
-
-    private func column(_ column: BoardColumn) -> some View {
+    private func column(_ column: BoardColumn, width: CGFloat, foldable: Bool) -> some View {
         var items = cards.filter { $0.column == column }
+        let count = items.count
         if column == .done { items = Array(items.prefix(30)) }
         return VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                Text(column.title).font(.headline)
-                Text("\(cards.filter { $0.column == column }.count)").foregroundStyle(.secondary).monospacedDigit()
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(column.title).font(BindersTheme.cardTitle)
+                Text("\(count)").font(BindersTheme.count(13)).foregroundStyle(.secondary).rollingCount(count)
                 Spacer()
+                if foldable {
+                    Button { opened.remove(column) } label: { Image(systemName: "arrow.right.and.line.vertical.and.arrow.left") }
+                        .buttonStyle(.borderless)
+                        .quietControl()
+                        .help("Fold \(column.title)")
+                }
                 if column != .done {
                     Button {
                         drafting = column
                         draft = ""
                     } label: { Image(systemName: "plus") }
                         .buttonStyle(.borderless)
+                        .quietControl()
                         .help("Add a card to \(column.title)")
                 }
             }
@@ -90,8 +111,16 @@ struct BoardView: View {
                 LazyVStack(spacing: 8) {
                     ForEach(items) { card in
                         CardTile(card: card)
-                            .onTapGesture { selected = card }
+                            // Its own window, over the board, which stays as it is.
+                            .onTapGesture { navigation.open(card: card) }
                             .draggable(card.id.uuidString)
+                            .contextMenu {
+                                Menu("Move to") {
+                                    MoveToBinderItems(current: card.binderID) { target in
+                                        do { try controller.router.move(card, to: target) } catch { problem = error.localizedDescription }
+                                    }
+                                }
+                            }
                     }
                     if items.isEmpty && drafting != column {
                         Text(Self.hint(column))
@@ -102,17 +131,49 @@ struct BoardView: View {
                 }
             }
         }
-        .frame(width: 250)
+        .frame(width: width)
         .frame(maxHeight: .infinity, alignment: .top)
         .padding(10)
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .fill(target == column ? Color.accentColor.opacity(0.12) : Color.primary.opacity(0.04)))
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(columnFill(column)))
         .dropDestination(for: String.self) { ids, _ in
             move(ids, to: column)
             return true
         } isTargeted: { hovering in
             target = hovering ? column : (target == column ? nil : target)
         }
+    }
+
+    /// A folded column: its count and its name on its side. A click opens it, and a card dropped on it moves there.
+    private func strip(_ column: BoardColumn) -> some View {
+        let count = cards.filter { $0.column == column }.count
+        return Button { opened.insert(column) } label: {
+            VStack(spacing: 10) {
+                Image(systemName: "arrow.left.and.line.vertical.and.arrow.right").font(.caption).foregroundStyle(.secondary)
+                Text("\(count)").font(BindersTheme.count(14)).foregroundStyle(.secondary).rollingCount(count)
+                Sideways { Text(column.title).font(BindersTheme.cardTitle).lineLimit(1).fixedSize().rotationEffect(.degrees(90)) }
+                Spacer(minLength: 0)
+            }
+            .padding(.vertical, 12)
+            .frame(width: BoardLayout.stripWidth)
+            .frame(maxHeight: .infinity, alignment: .top)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(columnFill(column)))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Open \(column.title)")
+        .accessibilityLabel("\(column.title), \(count) \(count == 1 ? "card" : "cards")")
+        .accessibilityHint("Opens the column")
+        .dropDestination(for: String.self) { ids, _ in
+            move(ids, to: column)
+            return true
+        } isTargeted: { hovering in
+            target = hovering ? column : (target == column ? nil : target)
+        }
+    }
+
+    /// A column's well: a faint shade of ink over the binder's ground, and its colour while a card is dragged over it.
+    private func columnFill(_ column: BoardColumn) -> AnyShapeStyle {
+        target == column ? AnyShapeStyle(TintFill().opacity(0.16)) : AnyShapeStyle(BindersTheme.ink.opacity(0.04))
     }
 
     private static func hint(_ column: BoardColumn) -> String {
@@ -129,8 +190,9 @@ struct BoardView: View {
     private func create(in column: BoardColumn) {
         let title = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         drafting = nil
-        guard !title.isEmpty else { return }
-        controller.board.create(title: title, binderID: binder.id, column: column == .done ? .backlog : column, by: .you)
+        guard !title.isEmpty, Store.shared.allowsSave() else { return }
+        // Made at once; the agent whose work it is follows a moment later (CardRouter).
+        controller.router.typedCard(title: title, binder: binder, column: column)
         draft = ""
     }
 
@@ -139,6 +201,19 @@ struct BoardView: View {
             guard let card = controller.board.card(id) else { continue }
             do { try controller.board.move(card, to: column, by: .you) } catch { problem = error.localizedDescription }
         }
+    }
+}
+
+/// Its content turned on its side, in the space it takes that way: a folded column's name.
+private struct Sideways: Layout {
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let size = subviews.first?.sizeThatFits(.unspecified) ?? .zero
+        return CGSize(width: size.height, height: size.width)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard let subview = subviews.first else { return }
+        subview.place(at: CGPoint(x: bounds.midX, y: bounds.midY), anchor: .center, proposal: ProposedViewSize(subview.sizeThatFits(.unspecified)))
     }
 }
 
@@ -152,21 +227,42 @@ struct CardTile: View {
                 .font(.system(size: 13, weight: .medium))
                 .lineLimit(3)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            // What a run Binders started says it's doing between its reports, in its words.
+            if card.column == .inProgress, let line = AgentDoingFeed.shared.lines[card.id] {
+                DoingLine(agent: card.assignee ?? "The agent", line: line)
+            }
             if card.column == .blocked {
-                Label("Waiting for your answer", systemImage: "questionmark.bubble")
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.orange)
+                // A question or a request for your approval waits on you: amber. Blocked with a reason, such as a run that
+                // stopped before it finished, is a problem: the problem style.
+                let approving = card.waitingApproval() != nil
+                let asking = approving || card.taskState() == .inputRequired
+                if asking {
+                    StatusLabel(approving ? "Waiting for your approval" : "Waiting for your answer", .needsYou,
+                                symbol: approving ? "checkmark.shield" : "questionmark.bubble")
+                        .font(.caption.weight(.medium))
+                } else {
+                    StatusLabel("Blocked: open it to see why", .problem)
+                        .font(.caption.weight(.medium))
+                }
             } else if card.column == .review {
-                Label("Ready for you to check", systemImage: "eye")
+                // Finished work waits on you to check it: amber, as a question does.
+                StatusLabel("Ready for you to check", .needsYou, symbol: "eye")
                     .font(.caption.weight(.medium))
-                    .foregroundStyle(Color.accentColor)
             }
             HStack(spacing: 6) {
                 if let assignee = card.assignee, BoardRules.isClaimed(card.state, at: .now) || card.column == .review || card.column == .done {
-                    AssigneeChip(name: assignee, isAgent: card.assigneeIsAgent, expires: card.column == .done ? nil : card.claimExpiresAt)
+                    AssigneeChip(name: assignee, isAgent: card.assigneeIsAgent, expires: card.column == .inProgress ? card.claimExpiresAt : nil)
+                }
+                if let meantFor = card.meantFor, !BoardRules.isClaimed(card.state, at: .now), card.column != .done {
+                    // An agent's suggestion asks, and waits on you; your own choice says.
+                    if card.meantForByAgent {
+                        Badge(text: "Give to \(meantFor)?", symbol: "questionmark.circle", color: BindersTheme.needsYou)
+                    } else {
+                        Badge(text: "For \(meantFor)")
+                    }
                 }
                 if let due = card.dueAt, card.column != .done {
-                    Badge(text: CommitmentService.dueLabel(due), color: due < .now ? .red : .secondary)
+                    DueBadge(due: due)
                 }
                 Spacer(minLength: 0)
                 if !card.links.isEmpty {
@@ -175,14 +271,14 @@ struct CardTile: View {
             }
         }
         .padding(10)
-        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color(nsColor: .controlBackgroundColor)))
-        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(Color.primary.opacity(0.08)))
-        .shadow(color: .black.opacity(0.05), radius: 1, y: 1)
+        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(BindersTheme.surface))
+        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(BindersTheme.line))
+        .shadow(color: .black.opacity(0.08), radius: 1.5, y: 1)
         .contentShape(Rectangle())
     }
 }
 
-/// Who has a card: a person, or an agent with how long its claim has left.
+/// Who has a card: a person, or an agent, in lavender with its sparkle, with how long its claim has left.
 struct AssigneeChip: View {
     let name: String
     let isAgent: Bool
@@ -190,169 +286,69 @@ struct AssigneeChip: View {
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 30)) { context in
-            HStack(spacing: 4) {
-                Image(systemName: isAgent ? "sparkles" : "person.fill").imageScale(.small)
-                Text(name).lineLimit(1)
-                if isAgent, let expires, expires > context.date {
-                    Text("· \(max(1, Int(expires.timeIntervalSince(context.date) / 60))) min").foregroundStyle(.secondary)
-                }
+            let minutes = expires.flatMap { $0 > context.date && isAgent ? max(1, Int($0.timeIntervalSince(context.date) / 60)) : nil }
+            // In a narrow column: the agent without its repository ("Claude Code · harbor-web"), then without the time
+            // left, before its name is cut short.
+            let short = name.components(separatedBy: " · ").first ?? name
+            ViewThatFits(in: .horizontal) {
+                chip(name, minutes: minutes)
+                if short != name { chip(short, minutes: minutes) }
+                if minutes != nil { chip(short, minutes: nil) }
+                chip(name, minutes: nil)
             }
-            .font(.caption.weight(.medium))
-            .padding(.horizontal, 7)
-            .padding(.vertical, 2)
-            .background(Capsule().fill((isAgent ? Color.accentColor : Color.primary).opacity(isAgent ? 0.14 : 0.07)))
-            .foregroundStyle(isAgent ? Color.accentColor : Color.primary)
         }
+    }
+
+    private func chip(_ shown: String, minutes: Int?) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: isAgent ? BindersTheme.agentSymbol : "person.fill").imageScale(.small)
+            Text(shown).lineLimit(1)
+            if let minutes {
+                Text("· \(minutes) min").monospacedDigit().foregroundStyle(.secondary).lineLimit(1).fixedSize()
+            }
+        }
+        .font(.caption.weight(.medium))
+        .padding(.horizontal, 7)
+        .padding(.vertical, 2)
+        .background(Capsule().fill(isAgent ? BindersTheme.agent.opacity(0.16) : BindersTheme.ink.opacity(0.07)))
+        .foregroundStyle(isAgent ? BindersTheme.agent : BindersTheme.ink)
     }
 }
 
-/// One card, opened: edit it, move it, take it, and follow or join its timeline.
-struct CardDetailView: View {
-    @Environment(DictationController.self) private var controller
-    @Environment(\.dismiss) private var dismiss
-    @Bindable var card: TaskCard
-    @Query private var events: [TaskEvent]
-    @State private var reply = ""
-    @State private var problem: String?
-    @State private var confirmDelete = false
-
-    init(card: TaskCard) {
-        self.card = card
-        let id = card.id
-        _events = Query(filter: #Predicate<TaskEvent> { $0.taskID == id }, sort: [SortDescriptor(\TaskEvent.createdAt)])
-    }
+/// What an agent working on a card says it's doing, in its own words (`AgentDoing`): in lavender with its sparkle, and
+/// whose words they are. They're shown, never acted on.
+struct DoingLine: View {
+    let agent: String
+    let line: String
+    /// Its name before its words, where nothing beside them says whose they are.
+    var named = true
+    var lines = 2
+    /// The words' colour: lavender, as on the board; the card's own page draws them muted beside the lavender sparkle.
+    var words: Color = BindersTheme.agent
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 10) {
-                TextField("Title", text: $card.title, axis: .vertical)
-                    .font(.title3.weight(.semibold))
-                    .textFieldStyle(.plain)
-                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
-            }
-            .padding([.horizontal, .top], 20)
-            .padding(.bottom, 10)
-            controls
-                .padding(.horizontal, 20)
-                .padding(.bottom, 12)
-            Divider()
-            HStack(alignment: .top, spacing: 0) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Description").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                    MarkdownNoteEditor(text: $card.details, fontSize: 13, placeholder: "What's this about? What does done look like?",
-                                       inset: NSSize(width: 6, height: 6), compactToolbar: true, links: LinkTargets.forEditor(in: card.binderID))
-                        .frame(minHeight: 160)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.03)))
-                    if !card.links.isEmpty {
-                        Text("Links").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                        ForEach(card.links, id: \.self) { link in
-                            Button { open(link) } label: {
-                                Label(link, systemImage: link.hasPrefix("http") ? "link" : "doc")
-                                    .lineLimit(1).truncationMode(.middle)
-                            }
-                            .buttonStyle(.link)
-                        }
-                    }
-                    if let source = card.sourceTitle {
-                        Label("From \(source)", systemImage: "arrow.turn.down.right").font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer(minLength: 0)
-                    Button("Delete Card…", role: .destructive) { confirmDelete = true }
-                        .buttonStyle(.borderless)
-                        .font(.caption)
-                }
-                .padding(16)
-                .frame(width: 320)
-                Divider()
-                timeline
-            }
+        let short = agent.components(separatedBy: " · ").first ?? agent
+        let spoken = "\(short) says: \(line)"
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
+            Image(systemName: BindersTheme.agentSymbol).imageScale(.small).foregroundStyle(BindersTheme.agent)
+            (named ? Text(short + ": ").fontWeight(.semibold) + Text(line) : Text(line))
+                .lineLimit(lines)
+                .fixedSize(horizontal: false, vertical: true)
+                .foregroundStyle(words)
         }
-        .frame(width: 760, height: 560)
-        .alert("Couldn't do that", isPresented: Binding(get: { problem != nil }, set: { if !$0 { problem = nil } })) {
-            Button("OK", role: .cancel) {}
-        } message: { Text(problem ?? "") }
-        .confirmationDialog("Delete “\(card.title)”?", isPresented: $confirmDelete) {
-            Button("Delete Card", role: .destructive) {
-                dismiss()
-                DispatchQueue.main.async { controller.board.delete(card) }
-            }
-        } message: { Text("Its timeline goes with it. This can't be undone.") }
-    }
-
-    private var controls: some View {
-        HStack(spacing: 12) {
-            Picker("Column", selection: Binding(get: { card.column }, set: { column in attempt { try controller.board.move(card, to: column, by: .you) } })) {
-                ForEach(BoardColumn.allCases, id: \.self) { Text($0.title).tag($0) }
-            }
-            .fixedSize()
-            if let assignee = card.assignee, BoardRules.isClaimed(card.state, at: .now) {
-                AssigneeChip(name: assignee, isAgent: card.assigneeIsAgent, expires: card.claimExpiresAt)
-                Button(assignee == BoardActor.you.name ? "Let Go" : "Take Over") {
-                    attempt {
-                        if assignee == BoardActor.you.name { try controller.board.release(card, by: .you) } else { try controller.board.claim(card, by: .you) }
-                    }
-                }
-                .help(assignee == BoardActor.you.name ? "Put it back in Ready for someone else" : "Take it from \(assignee)")
-            } else if card.column != .done {
-                Button("Take It") { attempt { try controller.board.claim(card, by: .you) } }
-            }
-            Spacer()
-            Toggle("Due", isOn: Binding(get: { card.dueAt != nil }, set: { card.dueAt = $0 ? Calendar.current.date(byAdding: .day, value: 1, to: .now) : nil }))
-                .toggleStyle(.checkbox)
-            if card.dueAt != nil {
-                DatePicker("", selection: Binding(get: { card.dueAt ?? .now }, set: { card.dueAt = $0 }), displayedComponents: [.date])
-                    .labelsHidden()
-                    .fixedSize()
-            }
-        }
-    }
-
-    private var timeline: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text("Timeline").font(.caption.weight(.semibold)).foregroundStyle(.secondary).padding([.horizontal, .top], 16)
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 12) {
-                        ForEach(events) { event in EventRow(event: event).id(event.id) }
-                    }
-                    .padding(16)
-                }
-                .onAppear { if let last = events.last { proxy.scrollTo(last.id, anchor: .bottom) } }
-                .onChange(of: events.count) { if let last = events.last { withAnimation { proxy.scrollTo(last.id, anchor: .bottom) } } }
-            }
-            Divider()
-            HStack(spacing: 8) {
-                TextField(card.column == .blocked ? "Answer the question…" : "Add a comment…", text: $reply, axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
-                    .lineLimit(1...4)
-                    .onSubmit(send)
-                Button(card.column == .blocked ? "Answer" : "Send", action: send)
-                    .disabled(reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-            .padding(12)
-        }
-    }
-
-    private func send() {
-        let text = reply.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        controller.board.comment(card, text: text, by: .you)
-        reply = ""
-    }
-
-    private func attempt(_ action: () throws -> Void) {
-        do { try action() } catch { problem = error.localizedDescription }
-    }
-
-    private func open(_ link: String) {
-        if let url = URL(string: link), url.scheme != nil { NSWorkspace.shared.open(url) }
-        else { NSWorkspace.shared.open(URL(fileURLWithPath: (link as NSString).expandingTildeInPath)) }
+        .font(.caption)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .help("What \(short) says it's doing, in its words, from its own task list. Binders looks every 30 seconds while the card is in progress, and keeps nothing but this line.")
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(spoken)
     }
 }
 
 /// One line of a card's timeline.
 struct EventRow: View {
     let event: TaskEvent
+    /// Where the card is now: finished work is amber only while the card still waits in Review for you to check it.
+    var cardColumn: BoardColumn?
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
@@ -362,18 +358,18 @@ struct EventRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(event.author).font(.caption.weight(.semibold))
-                    if event.authorIsAgent { Image(systemName: "sparkles").font(.caption2).foregroundStyle(Color.accentColor) }
+                    if event.authorIsAgent { Image(systemName: BindersTheme.agentSymbol).font(.caption2).foregroundStyle(BindersTheme.agent) }
                     Text(headline).font(.caption).foregroundStyle(.secondary)
                     Spacer(minLength: 0)
-                    Text(event.createdAt.formatted(.relative(presentation: .named))).font(.caption2).foregroundStyle(.tertiary)
+                    Text(event.createdAt.formatted(.relative(presentation: .named))).font(.caption2).monospacedDigit().foregroundStyle(.tertiary)
                 }
                 if !event.text.isEmpty {
                     Text(event.text)
                         .font(.callout)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
-                        .padding(event.kind == .question ? 8 : 0)
-                        .background(event.kind == .question ? RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.1)) : nil)
+                        .padding(event.kind == .question || event.kind == .approval ? 8 : 0)
+                        .background(event.kind == .question || event.kind == .approval ? RoundedRectangle(cornerRadius: 8).fill(BindersTheme.needsYou.opacity(0.1)) : nil)
                 }
             }
         }
@@ -394,6 +390,11 @@ struct EventRow: View {
         case .comment: "commented"
         case .completed: column == "Done" ? "finished it" : "finished it, for review"
         case .edited: "edited it"
+        case .assigned: "said who it's for"
+        case .woke: "was woken"
+        case .context: "found this in the binder"
+        case .approval: "asks your approval"
+        case .decision: "kept the receipt"
         }
     }
 
@@ -409,16 +410,74 @@ struct EventRow: View {
         case .comment: "bubble.left"
         case .completed: "checkmark.circle"
         case .edited: "pencil"
+        case .assigned: "person.crop.circle.badge.checkmark"
+        case .woke: "bell"
+        case .context: "books.vertical"
+        case .approval: "checkmark.shield"
+        case .decision: "signature"
         }
     }
 
-    private var tint: Color {
+    private var tint: AnyShapeStyle {
         switch event.kind {
-        case .question: .orange
-        case .completed: .green
-        case .lapsed: .secondary
-        default: .accentColor
+        case .question, .approval: AnyShapeStyle(BindersTheme.needsYou)
+        // Green only once it's in Done. Finished for review is amber, as a question, while the card still waits in Review
+        // for you to check it; once it's checked (or moved on), that event no longer needs you.
+        case .completed:
+            if column == BoardColumn.done.title {
+                AnyShapeStyle(BindersTheme.done)
+            } else if cardColumn == .review {
+                AnyShapeStyle(BindersTheme.needsYou)
+            } else {
+                AnyShapeStyle(.infoText)
+            }
+        case .lapsed: AnyShapeStyle(.secondary)
+        // The accent's; neutral in a binder's card, whose colour is for what you act on.
+        default: AnyShapeStyle(.infoText)
         }
+    }
+}
+
+/// What Binders wrote on a card from its binder ("From your binders"), to change before an agent reads it again, or empty
+/// to delete it. Agents that read the card later see it as you leave it.
+struct ContextEditor: View {
+    @Environment(DictationController.self) private var controller
+    @Environment(\.dismiss) private var dismiss
+    let event: TaskEvent
+    @State private var text: String
+
+    init(event: TaskEvent) {
+        self.event = event
+        _text = State(initialValue: event.text)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("From your binders").font(BindersTheme.cardTitle)
+            Text("Binders wrote this when the card first went to an agent: passages from notes and meetings in its binder that match it. Agents that read the card see it as you leave it.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            TextEditor(text: $text)
+                .font(.callout)
+                .frame(minHeight: 140)
+                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(BindersTheme.lineStrong))
+            HStack {
+                Button("Delete", role: .destructive) {
+                    controller.board.editContext(event, text: "")
+                    dismiss()
+                }
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Save") {
+                    controller.board.editContext(event, text: text)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 520)
     }
 }
 
@@ -502,7 +561,7 @@ struct TodoPickerSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Add to-dos to the \(binder.name) board").font(.headline)
+                Text("Add to-dos to the \(binder.name) board").font(BindersTheme.cardTitle)
                 Text("Open to-dos from this binder's meetings, notes and promises. Each stays open where it is, marked as on the board, and is ticked off when its card is done.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -529,7 +588,7 @@ struct TodoPickerSheet: View {
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                 Text(source.title).font(.callout.weight(.medium)).lineLimit(1)
-                                Text(source.date, format: .relative(presentation: .named)).font(.caption).foregroundStyle(.secondary)
+                                Text(source.date, format: .relative(presentation: .named)).font(BindersTheme.time()).foregroundStyle(.secondary)
                             }
                             ForEach(source.todos) { todo in
                                 Toggle(isOn: Binding(get: { chosen.contains(todo.ref) },
@@ -538,7 +597,7 @@ struct TodoPickerSheet: View {
                                         if let owner = todo.owner { OwnerChip(name: owner) }
                                         Text(todo.text).fixedSize(horizontal: false, vertical: true)
                                         if let due = todo.due {
-                                            Badge(text: CommitmentService.dueLabel(due), color: due < Date() ? .red : .secondary)
+                                            DueBadge(due: due)
                                         }
                                     }
                                 }
@@ -561,12 +620,15 @@ struct TodoPickerSheet: View {
         }
         .padding(20)
         .frame(width: 560)
+        .pageGround()
+        .binderTint(binder.colorIndex)
     }
 
     /// Newest on top, in the order they're listed.
     private func add() {
         for todo in todos.reversed() where chosen.contains(todo.ref) {
-            controller.board.create(from: todo.todo, column: column, binderID: binder.id, by: .you)
+            let made = controller.board.create(from: todo.todo, column: column, binderID: binder.id, by: .you)
+            if !made.existed { controller.router.suggestLater(for: made.card, origin: .toBoard) }
         }
         dismiss()
     }

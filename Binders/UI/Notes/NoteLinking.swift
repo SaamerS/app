@@ -17,6 +17,28 @@ enum LinkTargets {
     /// Every title's key, for fading links to nothing; built at most every couple of seconds, as it's asked per link.
     private static var keys: Set<String> = []
     private static var keysBuilt = Date.distantPast
+    /// Every note's and meeting's title, newest first: read when first asked for, and again only after a save that could
+    /// change one (a card moving can't), so typing after "[[" doesn't read the whole library at each letter.
+    private static var titles: [String]?
+    private static var watching: NSObjectProtocol?
+
+    private static var allTitles: [String] {
+        if watching == nil {
+            watching = NotificationCenter.default.addObserver(forName: ModelContext.didSave, object: nil, queue: .main) { notification in
+                guard !TaskCard.onlyBoards(notification.userInfo) else { return }
+                MainActor.assumeIsolated {
+                    titles = nil
+                    keysBuilt = .distantPast
+                }
+            }
+        }
+        if let titles { return titles }
+        var meetingTitles = FetchDescriptor<MeetingRecord>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
+        meetingTitles.propertiesToFetch = [\.title]
+        let read = notes.map(\.title) + ((try? Store.shared.context.fetch(meetingTitles)) ?? []).map(\.title)
+        titles = read
+        return read
+    }
 
     static func refreshEntities(_ knowledge: KnowledgeService) async {
         guard Date().timeIntervalSince(entitiesRead) > 30 else { return }
@@ -53,7 +75,7 @@ enum LinkTargets {
     static func exists(_ title: String) -> Bool {
         if Date().timeIntervalSince(keysBuilt) > 2 {
             keysBuilt = Date()
-            keys = Set(notes.map { WikiLinks.key($0.title) } + meetings.map { WikiLinks.key($0.title) }
+            keys = Set(allTitles.map { WikiLinks.key($0) }
                        + Store.shared.binders(includeArchived: true).map { WikiLinks.key($0.name) } + entities.map { WikiLinks.key($0.name) })
         }
         if keys.contains(WikiLinks.key(title)) { return true }
@@ -73,7 +95,7 @@ enum LinkTargets {
     /// Titles to offer after "[[", best first: the most recent notes and meetings when nothing's typed yet.
     static func suggestions(for typed: String) -> [String] {
         var seen = Set<String>()
-        let titles = (notes.map(\.title) + meetings.map(\.title) + Store.shared.binders().map(\.name) + entities.map(\.name))
+        let titles = (allTitles + Store.shared.binders().map(\.name) + entities.map(\.name))
             .filter { $0 != "Untitled note" && seen.insert(WikiLinks.key($0)).inserted }
         let typed = typed.trimmingCharacters(in: .whitespaces)
         guard !typed.isEmpty else { return Array(titles.prefix(12)) }
@@ -120,12 +142,14 @@ enum LinkTargets {
             navigation.pendingEntityID = id
             navigation.selection = .knowledge
         case nil:
+            guard Store.shared.allowsSave() else { return }
             let binder = Store.shared.binder(binderID) ?? Store.shared.defaultBinder()
             let note = NoteItem(text: "# \(destination.page)\n\n")
             note.binderID = binder.id
             note.sharedWithTeam = binder.sharedWithTeam
             Store.shared.insert(note)
             keysBuilt = .distantPast
+            titles = nil
             show(binder: binder.id, tab: .notes) { $0.pendingNoteID = note.id }
         }
     }
@@ -167,6 +191,7 @@ enum LinkTargets {
         guard WikiLinks.key(old) != WikiLinks.key(new), WikiLinks.canLink(old), WikiLinks.canLink(new),
               ![old, new].contains("Untitled note") else { return nil }
         keysBuilt = .distantPast
+        titles = nil
         guard find(old) == nil else { return nil }
         // Typing not yet handed to its note would be lost when the note changes under it.
         MarkdownEditor.flushAll()
@@ -215,6 +240,7 @@ enum LinkTargets {
             }
         }
         keysBuilt = .distantPast
+        titles = nil
         Store.shared.save()
     }
 }
@@ -357,7 +383,7 @@ struct MentionsPanel: View {
         let mentions = mentions
         let linked = mentions.filter(\.linked), unlinked = mentions.filter { !$0.linked }
         VStack(alignment: .leading, spacing: 8) {
-            Text(heading).font(.headline)
+            Text(heading).font(BindersTheme.cardTitle)
             if mentions.isEmpty {
                 Text(searchable ? "Nothing else mentions “\(title)” yet. Type [[ in a note to link to it." : "Give this a title to see where it's mentioned.")
                     .font(.callout)
@@ -383,7 +409,7 @@ struct MentionsPanel: View {
                 .frame(width: 14)
             VStack(alignment: .leading, spacing: 2) {
                 Button(mention.title) { LinkTargets.open(mention.title, from: mention.binderID) }
-                    .buttonStyle(.link)
+                    .themedLink()
                     .font(.callout.weight(.medium))
                     .lineLimit(1)
                 Text(mention.snippet)

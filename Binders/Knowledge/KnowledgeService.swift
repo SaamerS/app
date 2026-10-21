@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 import Observation
 import SwiftData
@@ -130,9 +129,49 @@ final class KnowledgeService {
         var question: String
         var text: String
         var sources: [KnowledgeHit]
+        /// Found, and left out of the answer: passages from notes with an agent's words in them, until you make them yours.
+        var leftOut: [KnowledgeHit] = []
+    }
+
+    /// Ask as it goes, for what shows it: the passages found by their words (at once, before the slower search by
+    /// meaning), then the passages the answer draws on, then the answer as it's written.
+    struct AskProgress: Equatable, Sendable {
+        var stage: AskStage
+        var sources: [KnowledgeHit]
+        /// The answer so far, cleaned up as the finished one will be, with the writing stage.
+        var text = ""
+    }
+
+    /// What the last pass did, for the log and the speed self-test.
+    struct PassReport: Equatable, Sendable, CustomStringConvertible {
+        var read = 0
+        var written = 0
+        var removed = 0
+        /// Items saved where their id wasn't known, found by reading their kind whole.
+        var lookedUp = 0
+        var digestCandidates = 0
+        var milliseconds = 0
+        var mainMilliseconds = 0
+
+        var description: String {
+            "\(read) items read, \(written) written, \(removed) removed, \(digestCandidates) waiting for a digest; \(milliseconds) ms, \(mainMilliseconds) ms of it on the main thread"
+                + (lookedUp > 0 ? " (\(lookedUp) looked up)" : "")
+        }
     }
 
     private(set) var status = Status()
+    @ObservationIgnored private(set) var lastPass = PassReport()
+    /// Off for self-tests that time or check the index alone: no digests, embeddings or people and topics.
+    @ObservationIgnored var modelWork = true
+    /// A stand-in for the model that writes digests, for self-tests: digests are written with it even with `modelWork` off.
+    @ObservationIgnored var digestModel: LLMClient?
+    /// Stand-ins for self-tests: the model that writes Ask's answers, and what a search's words become for the search by
+    /// meaning, instead of the ones in Settings.
+    @ObservationIgnored var answerModel: LLMClient?
+    @ObservationIgnored var queryEmbedder: (@Sendable (String) async throws -> [Float])?
+    /// The longest an answer shown as it's written takes, from the question to its last word, the search included: the
+    /// iPhone waits a little longer (LinkTimeouts.ask), so it always gets what was written. Shorter for self-tests.
+    @ObservationIgnored var answerSeconds: TimeInterval = 180
     /// Bumped whenever indexed data changes, so views can reload.
     private(set) var revision = 0
     private(set) var pullProgress: Double?
@@ -142,6 +181,13 @@ final class KnowledgeService {
     private(set) var digestIssues: [UUID: String] = [:]
 
     @ObservationIgnored let store = KnowledgeStore(url: AppPaths.support.appendingPathComponent("Knowledge.sqlite"))
+    /// Reads the library for the index, off the main thread.
+    @ObservationIgnored private lazy var indexer = KnowledgeIndexer(container: Store.shared.container, store: store)
+    /// What was saved since the last pass, so a pass reads only that; kept from the first pass on.
+    @ObservationIgnored private var changes: IndexChangeLog?
+    /// The first notes due a digest as of the last pass, the one edited longest ago first, and how many are due in all.
+    @ObservationIgnored private var digestsDue: [UUID] = []
+    @ObservationIgnored private var digestsDueCount = 0
     /// Entity extraction shares the local model with dictation; it waits while this returns true.
     @ObservationIgnored var isAppBusy: () -> Bool = { false }
     @ObservationIgnored private var indexing = false
@@ -153,7 +199,10 @@ final class KnowledgeService {
     private var settings: AppSettings { AppSettings.shared }
 
     func start() {
-        saveObserver = NotificationCenter.default.addObserver(forName: ModelContext.didSave, object: nil, queue: .main) { [weak self] _ in
+        trackChanges()
+        saveObserver = NotificationCenter.default.addObserver(forName: ModelContext.didSave, object: nil, queue: .main) { [weak self] notification in
+            // The boards aren't indexed: an agent's progress report doesn't send the index over the whole library again.
+            guard !TaskCard.onlyBoards(notification.userInfo) else { return }
             MainActor.assumeIsolated { self?.scheduleIndex(after: 4) }
         }
         timer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
@@ -166,12 +215,18 @@ final class KnowledgeService {
         pending?.cancel()
         pending = Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
-            guard !Task.isCancelled else { return }
-            await self?.indexNow()
+            guard !Task.isCancelled, let self else { return }
+            // Once a pass starts it runs to the end: a save meanwhile asks for another pass rather than cancelling this
+            // one, which cut its model calls off and turned its waits for the app into a spin on the main thread.
+            self.pending = nil
+            await self.indexNow()
         }
     }
 
     func indexNow() async {
+        // The library didn't open: an index of the empty stand-in would take everything out of the index on disk.
+        guard Store.shared.canSave else { return }
+        trackChanges()
         guard !indexing else {
             needsAnotherPass = true
             return
@@ -184,11 +239,22 @@ final class KnowledgeService {
         }
         repeat {
             needsAnotherPass = false
-            await digestNotes()
+            let started = Date()
+            lastPass = PassReport()
             await syncDocuments()
+            // Digests for notes that have settled, and their passages in the same pass.
+            if await digestNotes() { await syncDocuments() }
+            lastPass.milliseconds = Int(Date().timeIntervalSince(started) * 1000)
+            Log.app.notice("Knowledge pass: \(self.lastPass.description, privacy: .public)")
+            guard modelWork else { continue }
             await embedPending()
             await extractEntities()
         } while needsAnotherPass
+    }
+
+    /// Starts noting what's saved, so each pass reads only that. Until then a pass reads everything.
+    private func trackChanges() {
+        if changes == nil { changes = IndexChangeLog(container: Store.shared.container) }
     }
 
     /// Demo screenshots: index the throwaway store, then file hand-written people and topics per document title
@@ -196,6 +262,7 @@ final class KnowledgeService {
     func seedDemoGraph(_ byTitle: [String: ExtractionResult]) async {
         guard AppPaths.isDemo else { return }
         await store.reset()
+        await indexer.forget()
         await syncDocuments()
         while let job = await store.nextEntityJob(kinds: [.meeting, .conversation, .note, .writing]) {
             let result = byTitle[job.title] ?? byTitle.first { job.title.hasPrefix($0.key) }?.value ?? ExtractionResult()
@@ -206,23 +273,34 @@ final class KnowledgeService {
     }
 
     func rebuild() async {
+        guard Store.shared.allowsSave() else { return }
         await store.reset()
+        await indexer.forget()
         revision += 1
         await indexNow()
     }
 
     // MARK: Search and answers
 
+    /// Passages by their words and by meaning together. `onKeywordHits` is told the ones with the words first, as they're
+    /// found, before the search by meaning waits on the embedding model.
     func search(_ query: String, kinds: Set<KnowledgeKind>? = nil, owner: KnowledgeOwner = .everyone, binder: UUID? = nil,
-                limit: Int = 30) async -> [KnowledgeHit] {
+                limit: Int = 30, onKeywordHits: (([KnowledgeHit]) -> Void)? = nil) async -> [KnowledgeHit] {
         let text = query.trimmed
         guard !text.isEmpty else { return [] }
         let binderKey = binder?.uuidString
         let keywordHits = await store.keywordSearch(text, limit: 40, kinds: kinds, owner: owner, binder: binderKey)
+        // Labelled with the agent where a note has an agent's words, so what's shown first is told apart too.
+        onKeywordHits?(labelled(Self.fused(keywordHits, [], limit: limit)))
         var semanticHits: [KnowledgeHit] = []
-        if let client = embeddingClient(), let vector = try? await client.embed(["task: search result | query: \(text)"]).first {
+        if let vector = await queryVector(text) {
             semanticHits = await store.semanticSearch(vector, limit: 40, minScore: 0.35, kinds: kinds, owner: owner, binder: binderKey)
         }
+        return labelled(Self.fused(keywordHits, semanticHits, limit: limit))
+    }
+
+    /// The two searches' passages in one ranking (reciprocal rank fusion). One found by its words keeps its highlights.
+    private static func fused(_ keywordHits: [KnowledgeHit], _ semanticHits: [KnowledgeHit], limit: Int) -> [KnowledgeHit] {
         var byID: [Int64: KnowledgeHit] = [:]
         for hit in semanticHits { byID[hit.chunkID] = hit }
         for hit in keywordHits { byID[hit.chunkID] = hit }
@@ -233,6 +311,31 @@ final class KnowledgeService {
                 hit.score = ranked.score
                 return hit
             }
+    }
+
+    // MARK: Agent text
+
+    /// Passages from notes with an agent's words in them, labelled with the agent: search finds them like any other, and
+    /// answers leave them out (`ask`) until you make the note yours. While the library didn't open, whose words a note
+    /// holds is in the library, so notes are left out rather than shown as yours.
+    func labelled(_ hits: [KnowledgeHit]) -> [KnowledgeHit] {
+        guard hits.contains(where: { $0.kind == .note }) else { return hits }
+        guard Store.shared.canSave else { return hits.filter { $0.kind != .note } }
+        let marks = Store.shared.agentMarks()
+        guard !marks.isEmpty else { return hits }
+        return hits.map { hit in
+            guard hit.kind == .note, let mark = marks[hit.sourceID] else { return hit }
+            var labelled = hit
+            labelled.agent = mark
+            return labelled
+        }
+    }
+
+    /// A search's words for the search by meaning, from the embedding model; nil without one.
+    private func queryVector(_ text: String) async -> [Float]? {
+        if let queryEmbedder { return try? await queryEmbedder(text) }
+        guard let client = embeddingClient() else { return nil }
+        return try? await client.embed(["task: search result | query: \(text)"]).first
     }
 
     // MARK: Corrections
@@ -247,6 +350,11 @@ final class KnowledgeService {
 
     @ObservationIgnored private var correctionCache: (revision: Int, list: [CorrectionNote])?
 
+    /// A note's correction now counts, or no longer does, without its words changing (Make It Mine): looked up again.
+    func correctionsChanged() {
+        correctionCache = nil
+    }
+
     /// The corrections, looked up again only when what's indexed has changed.
     func currentCorrections() -> [CorrectionNote] {
         if let cache = correctionCache, cache.revision == revision { return cache.list }
@@ -255,10 +363,13 @@ final class KnowledgeService {
         return list
     }
 
-    /// Every correction in the notes, newest first.
-    func corrections() -> [CorrectionNote] {
+    /// Every correction in the notes, newest first. An agent's correction is its note, not yours, so it doesn't steer
+    /// answers unless `includingAgents` (to find one made twice); nor does one in a note an agent changed since, until you
+    /// make it yours. `includingTeam: false` leaves out teammates' corrections, for what may not read their items.
+    func corrections(includingAgents: Bool = false, includingTeam: Bool = true) -> [CorrectionNote] {
         let tag = KnowledgeCorrection.tag
-        let notes = (try? Store.shared.context.fetch(FetchDescriptor<NoteItem>(predicate: #Predicate { $0.text.contains(tag) }))) ?? []
+        let notes = ((try? Store.shared.context.fetch(FetchDescriptor<NoteItem>(predicate: #Predicate { $0.text.contains(tag) }))) ?? [])
+            .filter { (includingAgents || $0.agentMark.isEmpty) && (includingTeam || !$0.isTeamCopy) }
         return notes.compactMap { note in
             KnowledgeCorrection.parse(note.text).map { CorrectionNote(id: note.id, date: note.updatedAt, binderID: note.binderID, correction: $0) }
         }
@@ -270,14 +381,50 @@ final class KnowledgeService {
         corrections.first { $0.id.uuidString != hit.sourceID && $0.correction.corrects(hit.text) }
     }
 
-    func ask(_ question: String, searchQuery: String? = nil, binder: UUID? = nil) async -> Answer {
-        var hits = await search(searchQuery ?? question, binder: binder, limit: 8)
-        if hits.isEmpty, searchQuery != nil { hits = await search(question, binder: binder, limit: 8) }
-        guard !hits.isEmpty else {
-            return Answer(question: question, text: "I couldn't find anything about that in your meetings, notes or dictations.", sources: [])
+    /// `kinds`, `owner` and `keep` narrow what the answer may draw on, as for a tool that may not read everything.
+    /// `brief`: one or two sentences, or no text at all when the binders don't answer it or there's no model, for something
+    /// asked out loud and heard back in a notification. Notes with an agent's words in them are never drawn on: they come
+    /// back as `leftOut` until you make them yours.
+    /// `progress` is told how it's going, for something that shows it: the passages with the words at once, then the
+    /// passages the answer draws on, then the answer as it's written (at most every 50 ms). With it, the answer streams;
+    /// without it, it's one reply, as before.
+    func ask(_ question: String, searchQuery: String? = nil, binder: UUID? = nil, kinds: Set<KnowledgeKind>? = nil,
+             owner: KnowledgeOwner = .everyone, brief: Bool = false, keep: @escaping (KnowledgeHit) -> Bool = { _ in true },
+             progress: (@MainActor (AskProgress) -> Void)? = nil) async -> Answer {
+        // While the library didn't open, which notes hold an agent's words, and your corrections, are in it: say so, as
+        // MCP's reads do, rather than answer without them.
+        guard Store.shared.canSave else { return Answer(question: question, text: brief ? "" : Store.unanswerableMessage, sources: []) }
+        // An answer shown as it's written has its time from now, so the search counts too.
+        let budget = TimeBudget(seconds: answerSeconds)
+        /// What the answer may draw on of what a search found, the same for the passages with the words shown first. An
+        /// agent's passages don't take the place of yours: your best 16, as if they weren't there; theirs are left out, one
+        /// per note.
+        func usable(_ found: [KnowledgeHit]) -> (hits: [KnowledgeHit], leftOut: [KnowledgeHit]) {
+            let yours = found.filter { $0.agent == nil }.prefix(16).filter(keep).prefix(8)
+            var notes = Set<String>()
+            let agents = found.filter { $0.agent != nil && keep($0) && notes.insert($0.sourceID).inserted }.prefix(3)
+            return (Array(yours), Array(agents))
         }
-        // Corrections to what was found come first, as sources the answer has to follow.
-        let all = corrections()
+        func find(_ text: String) async -> (hits: [KnowledgeHit], leftOut: [KnowledgeHit]) {
+            let found = await search(text, kinds: kinds, owner: owner, binder: binder, limit: 32,
+                                     onKeywordHits: progress.map { tell in { tell(AskProgress(stage: .keywordHits, sources: usable($0).hits)) } })
+            return usable(found)
+        }
+        var found = await find(searchQuery ?? question)
+        if found.hits.isEmpty, searchQuery != nil {
+            let again = await find(question)
+            found = (again.hits, again.leftOut.isEmpty ? found.leftOut : again.leftOut)
+        }
+        var hits = found.hits
+        let leftOut = found.leftOut
+        guard !hits.isEmpty else {
+            let none = leftOut.isEmpty ? "I couldn't find anything about that in your meetings, notes or dictations."
+                : "Only notes an agent wrote or changed mention that, and answers leave those out until you make them yours."
+            return Answer(question: question, text: brief ? "" : none, sources: [], leftOut: leftOut)
+        }
+        // Corrections to what was found come first, as sources the answer has to follow: only yours when it may draw only
+        // on yours.
+        let all = corrections(includingTeam: owner != .mine)
         var seen = Set<String>()
         let relevant = all.filter { correction in
             hits.contains { $0.sourceID == correction.id.uuidString || correction.correction.corrects($0.text) }
@@ -295,8 +442,9 @@ final class KnowledgeService {
             }
             hits = corrections + hits.filter { hit in !relevant.contains { $0.id.uuidString == hit.sourceID } }
         }
-        guard let client = settings.makeLLMClient() else {
-            return Answer(question: question, text: "Choose a language model in Settings to get written answers. The closest matches are below.", sources: hits)
+        progress?(AskProgress(stage: .sources, sources: hits))
+        guard let client = answerModel ?? settings.makeLLMClient() else {
+            return Answer(question: question, text: brief ? "" : "Choose a language model in Settings to get written answers. The closest matches are below.", sources: hits, leftOut: leftOut)
         }
         let contexts = hits.map { hit -> KnowledgeContext in
             if let item = relevant.first(where: { $0.id.uuidString == hit.sourceID }) {
@@ -306,14 +454,92 @@ final class KnowledgeService {
             }
             return KnowledgeContext(label: "\(hit.kind.singularName) “\(hit.title)” · \(hit.metaLine)", text: hit.text)
         }
-        do {
-            let output = try await client.complete(system: KnowledgePrompts.answerSystemPrompt(today: Date().formatted(date: .complete, time: .omitted)),
-                                                   user: KnowledgePrompts.answerUserPrompt(question: question, contexts: contexts),
-                                                   maxTokens: 900, temperature: 0.2, timeout: 180)
-            return Answer(question: question, text: OutputGuard.sanitize(output), sources: hits)
-        } catch {
-            return Answer(question: question, text: "Couldn't write an answer (\(error.localizedDescription)). The closest matches are below.", sources: hits)
+        let today = Date().formatted(date: .complete, time: .omitted)
+        if brief {
+            let output = try? await client.complete(system: KnowledgePrompts.briefAnswerSystemPrompt(today: today),
+                                                    user: KnowledgePrompts.answerUserPrompt(question: question, contexts: contexts),
+                                                    maxTokens: 250, temperature: 0.2, timeout: 25)
+            return Answer(question: question, text: output.flatMap(SuggestionPrompts.parseAnswer) ?? "", sources: hits, leftOut: leftOut)
         }
+        let system = KnowledgePrompts.answerSystemPrompt(today: today)
+        let user = KnowledgePrompts.answerUserPrompt(question: question, contexts: contexts)
+        guard let progress else {
+            do {
+                let output = try await client.complete(system: system, user: user, maxTokens: 900, temperature: 0.2, timeout: 180)
+                return Answer(question: question, text: OutputGuard.sanitize(output), sources: hits, leftOut: leftOut)
+            } catch {
+                return Answer(question: question, text: "Couldn't write an answer (\(error.localizedDescription)). The closest matches are below.", sources: hits, leftOut: leftOut)
+            }
+        }
+        let written = await streamAnswer(client, system: system, user: user, sources: hits, within: budget, progress: progress)
+        guard let error = written.error else {
+            return Answer(question: question, text: OutputGuard.sanitize(written.text), sources: hits, leftOut: leftOut)
+        }
+        // Stopped part-way: what was written stays, with why it stopped.
+        let partial = written.text
+        let why = (partial.isEmpty ? "Couldn't write an answer" : "Couldn't finish the answer")
+            + (error is TimeLimit.Exceeded ? " in time." : " (\(error.localizedDescription)).")
+        return Answer(question: question, text: (partial.isEmpty ? "" : partial + "\n\n") + why + " The closest matches are below.", sources: hits, leftOut: leftOut)
+    }
+
+    /// The answer from the model as it's written, within `budget`: `progress` is told the text so far at most every 50 ms,
+    /// and has been told the last of it before this returns. On an error, or out of time, what was shown of it by then,
+    /// and the error.
+    private func streamAnswer(_ client: LLMClient, system: String, user: String, sources: [KnowledgeHit], within budget: TimeBudget,
+                              progress: @escaping @MainActor (AskProgress) -> Void) async -> (text: String, error: Error?) {
+        // A model whose replies start inside its reasoning, as an earlier reply showed, shows nothing until it closes.
+        let model = "\(settings.llmProvider.rawValue):\(client.model)"
+        let opens = Self.opensInReasoning(model)
+        // Only the newest text waits to be shown: a model faster than the screen skips the pieces in between.
+        let (pieces, received) = AsyncStream<String>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let shown = Task { @MainActor () -> String in
+            var last = "", told = ""
+            for await piece in pieces {
+                last = piece
+                let text = OutputGuard.streaming(piece, opensInReasoning: opens)
+                guard !text.isEmpty, text != told else { continue }
+                told = text
+                progress(AskProgress(stage: .writing, sources: sources, text: text))
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+            return last
+        }
+        do {
+            // Out of time, the model is stopped: closing its stream stops the server writing too.
+            let output = try await TimeLimit.run(within: budget.left) {
+                try await client.stream(system: system, user: user, maxTokens: 900, temperature: 0.2, timeout: 180,
+                                        stopWhen: { _ in false }, onText: { received.yield($0) })
+            }
+            received.yield(output)
+            received.finish()
+            _ = await shown.value
+            Self.note(model, opensInReasoning: OutputGuard.opensInReasoning(output))
+            return (output, nil)
+        } catch {
+            received.finish()
+            let last = await shown.value
+            if OutputGuard.opensInReasoning(last) { Self.note(model, opensInReasoning: true) }
+            return (OutputGuard.streaming(last, opensInReasoning: opens), error)
+        }
+    }
+
+    // MARK: Models that open in reasoning
+
+    /// Models whose replies start inside their reasoning, as "provider:model", because their chat template opened it (a
+    /// server that passes reasoning on as the reply): an answer from one shows nothing while it's written until the
+    /// reasoning closes. Noted from a reply that closes reasoning it never opened, and let go after one that doesn't.
+    /// Apart in a throwaway folder, as self-tests' Keychain items are.
+    static var reasoningOpenersKey: String { (AppPaths.isDemo ? "selftest-" : "") + "modelsOpeningInReasoning" }
+
+    static func opensInReasoning(_ model: String) -> Bool {
+        AppDefaults.store.stringArray(forKey: reasoningOpenersKey)?.contains(model) == true
+    }
+
+    private static func note(_ model: String, opensInReasoning opens: Bool) {
+        var models = Set(AppDefaults.store.stringArray(forKey: reasoningOpenersKey) ?? [])
+        guard models.contains(model) != opens else { return }
+        if opens { models.insert(model) } else { models.remove(model) }
+        AppDefaults.store.set(models.sorted(), forKey: reasoningOpenersKey)
     }
 
     func pullEmbeddingModel() async {
@@ -350,19 +576,21 @@ final class KnowledgeService {
 
     // MARK: Note digests
 
-    /// Writes digests for notes that changed and have settled, a few per pass so a big import doesn't hog the model.
-    private func digestNotes() async {
-        guard settings.noteDigests, let client = settings.makeLLMClient() else { return }
-        let all = (try? Store.shared.context.fetch(FetchDescriptor<NoteItem>(sortBy: [SortDescriptor(\.updatedAt)]))) ?? []
-        let stale = all.filter { note in
-            note.digestHash != Self.noteContentHash(note.text)
-                && NoteDigest.isEligible(wordCount: note.text.wordCount, secondsSinceEdit: Date().timeIntervalSince(note.updatedAt))
+    /// Writes digests for notes that changed and have settled, a few per pass so a big import doesn't hog the model. The
+    /// pass found them; each is checked again as it is now. True when one was written.
+    private func digestNotes() async -> Bool {
+        guard settings.noteDigests, let client = digestModel ?? (modelWork ? settings.makeLLMClient(lane: .later) : nil) else { return false }
+        var wrote = false
+        var tried = 0
+        for id in digestsDue where tried < 4 {
+            guard let note = Store.shared.note(id), note.digestHash != Self.noteContentHash(note.text),
+                  NoteDigest.isEligible(wordCount: note.text.wordCount, secondsSinceEdit: Date().timeIntervalSince(note.updatedAt)) else { continue }
+            tried += 1
+            while isAppBusy(), !Task.isCancelled { try? await Task.sleep(for: .seconds(3)) }
+            if await digest(note, using: client) { wrote = true }
         }
-        for note in stale.prefix(4) {
-            while isAppBusy() { try? await Task.sleep(for: .seconds(3)) }
-            await digest(note, using: client)
-        }
-        if stale.count > 4 { scheduleIndex(after: 20) }
+        if digestsDueCount > 4 { scheduleIndex(after: 20) }
+        return wrote
     }
 
     /// Writes (or rewrites) a note's digest now, whatever its length.
@@ -375,9 +603,11 @@ final class KnowledgeService {
         await digest(note, using: client)
     }
 
-    private func digest(_ note: NoteItem, using client: LLMClient) async {
+    /// True when it wrote the digest.
+    @discardableResult
+    private func digest(_ note: NoteItem, using client: LLMClient) async -> Bool {
         let text = note.text.trimmed
-        guard text.wordCount >= 3 else { return }
+        guard text.wordCount >= 3 else { return false }
         digestingNoteIDs.insert(note.id)
         digestIssues[note.id] = nil
         defer { digestingNoteIDs.remove(note.id) }
@@ -387,11 +617,11 @@ final class KnowledgeService {
                                                       text: String(text.prefix(30_000)))
             let output = try await client.stream(system: NotePrompts.digestSystemPrompt(), user: prompt,
                                                  maxTokens: 900, temperature: 0.2, timeout: 300, stopWhen: { LoopGuard.isLooping($0) })
-            guard note.modelContext != nil, !note.isDeleted else { return }
+            guard note.modelContext != nil, !note.isDeleted else { return false }
             let parsed = SummaryParser.parse(output)
             guard !parsed.body.isEmpty else {
                 digestIssues[note.id] = "The model's reply had no digest in it. Try again, or choose another model in Settings."
-                return
+                return false
             }
             // A rewritten digest keeps the to-dos already ticked off.
             note.digest = NotesEditing.carryOverTicks(from: note.digest, into: (parsed.title.map { "# \($0)\n\n" } ?? "") + parsed.body)
@@ -399,16 +629,18 @@ final class KnowledgeService {
             Store.shared.save()
             status.extractionIssue = nil
             revision += 1
+            return true
         } catch {
             Log.app.error("Couldn't digest note: \(error.localizedDescription)")
             status.extractionIssue = "Couldn't write a note digest: \(error.localizedDescription)"
             digestIssues[note.id] = "Couldn't write the digest. \(error.localizedDescription)"
+            return false
         }
     }
 
     /// Hash of a note's text, so a digest can tell whether the note changed since it was written.
     nonisolated static func noteContentHash(_ text: String) -> String {
-        hash([text])
+        KnowledgeContentHash.of([text])
     }
 
     /// Removes a wrongly extracted person, project or topic and keeps it from coming back.
@@ -444,21 +676,25 @@ final class KnowledgeService {
         scheduleIndex(after: 0)
     }
 
+    /// One pass of the indexer over what changed, off the main thread; the main thread only hands it the changes and
+    /// takes its report.
     private func syncDocuments() async {
-        let documents = collectDocuments()
-        let known = await store.documentHashes()
-        var changed = false
-        for (document, chunks) in documents where known[document.id] != document.contentHash {
-            await store.upsert(document, chunks: chunks)
-            changed = true
-        }
-        let live = Set(documents.map(\.0.id))
-        let stale = known.keys.filter { !live.contains($0) }
-        if !stale.isEmpty {
-            await store.remove(documentIDs: stale)
-            changed = true
-        }
-        if changed { revision += 1 }
+        trackChanges()
+        var began = Date()
+        let saved = changes?.take() ?? IndexChangeLog.Changes()
+        let revisions = Store.shared.segmentRevisions
+        lastPass.mainMilliseconds += Int(Date().timeIntervalSince(began) * 1000)
+        let report = await indexer.pass(saved, transcriptRevisions: revisions)
+        began = Date()
+        lastPass.read += report.read
+        lastPass.written += report.written
+        lastPass.removed += report.removed
+        lastPass.lookedUp += report.lookedUp
+        digestsDue = report.digestsDue
+        digestsDueCount = report.digestsDueCount
+        lastPass.digestCandidates = settings.noteDigests ? report.digestsDueCount : 0
+        if report.written > 0 || report.removed > 0 { revision += 1 }
+        lastPass.mainMilliseconds += Int(Date().timeIntervalSince(began) * 1000)
         await refreshStatus()
     }
 
@@ -508,9 +744,9 @@ final class KnowledgeService {
 
     private func extractEntities() async {
         var learnedNames = false
-        if settings.knowledgeGraph, let client = settings.makeLLMClient() {
+        if settings.knowledgeGraph, let client = settings.makeLLMClient(lane: .later) {
             while let job = await store.nextEntityJob(kinds: [.meeting, .conversation, .note, .writing]) {
-                while isAppBusy() { try? await Task.sleep(for: .seconds(3)) }
+                while isAppBusy(), !Task.isCancelled { try? await Task.sleep(for: .seconds(3)) }
                 let text = String(job.chunks.map(\.text).joined(separator: "\n").prefix(20_000))
                 do {
                     let output = try await client.complete(system: EntityExtraction.systemPrompt(), user: "Title: \(job.title)\n\n\(text)",
@@ -537,79 +773,84 @@ final class KnowledgeService {
 
     private func refreshStatus() async {
         let stats = await store.stats()
-        status.documents = stats.documents
-        status.chunks = stats.chunks
-        status.embedded = stats.embedded
-        status.entities = stats.entities
+        var next = status
+        next.documents = stats.documents
+        next.chunks = stats.chunks
+        next.embedded = stats.embedded
+        next.entities = stats.entities
+        // Set only when it changed: every set redraws what shows it.
+        if next != status { status = next }
     }
 
-    private func collectDocuments() -> [(KnowledgeDocument, [KnowledgeChunk])] {
-        let context = Store.shared.context
-        var documents: [(KnowledgeDocument, [KnowledgeChunk])] = []
+    // MARK: Documents
+    //
+    // What each item puts in the index, made by the indexer off the main thread. The content hashes have to stay exactly
+    // as they are: a different hash for the same words writes, embeds and extracts that item again after an update
+    // (KnowledgeContentHashTests and --selftest-index pin them).
 
-        for meeting in (try? context.fetch(FetchDescriptor<MeetingRecord>())) ?? [] where meeting.status == "ready" || meeting.status == "failed" {
-            var chunks: [KnowledgeChunk] = []
-            if !meeting.summary.trimmed.isEmpty { chunks += KnowledgeChunker.chunks(meeting.summary, label: "Summary") }
-            if !meeting.userNotes.trimmed.isEmpty { chunks += KnowledgeChunker.chunks(meeting.userNotes, label: "My notes") }
-            chunks += KnowledgeChunker.transcriptChunks(TranscriptFormatter.blocks(Store.shared.segments(for: meeting.id), names: meeting.speakerNames))
-            guard !chunks.isEmpty else { continue }
-            let author = meeting.isTeamCopy ? (meeting.teamAuthorName ?? "a teammate") : nil
-            let kind: KnowledgeKind = meeting.isConversation ? .conversation : .meeting
-            documents.append((KnowledgeDocument(id: "\(kind.rawValue):\(meeting.id.uuidString)", kind: kind, sourceID: meeting.id.uuidString,
-                                                title: meeting.title, createdAt: meeting.createdAt,
-                                                contentHash: Self.hash([meeting.title] + chunks.map(\.text) + Self.authorPart(author)
-                                                                       + [meeting.binderID?.uuidString ?? ""]),
-                                                author: author, binderID: meeting.binderID?.uuidString), chunks))
-        }
+    /// A meeting's or capture's notes, your notes and its transcript (`segments`, in order); nil when it has none of them.
+    nonisolated static func document(for meeting: MeetingRecord, segments: [TranscriptSegment]) -> (KnowledgeDocument, [KnowledgeChunk])? {
+        guard meeting.status == "ready" || meeting.status == "failed" else { return nil }
+        var chunks: [KnowledgeChunk] = []
+        if !meeting.summary.trimmed.isEmpty { chunks += KnowledgeChunker.chunks(meeting.summary, label: "Summary") }
+        if !meeting.userNotes.trimmed.isEmpty { chunks += KnowledgeChunker.chunks(meeting.userNotes, label: "My notes") }
+        chunks += KnowledgeChunker.transcriptChunks(TranscriptFormatter.blocks(segments, names: meeting.speakerNames))
+        guard !chunks.isEmpty else { return nil }
+        let author = meeting.isTeamCopy ? (meeting.teamAuthorName ?? "a teammate") : nil
+        let kind: KnowledgeKind = meeting.isConversation ? .conversation : .meeting
+        return (KnowledgeDocument(id: "\(kind.rawValue):\(meeting.id.uuidString)", kind: kind, sourceID: meeting.id.uuidString,
+                                  title: meeting.title, createdAt: meeting.createdAt,
+                                  contentHash: hash([meeting.title] + chunks.map(\.text) + authorPart(author)
+                                                    + [meeting.binderID?.uuidString ?? ""]),
+                                  author: author, binderID: meeting.binderID?.uuidString), chunks)
+    }
 
-        for note in (try? context.fetch(FetchDescriptor<NoteItem>())) ?? [] where !note.text.trimmed.isEmpty {
-            var chunks: [KnowledgeChunk] = []
-            if !note.digest.trimmed.isEmpty { chunks += KnowledgeChunker.chunks(note.digest, label: "Digest") }
-            chunks += KnowledgeChunker.chunks(note.text)
-            let author = note.isTeamCopy ? (note.teamAuthorName ?? "a teammate") : nil
-            documents.append((KnowledgeDocument(id: "note:\(note.id.uuidString)", kind: .note, sourceID: note.id.uuidString,
-                                                title: note.title, createdAt: note.createdAt,
-                                                contentHash: Self.hash(chunks.map(\.text) + Self.authorPart(author) + [note.binderID?.uuidString ?? ""]),
-                                                author: author, binderID: note.binderID?.uuidString), chunks))
-        }
+    /// A note, its digest first; nil for an empty note.
+    nonisolated static func document(for note: NoteItem) -> (KnowledgeDocument, [KnowledgeChunk])? {
+        guard !note.text.trimmed.isEmpty else { return nil }
+        var chunks: [KnowledgeChunk] = []
+        if !note.digest.trimmed.isEmpty { chunks += KnowledgeChunker.chunks(note.digest, label: "Digest") }
+        chunks += KnowledgeChunker.chunks(note.text)
+        let author = note.isTeamCopy ? (note.teamAuthorName ?? "a teammate") : nil
+        return (KnowledgeDocument(id: "note:\(note.id.uuidString)", kind: .note, sourceID: note.id.uuidString,
+                                  title: note.title, createdAt: note.createdAt,
+                                  contentHash: hash(chunks.map(\.text) + authorPart(author) + [note.binderID?.uuidString ?? ""]),
+                                  author: author, binderID: note.binderID?.uuidString), chunks)
+    }
 
-        for writing in (try? context.fetch(FetchDescriptor<WritingRecord>())) ?? [] where writing.wordCount >= 3 {
-            var header = "Written in \(writing.appName ?? writing.source)"
-            if !writing.recipients.isEmpty { header += " to \(writing.recipients)" }
-            if let subject = writing.subject, !subject.isEmpty { header += ", subject: \(subject)" }
-            let chunks = KnowledgeChunker.chunks(header + "\n" + writing.text, label: writing.appName)
-            documents.append((KnowledgeDocument(id: "writing:\(writing.id.uuidString)", kind: .writing, sourceID: writing.id.uuidString,
-                                                title: writing.title, createdAt: writing.createdAt,
-                                                contentHash: Self.hash([writing.title] + chunks.map(\.text) + [writing.binderID?.uuidString ?? ""]),
-                                                binderID: writing.binderID?.uuidString), chunks))
-        }
+    /// Something you wrote, with where and to whom; nil under three words.
+    nonisolated static func document(for writing: WritingRecord) -> (KnowledgeDocument, [KnowledgeChunk])? {
+        guard writing.wordCount >= 3 else { return nil }
+        var header = "Written in \(writing.appName ?? writing.source)"
+        if !writing.recipients.isEmpty { header += " to \(writing.recipients)" }
+        if let subject = writing.subject, !subject.isEmpty { header += ", subject: \(subject)" }
+        let chunks = KnowledgeChunker.chunks(header + "\n" + writing.text, label: writing.appName)
+        return (KnowledgeDocument(id: "writing:\(writing.id.uuidString)", kind: .writing, sourceID: writing.id.uuidString,
+                                  title: writing.title, createdAt: writing.createdAt,
+                                  contentHash: hash([writing.title] + chunks.map(\.text) + [writing.binderID?.uuidString ?? ""]),
+                                  binderID: writing.binderID?.uuidString), chunks)
+    }
 
-        let transcripts = (try? context.fetch(FetchDescriptor<TranscriptRecord>(predicate: #Predicate { $0.status == "inserted" }))) ?? []
-        for record in transcripts where record.finalText.wordCount >= 3 {
-            let isCommand = record.mode == "command"
-            let text = isCommand ? "Command: \(record.rawText)\nResult: \(record.finalText)" : record.finalText
-            let chunks = KnowledgeChunker.chunks(text, label: record.appName)
-            let app = record.appName ?? "an app"
-            let kind: KnowledgeKind = isCommand ? .command : .dictation
-            documents.append((KnowledgeDocument(id: "\(kind.rawValue):\(record.id.uuidString)", kind: kind, sourceID: record.id.uuidString,
-                                                title: isCommand ? "Command in \(app)" : "Dictation in \(app)", createdAt: record.createdAt,
-                                                contentHash: Self.hash(chunks.map(\.text))), chunks))
-        }
-        return documents
+    /// A dictation or command typed into an app; nil for one that wasn't, or under three words.
+    nonisolated static func document(for record: TranscriptRecord) -> (KnowledgeDocument, [KnowledgeChunk])? {
+        guard record.status == "inserted", record.finalText.wordCount >= 3 else { return nil }
+        let isCommand = record.mode == "command"
+        let text = isCommand ? "Command: \(record.rawText)\nResult: \(record.finalText)" : record.finalText
+        let chunks = KnowledgeChunker.chunks(text, label: record.appName)
+        let app = record.appName ?? "an app"
+        let kind: KnowledgeKind = isCommand ? .command : .dictation
+        return (KnowledgeDocument(id: "\(kind.rawValue):\(record.id.uuidString)", kind: kind, sourceID: record.id.uuidString,
+                                  title: isCommand ? "Command in \(app)" : "Dictation in \(app)", createdAt: record.createdAt,
+                                  contentHash: hash(chunks.map(\.text))), chunks)
     }
 
     /// Only shared items hash their author, so your existing index isn't rebuilt.
-    private static func authorPart(_ author: String?) -> [String] {
+    nonisolated private static func authorPart(_ author: String?) -> [String] {
         author.map { ["author: \($0)"] } ?? []
     }
 
     nonisolated private static func hash(_ parts: [String]) -> String {
-        var hasher = SHA256()
-        for part in parts {
-            hasher.update(data: Data(part.utf8))
-            hasher.update(data: Data([0]))
-        }
-        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        KnowledgeContentHash.of(parts)
     }
 }
 

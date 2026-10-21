@@ -1,0 +1,75 @@
+import Foundation
+
+/// What each end of the link understands beyond the tools, said in `binders/hello`. The Mac lists the methods it takes
+/// (`conversation`, `suggestions`…); a phone lists the suggestion kinds and notifications it reads, and whether it's told
+/// what runs say they're doing (`workStreamsDoing`). Neither sends the other anything it didn't list.
+///
+/// iPhone 2.0 lists nothing, and reads only card and answer suggestions and `binders/changed`: it decodes suggestions
+/// against a closed list, so one kind it doesn't know empties the whole refresh, and it takes any other notification as
+/// "everything changed".
+public enum LinkFeatures {
+    public static let changed = "binders/changed"
+    /// A Mac that takes `binders/warm` loads its model when the phone hears someone start talking, so the write-up
+    /// doesn't wait for it.
+    public static let warm = "warm"
+    public static let warmMethod = "binders/warm"
+    /// A Mac that remembers the `request_id` a phone sends with notes, to-dos, answers and hand-offs, so one sent twice
+    /// (its reply lost on the way) is saved once.
+    public static let dedupe = "dedupe"
+    /// A Mac that streams Ask: keyword hits first, then the answer as it's written, in `binders/ask-progress`.
+    public static let askProgress = "askProgress"
+    public static let askProgressMethod = "binders/ask-progress"
+    /// A Mac that gives a capture's card or idea to the agent you pick: `binders/suggestion` with action "give" and the
+    /// agent's name. One without it takes any action but "accept" as Not Now, so a phone sends "give" only to a Mac that
+    /// lists this.
+    public static let giveTo = "giveTo"
+    /// A Mac whose agents ask for your approval before they send, post or buy, in `binders/approval`: it tells a phone
+    /// that lists that notification when an agent asks (`AgentApproval.Notice`), and takes your decision in
+    /// `binders/decision` (`AgentApproval.Decision`). Macs up to 0.8.0 listed it before they had any approvals to ask.
+    public static let approvals = "approvals"
+    public static let approvalMethod = "binders/approval"
+    public static let decisionMethod = "binders/decision"
+    /// A phone that shows what a run Binders started says it's doing (`doing` in work_streams, and the summary's "… and
+    /// says: …") and keeps it out of its saved copy of the reply. A phone without it saves work_streams whole, so the Mac
+    /// leaves the run's words out of the reply it gives that phone.
+    public static let workStreamsDoing = "workStreamsDoing"
+    /// A Mac that says where a phone can reach it: `addresses` in its hello reply (LinkAddress objects, in the order to try
+    /// them) to a phone that lists `addresses` too, and `binders/addresses` `{addresses}` with the whole new list when it
+    /// changes, to a phone that lists that notification. A phone that lists neither is told neither.
+    public static let addresses = "addresses"
+    public static let addressesMethod = "binders/addresses"
+    /// A Mac that wakes the agent holding a card in progress when you comment on it, and reads `to` with a phone's comment:
+    /// the agent the phone asked you about, or has your yes for. A phone asks first before a comment only on a Mac that
+    /// lists it.
+    public static let commentWakes = "commentWakes"
+    /// A phone that asks before a comment goes to an agent you haven't said yes to, on a Mac that lists `commentWakes`, and
+    /// sends `to` with the comment: the agent it asked about. The Mac wakes on its comment only for that agent while it
+    /// holds the card; a comment from a phone that doesn't list it stays on the card, and the card says Wake Now sends it.
+    public static let commentsAskFirst = "commentsAskFirst"
+
+    public static func suggestion(_ kind: ConversationSuggestion.Kind) -> String { "suggestion:" + kind.rawValue }
+    public static func notification(_ method: String) -> String { "notification:" + method }
+
+    /// What a phone that lists nothing reads: iPhone 2.0.
+    public static let firstPhone: Set<String> = [suggestion(.card), suggestion(.answer), notification(changed)]
+
+    /// What a phone reads, from what its hello listed.
+    public static func phone(_ listed: [String]?) -> Set<String> {
+        guard let listed, !listed.isEmpty else { return firstPhone }
+        return Set(listed)
+    }
+
+    /// Everything this build of the phone reads: every suggestion kind it knows, the notifications it handles, what a
+    /// run says it's doing, where its Mac can be reached, that it sends its yes with a "Binders, …" said in your voice
+    /// (`MomentPayload.agreedFeature`), so the Mac fingerprints an agent that starts on its own with "starts" for it, and
+    /// that it asks first before a comment goes to an agent (`commentsAskFirst`), and
+    /// that it sends its mode for what you say on your own (`MomentPayload.autoFeature`): the Mac then fingerprints an
+    /// agent with its Auto yes with Auto's part too, says in list_agents what Auto can do (`auto`, `auto_mode_start`,
+    /// `auto_left_out`), and puts `handedOver`, `waiting`, `late` and `stop` in its moments' outcomes; and that it vouches
+    /// for a capture in which it heard only you (`ConversationPayload.soloFeature`): it sends the capture's mode and vouch,
+    /// a moment's `fromTranscript` and `uncued`, Stop All, Not Only Me and a capture's mode, and reads `found`, `soloLine`,
+    /// `joins` and list_agents' `solo_start`, `solo` and `auto_fingerprint`.
+    public static let thisPhone: [String] = ConversationSuggestion.Kind.allCases.map(suggestion)
+        + [notification(changed), notification(askProgressMethod), notification(approvalMethod), notification(addressesMethod)]
+        + [workStreamsDoing, addresses, MomentPayload.agreedFeature, commentsAskFirst, MomentPayload.autoFeature, ConversationPayload.soloFeature]
+}

@@ -51,6 +51,40 @@ public enum AudioMath {
         guard samples.count < count else { return samples }
         return samples + [Float](repeating: 0, count: count - samples.count)
     }
+
+    /// From the first loud 30 ms frame to the end of the last: the quiet at either end let go. A frame is loud within
+    /// `belowPeakDB` of the loudest and above `floorDB`. All of it when no frame is loud, or it's shorter than a frame.
+    public static func trimmedQuiet(_ samples: [Float], frameSize: Int = 480, belowPeakDB: Float = 30, floorDB: Float = -55) -> ArraySlice<Float> {
+        guard frameSize > 0, samples.count >= frameSize else { return samples[...] }
+        var levels: [Float] = []
+        levels.reserveCapacity(samples.count / frameSize + 1)
+        var start = 0
+        while start < samples.count {
+            levels.append(decibels(rms(samples[start..<min(samples.count, start + frameSize)])))
+            start += frameSize
+        }
+        let bar = max(floorDB, (levels.max() ?? floorDB) - belowPeakDB)
+        guard let first = levels.firstIndex(where: { $0 >= bar }), let last = levels.lastIndex(where: { $0 >= bar }) else { return samples[...] }
+        return samples[(first * frameSize)..<min(samples.count, (last + 1) * frameSize)]
+    }
+
+    /// The diarizer's window, in samples at 16 kHz: it hears a voice ten seconds at a time.
+    public static let voiceWindow = 10 * 16_000
+
+    /// A clip a few seconds long, made ready for its voice to be scored against your print: its quiet ends trimmed, then
+    /// what's left said again end to end until it fills `count` samples (the diarizer's window). The diarizer pads a short
+    /// clip with silence to its window, and a voice heard that way comes out far from the print taught from twenty seconds,
+    /// whoever spoke: on the bench, 2-5 s clips of the very voice a print was taught from scored about 0.33 against it, and
+    /// other voices 0.28, so nothing passed 0.65. Filled this way, the same voice scores about 0.85, others about 0.3.
+    /// A clip already as long as the window comes back trimmed, as it is.
+    public static func filledForVoice(_ samples: [Float], toAtLeast count: Int = voiceWindow) -> [Float] {
+        let speech = trimmedQuiet(samples)
+        guard !speech.isEmpty, speech.count < count else { return Array(speech) }
+        var filled: [Float] = []
+        filled.reserveCapacity(count)
+        while filled.count < count { filled.append(contentsOf: speech.prefix(count - filled.count)) }
+        return filled
+    }
 }
 
 public struct UsageRecord: Sendable {

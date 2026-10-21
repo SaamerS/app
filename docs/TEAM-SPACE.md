@@ -37,8 +37,15 @@ and the binder appears in your teammates' sidebars within a minute or so. Switch
 
 - Shared meetings are read-only for everyone but their author.
 - Shared notes can be edited by anyone. If two people edit the same note at once, the team's version stays and your own edit is
-  saved as a private note, so nothing is lost.
+  saved as a private note, so nothing is lost. That copy keeps whose words they are: a note an agent wrote or changed stays
+  marked until you make it yours.
+- A note an agent wrote or changed is marked as the agent's in the team folder too (`binders_made_by`,
+  `binders_edited_by`, `binders_edited_at` in its front matter), so teammates' Macs label it the agent's and leave it out
+  of Ask until someone chooses **Make It Mine**, which clears the mark for everyone. A teammate on Binders 0.8.0 keeps the
+  edit mark but doesn't show it: the note stays the agent's until someone on Binders 0.9.0 or later makes it theirs.
 - Shared items show up in teammates' search, answers and knowledge graph, marked with who they came from.
 - The team folder holds plain Markdown with front matter, so it also opens as an Obsidian vault.
 
-Audio never goes to the team folder. Only notes, summaries and transcripts of what you chose to share do.
+Audio never goes to the team folder. Only notes, summaries and transcripts of what you chose to share do. Captures, and
+notes made from what you said to yourself near your iPhone, stay on your Mac even in a shared binder: moved into one, or
+left in a binder you delete whose notes go to a shared General, they stay unshared, and the Delete Binder dialog says so.

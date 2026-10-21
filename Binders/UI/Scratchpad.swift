@@ -19,6 +19,8 @@ final class ScratchpadController: NSObject {
     }
 
     func show() {
+        // Its note is saved as you type: not while the library didn't open.
+        guard Store.shared.allowsSave() else { return }
         let note = currentNote()
         if panel == nil {
             let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 440, height: 340),
@@ -30,8 +32,10 @@ final class ScratchpadController: NSObject {
             panel.hidesOnDeactivate = false
             panel.isReleasedWhenClosed = false
             panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            // A note to dictate into is a page, in the app's appearance: light paper in the light, a dark page in the dark.
+            panel.backgroundColor = BindersTheme.NS.paper
             panel.center()
-            panel.setFrameAutosaveName("BindersScratchpad")
+            panel.setFrameAutosaveName(AppDefaults.frameName("BindersScratchpad"))
             self.panel = panel
         }
         panel?.contentView = NSHostingView(rootView: ScratchpadView(note: note, onNew: { [weak self] in self?.newNote() })
@@ -78,7 +82,7 @@ private struct ScratchpadView: View {
     var body: some View {
         VStack(spacing: 0) {
             MarkdownNoteEditor(text: $note.text, fontSize: 14, placeholder: "Hold fn and talk, or type.",
-                               inset: NSSize(width: 12, height: 10), compactToolbar: true, links: LinkTargets.forNote(note))
+                               inset: NSSize(width: 12, height: 10), compactToolbar: true, links: LinkTargets.forNote(note), paper: true)
                 .padding(.top, 26)
                 .onChange(of: note.text) { previous, _ in
                     note.updatedAt = Date()
@@ -97,5 +101,6 @@ private struct ScratchpadView: View {
             }
             .padding(10)
         }
+        .paperSheet(raised: false)
     }
 }

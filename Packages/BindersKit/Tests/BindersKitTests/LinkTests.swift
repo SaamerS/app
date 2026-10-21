@@ -52,5 +52,29 @@ final class LinkTests: XCTestCase {
         XCTAssertEqual(LinkClient.split("[fd7a:115c::1]:7448")?.host, "fd7a:115c::1")
         XCTAssertEqual(LinkClient.split("macbook.tail1234.ts.net:7447")?.host, "macbook.tail1234.ts.net")
         XCTAssertNil(LinkClient.split("no-port"))
+        // A name with a port, as a pairing code from this Mac can carry one; and IPv6 only in brackets.
+        XCTAssertEqual(LinkClient.split("studio-mac.covee.example:7448")?.host, "studio-mac.covee.example")
+        XCTAssertEqual(LinkClient.split("studio-mac.covee.example:7448")?.port, 7448)
+        XCTAssertEqual(LinkClient.split("[fd7a:115c:a1e0::2]:7448")?.host, "fd7a:115c:a1e0::2")
+        XCTAssertNil(LinkClient.split("fd7a::2:7447"), "unbracketed, it can't say where the port starts")
+        XCTAssertNil(LinkClient.split("192.168.1.20:0"))
+        XCTAssertNil(LinkClient.split("192.168.1.20:70000"))
+        XCTAssertNil(LinkClient.split(":7447"))
+    }
+
+    /// The code every iPhone build reads: a name and a bracketed IPv6 address in `addresses` still decode, and the
+    /// fields are the same five.
+    func testAPairingCodeWithANameStillReads() throws {
+        let pairing = LinkPairing(name: "Studio Mac", addresses: ["192.168.1.20:7448", "100.64.0.2:7448", "studio-mac.covee.example:7448",
+                                                                  "[fd7a:115c:a1e0::2]:7448"],
+                                  secret: Link.randomBytes(16), expires: Date(timeIntervalSince1970: 1_790_000_000))
+        let decoded = try XCTUnwrap(LinkPairing(url: pairing.url))
+        XCTAssertEqual(decoded.addresses.compactMap { LinkClient.split($0)?.host },
+                       ["192.168.1.20", "100.64.0.2", "studio-mac.covee.example", "fd7a:115c:a1e0::2"])
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .secondsSince1970
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoder.encode(pairing)) as? [String: Any])
+        XCTAssertEqual(Set(object.keys), ["version", "name", "addresses", "secret", "expires"])
+        XCTAssertEqual(object["version"] as? Int, 1)
     }
 }

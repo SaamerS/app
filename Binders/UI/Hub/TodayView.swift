@@ -7,156 +7,158 @@ import BindersKit
 /// own for the day. ‹ and › go back
 /// through the days; yesterday's page is a record of yesterday.
 struct TodayView: View {
+    @State private var day = Calendar.current.startOfDay(for: Date())
+
+    // A page per day: going to another day reads that day afresh.
+    var body: some View { TodayPage(day: $day).id(day) }
+
+    /// The note for the day, titled by its date as Obsidian does, so [[2026-09-28]] links to it.
+    /// In the time zone you're in: ISO 8601 alone would date it in UTC, and east of it give yesterday's date.
+    static func dailyTitle(for day: Date) -> String { day.formatted(Date.ISO8601FormatStyle(timeZone: .current).year().month().day()) }
+}
+
+/// The page for one day. It reads only that day's meetings, notes, dictations and card moves (and what's due by its end,
+/// and the promises still open), in a model kept up to date by saves, so a long history doesn't slow it down and drawing
+/// it works nothing out.
+private struct TodayPage: View {
     @Environment(HubNavigation.self) private var navigation
     @Environment(CommitmentService.self) private var commitmentService
-    @Query(sort: \MeetingRecord.createdAt, order: .reverse) private var meetings: [MeetingRecord]
-    @Query(sort: \NoteItem.updatedAt, order: .reverse) private var notes: [NoteItem]
-    @Query(sort: \CommitmentRecord.createdAt, order: .reverse) private var commitments: [CommitmentRecord]
-    @Query(sort: \TranscriptRecord.createdAt, order: .reverse) private var records: [TranscriptRecord]
-    @Query(sort: \TaskEvent.createdAt, order: .reverse) private var events: [TaskEvent]
-    @Query private var cards: [TaskCard]
     @Query private var binders: [BinderRecord]
-    @State private var day = Calendar.current.startOfDay(for: Date())
+    @Binding private var day: Date
+    @State private var data = TodayData()
+
+    init(day: Binding<Date>) {
+        _day = day
+    }
 
     private var calendar: Calendar { .current }
     private var isToday: Bool { calendar.isDateInToday(day) }
-    private func onDay(_ date: Date) -> Bool { calendar.isDate(date, inSameDayAs: day) }
 
     // MARK: The day's things
 
-    /// The note for the day, titled by its date as Obsidian does, so [[2026-09-28]] links to it.
     private var dailyTitle: String { TodayView.dailyTitle(for: day) }
-    static func dailyTitle(for day: Date) -> String { day.formatted(.iso8601.year().month().day()) }
 
-    private var dailyNote: NoteItem? { notes.first { $0.title == dailyTitle } }
-    private var dayMeetings: [MeetingRecord] { meetings.filter { onDay($0.createdAt) && !$0.isConversation }.sorted { $0.createdAt < $1.createdAt } }
-    /// What the iPhone heard that day, less the small talk.
-    private var dayConversations: [MeetingRecord] {
-        meetings.filter { onDay($0.createdAt) && $0.isConversation && $0.status != "trivial" }.sorted { $0.createdAt < $1.createdAt }
-    }
-    private var dayNotes: [NoteItem] { notes.filter { onDay($0.updatedAt) && $0.title != dailyTitle } }
-    /// Notes due that day; on today's page, also the ones overdue and not done.
-    private var dueNotes: [NoteItem] {
-        notes.filter { note in
-            guard let due = note.dueAt, note.status != "Done" else { return false }
-            return onDay(due) || (isToday && due < day)
-        }
-        .sorted { ($0.dueAt ?? .distantPast) < ($1.dueAt ?? .distantPast) }
-    }
-    private var dictations: [TranscriptRecord] { records.filter { onDay($0.createdAt) && $0.mode == "dictation" && $0.status == "inserted" } }
-
-    /// Promises made that day; on today's page, also whatever is still open and due by the end of it.
-    private var dayCommitments: [CommitmentRecord] {
-        let end = calendar.date(byAdding: .day, value: 1, to: day) ?? day
-        return commitments.filter { record in
-            guard record.status != "dismissed" else { return false }
-            if onDay(record.createdAt) { return true }
-            return isToday && record.status == "open" && (record.dueAt.map { $0 < end } ?? false)
-        }
-    }
-
-    /// Cards with something on their timeline that day, the latest first, each with its last event.
-    private var movedCards: [(card: TaskCard, event: TaskEvent)] {
-        var seen = Set<UUID>()
-        return events.filter { onDay($0.createdAt) }.compactMap { event in
-            guard seen.insert(event.taskID).inserted, let card = cards.first(where: { $0.id == event.taskID }) else { return nil }
-            return (card, event)
-        }
-    }
-
-    private var tasks: [TaskEntry] {
-        TaskCollector.collect(meetings: dayMeetings + dayConversations, notes: [], commitments: dayCommitments,
-                              openMeeting: { open(meeting: $0) }, openNote: { _ in },
-                              commitmentActions: CommitmentActions(toggle: { commitmentService.toggle($0) },
-                                                                   dismiss: { commitmentService.setStatus($0, "dismissed") },
-                                                                   open: { record in
-                                                                       navigation.pendingWritingSearch = record.quote ?? record.task
-                                                                       navigation.selection = .writing
-                                                                   }))
+    private var taskActions: TaskActions {
+        let commitmentService = commitmentService, navigation = navigation
+        return TaskActions(openMeeting: { navigation.open(meeting: $0) }, openNote: { navigation.open(note: $0) }, commitments: CommitmentActions(
+            toggle: { commitmentService.toggle($0) }, dismiss: { commitmentService.setStatus($0, "dismissed") }, open: { record in
+                navigation.pendingWritingSearch = record.quote ?? record.task
+                navigation.selection = .writing
+            }))
     }
 
     // MARK: The page
 
     var body: some View {
-        let tasks = tasks
-        let moved = movedCards
-        let dictations = dictations
+        let tasks = data.tasks
+        let moved = data.moved
+        let dictations = data.dictations
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 header(dictations: dictations, moved: moved.count)
+                if isToday { NeedsYouStrip() }
                 HStack(alignment: .top, spacing: 16) {
                     VStack(alignment: .leading, spacing: 16) {
                         journal
-                        if !dayMeetings.isEmpty || !tasks.isEmpty {
-                            section(dayMeetings.isEmpty ? "Promises and to-dos" : "Meetings, promises and to-dos") {
+                        if !data.meetings.isEmpty || !tasks.isEmpty {
+                            section(data.meetings.isEmpty ? "Promises and to-dos" : "Meetings, promises and to-dos") {
                                 TaskBoard(tasks: tasks, binderName: { id in binders.first { $0.id == id }?.name })
                             }
+                            .transition(.filed)
                         }
-                        if !dayConversations.isEmpty {
+                        if !data.conversations.isEmpty {
                             section("Captures") {
-                                ForEach(dayConversations) { conversation in
+                                ForEach(data.conversations) { conversation in
                                     ConversationRow(conversation: conversation, binder: binderName(conversation.binderID)) { open(meeting: conversation) }
+                                        .transition(.filed)
                                 }
                             }
+                            .transition(.filed)
                         }
-                        if !dueNotes.isEmpty {
+                        if !data.dueNotes.isEmpty {
                             section("Notes due") {
-                                ForEach(dueNotes) { note in
+                                ForEach(data.dueNotes) { note in
                                     let late = (note.dueAt ?? day) < day
-                                    row(symbol: late ? "exclamationmark.circle" : "calendar", title: note.title,
+                                    row(symbol: late ? "clock" : "calendar", tint: late ? BindersTheme.needsYou : nil, title: note.title,
                                         detail: [note.status, late ? note.dueAt.map { "was due \($0.formatted(.dateTime.month(.abbreviated).day()))" } : nil,
                                                  note.owner].compactMap { $0 }.joined(separator: " · ")) { open(note: note) }
+                                        .transition(.filed)
                                 }
                             }
+                            .transition(.filed)
                         }
-                        if !dayNotes.isEmpty {
+                        if !data.notes.isEmpty {
                             section("Notes you worked on") {
-                                ForEach(dayNotes) { note in
+                                ForEach(data.notes) { note in
                                     row(symbol: "note.text", title: note.title, detail: binderName(note.binderID)) { open(note: note) }
+                                        .transition(.filed)
                                 }
+                                if data.moreNotes > 0 { Text("and \(data.moreNotes) more").font(.caption).foregroundStyle(.secondary).rollingCount(data.moreNotes) }
                             }
+                            .transition(.filed)
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .topLeading)
                     VStack(alignment: .leading, spacing: 16) {
+                        if isToday { WorkStreamsSection() }
                         if !moved.isEmpty {
                             section("On the boards") {
-                                ForEach(moved, id: \.card.id) { item in
+                                ForEach(moved) { item in
                                     VStack(alignment: .leading, spacing: 4) {
                                         Button(item.card.title) { open(card: item.card) }
-                                            .buttonStyle(.link)
+                                            .themedLink()
                                             .font(.callout.weight(.medium))
                                             .lineLimit(1)
-                                        EventRow(event: item.event)
+                                        EventRow(event: item.event, cardColumn: item.card.column)
                                     }
+                                    .transition(.filed)
                                 }
                             }
+                            .transition(.filed)
                         }
                         if !dictations.isEmpty {
                             section("You dictated") {
                                 ForEach(dictations.prefix(6)) { record in
                                     VStack(alignment: .leading, spacing: 2) {
-                                        Text(record.finalText).lineLimit(2).font(.callout)
+                                        Text(record.finalText).lineLimit(2).font(BindersTheme.quote(.callout))
                                         Text([record.appName, record.createdAt.formatted(date: .omitted, time: .shortened)].compactMap { $0 }.joined(separator: " · "))
-                                            .font(.caption).foregroundStyle(.secondary)
+                                            .font(BindersTheme.time()).foregroundStyle(.secondary)
                                     }
+                                    .transition(.filed)
                                 }
-                                if dictations.count > 6 { Text("and \(dictations.count - 6) more").font(.caption).foregroundStyle(.secondary) }
+                                if dictations.count > 6 { Text("and \(dictations.count - 6) more").font(.caption).foregroundStyle(.secondary).rollingCount(dictations.count - 6) }
                             }
+                            .transition(.filed)
                         }
-                        if moved.isEmpty, dictations.isEmpty, dayMeetings.isEmpty, dayConversations.isEmpty, dayNotes.isEmpty, tasks.isEmpty, dueNotes.isEmpty {
+                        if data.loaded, moved.isEmpty, dictations.isEmpty, data.meetings.isEmpty, data.conversations.isEmpty, data.notes.isEmpty,
+                           tasks.isEmpty, data.dueNotes.isEmpty {
                             Text(isToday ? "Meetings, notes, promises, cards and dictations from today show up here as they happen."
                                  : "Nothing was recorded on this day.")
                                 .foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
                                 .paperCard(padding: 16)
+                                .transition(.filed)
                         }
                     }
                     .frame(width: 340, alignment: .topLeading)
                 }
+                // A new item files in and the sections around it make room.
+                .filing(filingKeys(tasks: tasks, moved: moved, dictations: dictations))
             }
             .padding(28)
         }
+        .onAppear { data.show(day, actions: taskActions) }
+        .followingWorkStreams()
+        // The day as first read just shows; what arrives after files in, and counts roll.
+        .settlesAfterAppearing()
+    }
+
+    /// Everything the day lists, in order: when one is added, it files in.
+    private func filingKeys(tasks: [TaskEntry], moved: [TodayData.Move], dictations: [TranscriptRecord]) -> [String] {
+        data.meetings.map { "m" + $0.id.uuidString } + tasks.filter { !$0.done }.map { "t" + $0.id }
+            + data.conversations.map { "c" + $0.id.uuidString } + data.dueNotes.map { "d" + $0.id.uuidString }
+            + data.notes.map { "n" + $0.id.uuidString } + moved.map { "b" + $0.id.uuidString }
+            + dictations.prefix(6).map { "s" + $0.id.uuidString }
     }
 
     private func header(dictations: [TranscriptRecord], moved: Int) -> some View {
@@ -165,6 +167,7 @@ struct TodayView: View {
                 Text(isToday ? "Today" : (calendar.isDateInYesterday(day) ? "Yesterday" : day.formatted(.dateTime.weekday(.wide))))
                     .font(BindersTheme.title(32))
                 Text(summary(dictations: dictations, moved: moved)).foregroundStyle(.secondary)
+                    .rollingCount(summary(dictations: dictations, moved: moved))
             }
             Spacer()
             HStack(spacing: 6) {
@@ -184,8 +187,9 @@ struct TodayView: View {
     /// "Monday, September 28 · 2 meetings · 340 words dictated · 3 cards moved"
     private func summary(dictations: [TranscriptRecord], moved: Int) -> String {
         var parts = [day.formatted(.dateTime.weekday(.wide).month(.wide).day())]
-        if !dayMeetings.isEmpty { parts.append(dayMeetings.count == 1 ? "1 meeting" : "\(dayMeetings.count) meetings") }
-        if !dayConversations.isEmpty { parts.append(dayConversations.count == 1 ? "1 capture" : "\(dayConversations.count) captures") }
+        let meetings = data.meetings.count, captures = data.conversations.count
+        if meetings > 0 { parts.append(meetings == 1 ? "1 meeting" : "\(meetings) meetings") }
+        if captures > 0 { parts.append(captures == 1 ? "1 capture" : "\(captures) captures") }
         let words = dictations.reduce(0) { $0 + $1.wordCount }
         if words > 0 { parts.append("\(words.formatted()) words dictated") }
         if moved > 0 { parts.append(moved == 1 ? "1 card moved" : "\(moved) cards moved") }
@@ -195,27 +199,30 @@ struct TodayView: View {
     /// Your own note for the day. It's only made once you write something, so quiet days leave no empty notes.
     private var journal: some View {
         let title = dailyTitle
-        let text = Binding<String>(get: { dailyNote?.text ?? "# \(title)\n\n" }, set: { newValue in
-            if let note = dailyNote {
+        let data = data
+        let text = Binding<String>(get: { data.dailyNote?.text ?? "# \(title)\n\n" }, set: { newValue in
+            if let note = data.dailyNote {
                 NoteHistory.changed(note.id, previous: note.text)
                 note.text = newValue
                 note.updatedAt = Date()
-            } else if newValue.trimmingCharacters(in: .whitespacesAndNewlines) != "# \(title)" {
+            } else if newValue.trimmingCharacters(in: .whitespacesAndNewlines) != "# \(title)", Store.shared.allowsSave() {
                 let note = NoteItem(text: newValue)
                 note.binderID = Store.shared.defaultBinder().id
                 Store.shared.insert(note)
+                data.made(note)
             }
         })
         return VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
                 Text(isToday ? "Your notes for today" : "Your notes for the day").font(BindersTheme.columnTitle)
                 Spacer()
-                if let note = dailyNote {
-                    Button("Open as Note") { open(note: note) }.buttonStyle(.link).font(.callout)
+                if let note = data.dailyNote {
+                    Button("Open as Note") { open(note: note) }.themedLink().font(.callout)
                 }
             }
             MarkdownNoteEditor(text: text, fontSize: 14, placeholder: "", inset: NSSize(width: 8, height: 8), compactToolbar: true,
-                               links: LinkTargets.forEditor(in: Store.shared.defaultBinder().id))
+                               links: LinkTargets.forEditor(in: Store.shared.defaultBinder().id), paper: true)
+                .paperSheet(radius: 10)
                 .frame(height: 220)
                 .id(title)
         }
@@ -231,12 +238,12 @@ struct TodayView: View {
         .paperCard(padding: 16)
     }
 
-    private func row(symbol: String, title: String, detail: String, open: @escaping () -> Void) -> some View {
+    private func row(symbol: String, tint: Color? = nil, title: String, detail: String, open: @escaping () -> Void) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: symbol).font(.caption).foregroundStyle(.secondary).frame(width: 16)
-            Button(title, action: open).buttonStyle(.link).lineLimit(1)
+            Image(systemName: symbol).font(.caption).foregroundStyle(tint.map { AnyShapeStyle($0) } ?? AnyShapeStyle(.secondary)).frame(width: 16)
+            Button(title, action: open).themedLink().lineLimit(1)
             Spacer(minLength: 0)
-            if !detail.isEmpty { Badge(text: detail, color: .secondary) }
+            if !detail.isEmpty { Badge(text: detail).filingChip() }
         }
     }
 
@@ -258,7 +265,7 @@ struct TodayView: View {
 
     private func open(meeting: MeetingRecord) { show(binder: meeting.binderID, tab: .listing(meeting)) { $0.pendingMeetingID = meeting.id } }
     private func open(note: NoteItem) { show(binder: note.binderID, tab: .notes) { $0.pendingNoteID = note.id } }
-    private func open(card: TaskCard) { show(binder: card.binderID, tab: .board) { $0.pendingCardID = card.id } }
+    private func open(card: TaskCard) { navigation.open(card: card) }
 }
 
 /// One conversation on the Today page: when, what it was about, where it went, and the gist.
@@ -272,12 +279,13 @@ private struct ConversationRow: View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 8) {
                 Image(systemName: conversation.symbol).font(.caption).foregroundStyle(.secondary).frame(width: 16)
-                Button(conversation.title, action: open).buttonStyle(.link).lineLimit(1)
+                Button(conversation.title, action: open).themedLink().lineLimit(1)
                 Spacer(minLength: 0)
-                if !binder.isEmpty { Badge(text: binder, color: .secondary) }
+                // Its binder's chip slides in as the capture files in.
+                if !binder.isEmpty { Badge(text: binder).filingChip() }
             }
             Text(times + (gist.map { " · \($0)" } ?? ""))
-                .font(.caption)
+                .font(BindersTheme.time())
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
                 .padding(.leading, 24)

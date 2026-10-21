@@ -51,6 +51,25 @@ xcodebuild archive -project Binders.xcodeproj -scheme Binders -configuration Rel
   -derivedDataPath "$WORK" -skipPackagePluginValidation -skipMacroValidation ENABLE_HARDENED_RUNTIME=YES >"$WORK/archive.log" 2>&1 \
   || { grep -E "error:" "$WORK/archive.log" | grep -v SourcePackages | head -10; echo "✗ Archive failed ($WORK/archive.log)"; exit 1; }
 
+# The card router's model, when its folder is given (BINDERS_ROUTER_MODEL=<the tev1-0.8b-mlx-bf16 folder>): the archived
+# app's own runtime must give the Swift goldens exactly, as the start bar sits on those numbers. Public builds have no
+# model, so unset it's skipped. The founder's releases set it.
+FIXTURES=Packages/BindersKit/Tests/BindersKitTests/Fixtures/router
+if [[ -n "${BINDERS_ROUTER_MODEL:-}" ]]; then
+  echo "→ Router model check"
+  CHECK=$(mktemp -d "${TMPDIR:-/tmp}/binders-router-check.XXXXXX")
+  if ! BINDERS_DATA_DIR="$CHECK" "$ARCHIVE/Products/Applications/Binders.app/Contents/MacOS/Binders" --selftest-router-model "$BINDERS_ROUTER_MODEL" \
+      "$FIXTURES/prompts.json" --goldens "$FIXTURES/goldens-swift.json" --rounds 0 -notesShowMarkdown NO >"$WORK/router-check.log" 2>&1; then
+    grep -E "^FAIL" "$WORK/router-check.log" | head -10
+    rm -rf "$CHECK"
+    echo "✗ The router model's numbers changed. Run --selftest-router-bench on dev, then write the goldens again. ($WORK/router-check.log)"
+    exit 1
+  fi
+  rm -rf "$CHECK"
+else
+  echo "→ Router model check skipped: BINDERS_ROUTER_MODEL isn't set"
+fi
+
 options() {   # $1 = destination (export | upload), $2 = signing style
   cat > "$WORK/options-$1.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

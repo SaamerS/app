@@ -39,6 +39,20 @@ final class AgentPromptsTests: XCTestCase {
         XCTAssertEqual(consumed, 16)
         XCTAssertEqual(AgentPrompts.completeLines(in: Data("{\"partial".utf8)).consumed, 0)
     }
+
+    func testBindersOwnPromptToAWokenAgentIsntYourWriting() throws {
+        let prompt = ClaudeCodeLaunch.make(card: UUID(), reason: .ready, boardName: "Claude Code · app", wake: ClaudeCodeWake(repository: "/r"),
+                                           binders: "/b", dataFolder: "/d", home: "/h", worktreeExists: false, session: UUID()).prompt
+        XCTAssertNil(AgentPrompts.worthKeeping(prompt))
+        XCTAssertNil(AgentPrompts.worthKeeping("\n  " + AgentWake.promptMarker + ". Card: 3F2504E0-4F89-11D3-9A0C-0305E82C3301"))
+        // As Claude Code's history, or a prompt hook, would record it.
+        let line = String(decoding: try JSONSerialization.data(withJSONObject: ["display": prompt, "timestamp": 1_759_334_400_000, "project": "/r"]),
+                          as: UTF8.self)
+        XCTAssertNil(AgentPrompts.claudeCode(line))
+        XCTAssertNil(AgentHarness(id: "hooks", name: "Hooks", format: .jsonl, path: "~/prompts.jsonl", text: "prompt").prompt(from: ["prompt": prompt]))
+        XCTAssertEqual(AgentPrompts.worthKeeping("Binders woke you up early today, so write the summary"),
+                       "Binders woke you up early today, so write the summary", "only Binders' own opening is left out")
+    }
 }
 
 final class AgentHarnessTests: XCTestCase {

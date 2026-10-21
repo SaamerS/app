@@ -1,11 +1,13 @@
 import Foundation
 
 /// Which running copies of Binders count as the app. The MCP server (`Binders --mcp`, started by Claude Code, Claude
-/// Desktop and the like) and self-tests are the same executable run with a flag; they must not keep the app from starting.
+/// Desktop and the like), self-tests and the decision model's folder check (`Binders --check-decision-folder`, which reads
+/// a model's tokenizer and chat template outside the app) are the same executable run with a flag; they must not keep the
+/// app from starting.
 public enum AppInstances {
-    /// True for a copy of the app proper; false for MCP servers and self-test runs.
+    /// True for a copy of the app proper; false for MCP servers, self-test runs and decision-folder checks.
     public static func isApp(arguments: [String]) -> Bool {
-        !arguments.dropFirst().contains { $0 == "--mcp" || $0.hasPrefix("--selftest") }
+        !arguments.dropFirst().contains { $0 == "--mcp" || $0 == "--check-decision-folder" || $0.hasPrefix("--selftest") }
     }
 
     /// The arguments in a kernel `KERN_PROCARGS2` buffer: argc as a 32-bit integer, the executable path, NUL padding,

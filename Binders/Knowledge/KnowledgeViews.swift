@@ -5,22 +5,34 @@ import BindersKit
 enum EntityStyle {
     static let typeOrder = ["person", "project", "product", "company", "team", "place", "topic"]
 
+    /// A colour for each kind, from those that mean nothing else: no red, amber, green or lavender. People, projects and
+    /// topics get the brighter ones; meetings, captures, notes and commands, which the graph draws as squares with their
+    /// glyph, quieter ones. They read on the graph's night sky and on either ground.
     static func color(_ kind: String) -> Color {
         switch kind {
-        case "person": .blue
-        case "project": .purple
-        case "product": .orange
-        case "company": .green
-        case "team": .teal
-        case "place": .brown
-        case "topic": .pink
-        case "meeting": .red
-        case "conversation": .mint
-        case "note": .yellow
-        case "command": .indigo
-        default: .gray
+        case "person": palette.person
+        case "project": palette.project
+        case "product": palette.product
+        case "company": palette.company
+        case "team": palette.team
+        case "place": palette.place
+        case "topic": palette.topic
+        case "meeting": palette.meeting
+        case "conversation": palette.conversation
+        case "note": palette.note
+        case "command": palette.command
+        default: palette.other
         }
     }
+
+    private static let palette = (
+        person: Color(nsColor: BindersTheme.srgb(0x4299E6)), project: Color(nsColor: BindersTheme.srgb(0x6A58F6)),
+        product: Color(nsColor: BindersTheme.srgb(0xE65C94)), company: Color(nsColor: BindersTheme.srgb(0x29A09F)),
+        team: Color(nsColor: BindersTheme.srgb(0x38B2CC)), place: Color(nsColor: BindersTheme.srgb(0xB07D56)),
+        topic: Color(nsColor: BindersTheme.srgb(0xB565D6)), meeting: Color(nsColor: BindersTheme.srgb(0x7184B5)),
+        conversation: Color(nsColor: BindersTheme.srgb(0x5E9AA6)), note: Color(nsColor: BindersTheme.srgb(0xA3967A)),
+        command: Color(nsColor: BindersTheme.srgb(0x7A73B8)), other: Color(nsColor: BindersTheme.srgb(0x8A8F99))
+    )
 
     static func title(_ type: String) -> String {
         switch type {
@@ -35,8 +47,9 @@ enum EntityStyle {
     }
 }
 
-/// Turns «matched» markers from keyword search into highlighted text.
-func highlightedSnippet(_ snippet: String) -> AttributedString {
+/// Turns «matched» markers from keyword search into highlighted text, the matches in `color`: the accent's words, or
+/// ink on a binder's pages, whose colour is the only one there.
+func highlightedSnippet(_ snippet: String, color: Color = BindersTheme.accentText) -> AttributedString {
     var output = AttributedString()
     var buffer = ""
     var emphasized = false
@@ -45,7 +58,7 @@ func highlightedSnippet(_ snippet: String) -> AttributedString {
         var run = AttributedString(buffer)
         if emphasized {
             run.font = .body.weight(.semibold)
-            run.foregroundColor = .accentColor
+            run.foregroundColor = color
         }
         output += run
         buffer = ""
@@ -83,8 +96,9 @@ struct KnowledgeView: View {
     @State private var ownerFilter: KnowledgeOwner = .everyone
     @State private var hits: [KnowledgeHit] = []
     @State private var searching = false
-    @State private var answer: KnowledgeService.Answer?
-    @State private var asking = false
+    /// The question asked, answered as it goes.
+    @State private var run: AskRun?
+    @State private var asking: Task<Void, Never>?
     @State private var entities: [KnowledgeEntity] = []
     @State private var selectedEntityID: Int64?
     @State private var entityFilter = ""
@@ -123,6 +137,8 @@ struct KnowledgeView: View {
             consumePendingQuery()
             consumePendingEntity()
         }
+        // An answer nobody can see any more stops, and the model is free for the next one.
+        .onDisappear { if run?.isWorking == true { stopAsking() } }
         .onChange(of: navigation.pendingKnowledgeQuery) { consumePendingQuery() }
         .onChange(of: navigation.pendingEntityID) { consumePendingEntity() }
         .onChange(of: selectedEntityID) {
@@ -135,7 +151,7 @@ struct KnowledgeView: View {
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("People & topics").font(BindersTheme.columnTitle).padding(.top, 24)
+            Text("People & topics").font(BindersTheme.columnTitle).foregroundStyle(.sectionInk).padding(.top, 24)
             TextField("Filter", text: $entityFilter).textFieldStyle(.roundedBorder)
             List(selection: $selectedEntityID) {
                 ForEach(entityGroups, id: \.type) { group in
@@ -145,7 +161,7 @@ struct KnowledgeView: View {
                                 Circle().fill(EntityStyle.color(entity.type)).frame(width: 7, height: 7)
                                 Text(entity.name).lineLimit(1)
                                 Spacer()
-                                Text("\(entity.documents)").font(.caption).foregroundStyle(.secondary)
+                                Text("\(entity.documents)").font(.caption).monospacedDigit().foregroundStyle(.secondary)
                             }
                             .tag(entity.id)
                             .draggable(String(entity.id))
@@ -167,6 +183,7 @@ struct KnowledgeView: View {
                 }
             }
             .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
             .confirmationDialog("Remove from Knowledge?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
                                 presenting: removing) { entity in
                 Button("Remove \(entity.name)", role: .destructive) {
@@ -226,13 +243,15 @@ struct KnowledgeView: View {
                     .font(.title3)
                     .onSubmit(ask)
                 if searching { ProgressView().controlSize(.small) }
+                // Ask is the language model answering from your binders; no agent does it, so not the sparkle.
                 Button(action: ask) {
-                    Label("Ask", systemImage: "sparkles")
+                    Label("Ask", systemImage: BindersTheme.askSymbol)
                 }
-                .disabled(query.trimmed.isEmpty || asking)
+                .disabled(query.trimmed.isEmpty || (run?.isWorking == true && run?.question == query.trimmed))
             }
             .padding(10)
-            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.primary.opacity(0.05)))
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(BindersTheme.surface))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(BindersTheme.line))
             HStack {
                 Picker("", selection: $mode) {
                     ForEach(Mode.allCases, id: \.self) { Text($0.rawValue).tag($0) }
@@ -278,13 +297,8 @@ struct KnowledgeView: View {
         } else {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) {
-                    if asking {
-                        HStack {
-                            ProgressView().controlSize(.small)
-                            Text("Reading your sources…").foregroundStyle(.secondary)
-                        }
-                    } else if let answer {
-                        KnowledgeAnswerView(answer: answer)
+                    if let run {
+                        AskRunView(run: run)
                     }
                     if hits.isEmpty, !searching {
                         Text("No matches yet.").foregroundStyle(.secondary)
@@ -303,7 +317,7 @@ struct KnowledgeView: View {
             if knowledge.status.isIndexing { ProgressView().controlSize(.mini) }
             Text(knowledge.status.summary)
             if let issue = knowledge.status.embeddingIssue ?? knowledge.status.extractionIssue {
-                Text("· \(issue)").foregroundStyle(.orange).lineLimit(1)
+                StatusLabel(issue, .problem).lineLimit(1)
             }
             Spacer()
         }
@@ -335,15 +349,19 @@ struct KnowledgeView: View {
 
     private func runSearch() async {
         let text = query.trimmed
-        answer = nil
+        // A new question: the answer to the last one goes, and stops if it's still being written.
+        if run?.question != text { stopAsking() }
         guard !text.isEmpty else {
             hits = []
+            searching = false
             return
         }
         try? await Task.sleep(for: .milliseconds(250))
         guard !Task.isCancelled else { return }
         searching = true
-        let results = await knowledge.search(text, kinds: kindFilter.map { [$0] }, owner: ownerFilter, binder: binderID)
+        // The passages with the words show at once; the search by meaning follows.
+        let results = await knowledge.search(text, kinds: kindFilter.map { [$0] }, owner: ownerFilter, binder: binderID,
+                                             onKeywordHits: { found in if !Task.isCancelled { hits = found } })
         guard !Task.isCancelled else { return }
         hits = results
         searching = false
@@ -351,13 +369,26 @@ struct KnowledgeView: View {
 
     private func ask() {
         let question = query.trimmed
-        guard !question.isEmpty, !asking else { return }
-        asking = true
-        Task {
-            let result = await knowledge.ask(question, binder: binderID)
-            if query.trimmed == question { answer = result }
-            asking = false
-        }
+        guard !question.isEmpty, !(run?.isWorking == true && run?.question == question) else { return }
+        stopAsking()
+        let run = AskRun(question: question)
+        self.run = run
+        asking = Task { _ = await run.run(with: knowledge, binder: binderID) }
+    }
+
+    private func stopAsking() {
+        asking?.cancel()
+        asking = nil
+        run = nil
+    }
+}
+
+/// An answer on its way, as it goes, then the answer.
+struct AskRunView: View {
+    let run: AskRun
+
+    var body: some View {
+        KnowledgeAnswerView(text: run.text, sources: run.sources, status: run.status, writing: run.isWorking, leftOut: run.answer?.leftOut ?? [])
     }
 }
 
@@ -365,6 +396,7 @@ struct KnowledgeHitRow: View {
     let hit: KnowledgeHit
     var emphasis: String?
     @Environment(KnowledgeService.self) private var knowledge: KnowledgeService?
+    @Environment(\.binderTint) private var binderTint
     @State private var hovering = false
 
     var body: some View {
@@ -379,6 +411,7 @@ struct KnowledgeHitRow: View {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
                         Text(hit.title).font(.body.weight(.medium)).lineLimit(1)
+                        AgentLabel(hit.agent).font(.caption)
                         Spacer()
                         Text(hit.metaLine).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     }
@@ -391,13 +424,15 @@ struct KnowledgeHitRow: View {
                     if let knowledge, let fix = knowledge.correction(for: hit, in: knowledge.currentCorrections()) {
                         Label("Corrected: \(fix.correction.right)", systemImage: "checkmark.seal")
                             .font(.caption)
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(.infoText)
                             .lineLimit(2)
                     }
                 }
             }
             .padding(10)
-            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.primary.opacity(hovering ? 0.07 : 0.035)))
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(BindersTheme.ink.opacity(hovering ? 0.04 : 0)))
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(BindersTheme.surface))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(hovering ? BindersTheme.lineStrong : BindersTheme.line))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -405,28 +440,57 @@ struct KnowledgeHitRow: View {
     }
 
     private var displayText: AttributedString {
-        if !hit.snippet.isEmpty { return highlightedSnippet(hit.snippet) }
+        let matches = binderTint == nil ? BindersTheme.accentText : BindersTheme.ink
+        if !hit.snippet.isEmpty { return highlightedSnippet(hit.snippet, color: matches) }
         let text = hit.text.replacingOccurrences(of: "\n", with: " ")
         if let emphasis, let range = text.range(of: emphasis, options: [.caseInsensitive, .diacriticInsensitive]) {
             let start = text.index(range.lowerBound, offsetBy: -80, limitedBy: text.startIndex) ?? text.startIndex
             let end = text.index(range.upperBound, offsetBy: 160, limitedBy: text.endIndex) ?? text.endIndex
             let marked = (start > text.startIndex ? "…" : "") + text[start..<range.lowerBound] + "«" + text[range] + "»" + text[range.upperBound..<end]
-            return highlightedSnippet(marked)
+            return highlightedSnippet(marked, color: matches)
         }
         return AttributedString(String(text.prefix(260)))
     }
 }
 
 struct KnowledgeAnswerView: View {
-    let answer: KnowledgeService.Answer
+    let text: String
+    let sources: [KnowledgeHit]
+    /// What it's doing while there's no answer to show yet.
+    var status: String?
+    /// The answer is still on its way.
+    var writing = false
+    /// Notes with an agent's words in them that matched, which the answer left out.
+    var leftOut: [KnowledgeHit] = []
+
+    init(answer: KnowledgeService.Answer) {
+        self.init(text: answer.text, sources: answer.sources, leftOut: answer.leftOut)
+    }
+
+    init(text: String, sources: [KnowledgeHit], status: String? = nil, writing: Bool = false, leftOut: [KnowledgeHit] = []) {
+        self.text = text
+        self.sources = sources
+        self.status = status
+        self.writing = writing
+        self.leftOut = leftOut
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label("Answer", systemImage: "sparkles").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-            MarkdownBlocks(markdown: answer.text)
-            if !answer.sources.isEmpty {
+            HStack(spacing: 6) {
+                Label("Answer", systemImage: BindersTheme.askSymbol).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                if writing, status == nil { ProgressView().controlSize(.mini) }
+            }
+            if let status {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(status).foregroundStyle(.secondary)
+                }
+            }
+            if !text.isEmpty { MarkdownBlocks(markdown: text) }
+            if !sources.isEmpty {
                 Text("Sources").font(.caption.weight(.semibold)).foregroundStyle(.secondary).padding(.top, 4)
-                ForEach(Array(answer.sources.enumerated()), id: \.element.id) { index, hit in
+                ForEach(Array(sources.enumerated()), id: \.element.id) { index, hit in
                     Button {
                         KnowledgeNavigator.open(hit)
                     } label: {
@@ -435,6 +499,7 @@ struct KnowledgeAnswerView: View {
                             Image(systemName: hit.kind.symbol).foregroundStyle(.secondary)
                             Text(hit.title).lineLimit(1)
                             Text(hit.metaLine).foregroundStyle(.secondary).lineLimit(1)
+                            AgentLabel(hit.agent)
                             Spacer(minLength: 0)
                         }
                         .font(.callout)
@@ -443,10 +508,13 @@ struct KnowledgeAnswerView: View {
                     .buttonStyle(.plain)
                 }
             }
+            AgentNotesLeftOut(hits: leftOut)
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.accentColor.opacity(0.08)))
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(.infoFill(0.06)))
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(BindersTheme.surface))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(BindersTheme.line))
     }
 }
 
@@ -486,6 +554,7 @@ struct EntityDetailView: View {
                             Image(systemName: "pencil")
                         }
                         .buttonStyle(.borderless)
+                        .quietControl()
                         .help("Rename. Renaming onto an existing name merges the two.")
                     }
                     if !aliases.isEmpty {
@@ -505,7 +574,7 @@ struct EntityDetailView: View {
                         Button {
                             onAsk("What do my meetings, notes and dictations say about \(entity.name)?")
                         } label: {
-                            Label("Ask about \(entity.name)", systemImage: "sparkles")
+                            Label("Ask about \(entity.name)", systemImage: BindersTheme.askSymbol)
                         }
                         Button(role: .destructive) {
                             confirmRemove = true
@@ -549,15 +618,15 @@ struct EntityDetailView: View {
                     }
 
                     if !relations.isEmpty {
-                        Text("Relationships").font(.headline)
+                        Text("Relationships").font(BindersTheme.cardTitle)
                         ForEach(relations, id: \.self) { relation in
                             HStack(spacing: 6) {
                                 if relation.outgoing {
                                     Text(entity.name).fontWeight(.medium)
                                     Text(relation.label).foregroundStyle(.secondary)
-                                    Button(relation.other) { onSelect(relation.otherID) }.buttonStyle(.link)
+                                    Button(relation.other) { onSelect(relation.otherID) }.themedLink()
                                 } else {
-                                    Button(relation.other) { onSelect(relation.otherID) }.buttonStyle(.link)
+                                    Button(relation.other) { onSelect(relation.otherID) }.themedLink()
                                     Text(relation.label).foregroundStyle(.secondary)
                                     Text(entity.name).fontWeight(.medium)
                                 }
@@ -566,7 +635,7 @@ struct EntityDetailView: View {
                     }
 
                     if !related.isEmpty {
-                        Text("Often comes up with").font(.headline)
+                        Text("Often comes up with").font(BindersTheme.cardTitle)
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 8, alignment: .leading)], alignment: .leading, spacing: 8) {
                             ForEach(related) { other in
                                 Button {
@@ -575,12 +644,13 @@ struct EntityDetailView: View {
                                     HStack(spacing: 5) {
                                         Circle().fill(EntityStyle.color(other.type)).frame(width: 6, height: 6)
                                         Text(other.name).lineLimit(1)
-                                        Text("\(other.documents)").foregroundStyle(.secondary)
+                                        Text("\(other.documents)").monospacedDigit().foregroundStyle(.secondary)
                                     }
                                     .font(.callout)
                                     .padding(.horizontal, 10)
                                     .padding(.vertical, 5)
-                                    .background(Capsule().fill(Color.primary.opacity(0.06)))
+                                    .background(Capsule().fill(BindersTheme.surface))
+                                    .overlay(Capsule().strokeBorder(BindersTheme.line))
                                 }
                                 .buttonStyle(.plain)
                             }
@@ -590,7 +660,7 @@ struct EntityDetailView: View {
                     // Notes that [[link]] here, and the ones that only name them, one click from a link.
                     MentionsPanel(title: entity.name, heading: "In your notes and meetings")
 
-                    Text("Mentions").font(.headline)
+                    Text("Mentions").font(BindersTheme.cardTitle)
                     ForEach(mentions) { hit in
                         KnowledgeHitRow(hit: hit, emphasis: entity.name)
                     }
@@ -603,7 +673,7 @@ struct EntityDetailView: View {
         }
         .task(id: "\(entityID)|\(knowledge.revision)") {
             entity = await knowledge.store.entity(id: entityID)
-            mentions = await knowledge.store.mentions(of: entityID, limit: 100)
+            mentions = knowledge.labelled(await knowledge.store.mentions(of: entityID, limit: 100))
             related = await knowledge.store.related(to: entityID, limit: 24)
             relations = await knowledge.store.relations(of: entityID)
             aliases = await knowledge.store.aliases(of: entityID)
@@ -621,7 +691,7 @@ struct EntityDetailView: View {
                 return a.documents == b.documents ? a.name < b.name : a.documents > b.documents
             }
         return VStack(alignment: .leading, spacing: 8) {
-            Text("Merge \(entity.name) into…").font(.headline)
+            Text("Merge \(entity.name) into…").font(BindersTheme.cardTitle)
             TextField("Filter", text: $mergeFilter).textFieldStyle(.roundedBorder)
             List(options.prefix(60)) { option in
                 Button {
@@ -632,7 +702,7 @@ struct EntityDetailView: View {
                         Circle().fill(EntityStyle.color(option.type)).frame(width: 7, height: 7)
                         Text(option.name).lineLimit(1)
                         Spacer()
-                        Text("\(option.documents)").font(.caption).foregroundStyle(.secondary)
+                        Text("\(option.documents)").font(.caption).monospacedDigit().foregroundStyle(.secondary)
                     }
                     .contentShape(Rectangle())
                 }
@@ -646,16 +716,23 @@ struct EntityDetailView: View {
 
 // MARK: - Graph
 
-/// The knowledge graph as a living thing: a force simulation that blooms out from the centre, floats gently once
-/// settled, lights up a node's neighbours on hover, pulses the selection and lets you drag nodes around.
+/// The knowledge graph as a living thing: a force simulation that blooms out from the centre, lights up a node's
+/// neighbours on hover, pulses a node as you select it and lets you drag nodes around. Once the layout settles it holds
+/// still and draws nothing more until you hover, drag, zoom or select, or the graph changes, when it moves on from where
+/// it was rather than blooming again. With Reduce Motion nothing animates: the layout shows settled, and highlights
+/// change at once.
 struct KnowledgeGraphView: View {
     @Environment(KnowledgeService.self) private var knowledge
     @Binding var selectedEntityID: Int64?
     var binder: String? = nil
+    /// For self-tests, which can't turn Reduce Motion on: stands in for the setting.
+    var reduceMotionOverride: Bool? = nil
     @State private var graph = KnowledgeGraphData()
     @State private var simulation = GraphSimulation(nodes: [], edges: [])
     @State private var hoveredID: String?
-    @State private var hoverAmount: [String: Double] = [:]
+    @State private var highlight = GraphHighlight()
+    /// When the selected node started its pulse; nil once it's done.
+    @State private var pulseStart: Date?
     @State private var zoom: CGFloat = 1
     @State private var zoomAtGestureStart: CGFloat?
     @State private var pan: CGSize = .zero
@@ -663,17 +740,33 @@ struct KnowledgeGraphView: View {
     @State private var draggingIndex: Int?
     @State private var loading = true
     @State private var loadedAt = Date()
+    @Environment(\.accessibilityReduceMotion) private var reduceMotionSetting
 
-    private static let field = [Color(red: 0.13, green: 0.11, blue: 0.31), Color(red: 0.05, green: 0.045, blue: 0.11)]
+    /// For self-tests: frames drawn since launch.
+    nonisolated(unsafe) static var framesDrawn = 0
+
+    /// The night sky the graph is drawn on, dark in both appearances: the dark surface at the centre, the dark ground at
+    /// the edge.
+    private static let field = [Color(nsColor: BindersTheme.srgb(0x221E48)), BindersTheme.Dark.ground]
+    private static let pulseLength: TimeInterval = 1.6
+
+    private var reduceMotion: Bool { reduceMotionOverride ?? reduceMotionSetting }
+
+    /// Frames, at full speed, only while something moves: the layout settling, a node dragged, a highlight easing in or
+    /// out, a new selection's pulse. Settled and left alone, the graph isn't drawn again.
+    private var animating: Bool {
+        !reduceMotion && (!simulation.isSettled || draggingIndex != nil || highlight.isEasing(toward: hoveredID) || pulseStart != nil)
+    }
 
     var body: some View {
         GeometryReader { geometry in
             let size = geometry.size
-            TimelineView(.animation(minimumInterval: 1 / 60)) { timeline in
+            TimelineView(.animation(minimumInterval: 1 / 60, paused: !animating)) { timeline in
                 Canvas { context, canvasSize in
-                    draw(in: &context, size: canvasSize, time: timeline.date.timeIntervalSince(loadedAt))
+                    Self.framesDrawn += 1
+                    draw(in: &context, size: canvasSize, time: timeline.date.timeIntervalSince(loadedAt), now: timeline.date)
                 }
-                .onChange(of: timeline.date) { tick() }
+                .onChange(of: timeline.date) { tick(at: timeline.date) }
             }
             .contentShape(Rectangle())
             .gesture(DragGesture(minimumDistance: 2)
@@ -683,6 +776,7 @@ struct KnowledgeGraphView: View {
                         draggingIndex = index
                     }
                     if let index = draggingIndex {
+                        // With Reduce Motion only the node in hand moves; the rest find their places when it's let go.
                         simulation.pin(index, at: unit(value.location, size))
                     } else {
                         let start = panAtGestureStart ?? pan
@@ -694,6 +788,7 @@ struct KnowledgeGraphView: View {
                     if let index = draggingIndex {
                         simulation.release(index)
                         simulation.reheat(0.3)
+                        if reduceMotion { simulation.settle() }
                     }
                     draggingIndex = nil
                     panAtGestureStart = nil
@@ -706,10 +801,11 @@ struct KnowledgeGraphView: View {
                 }
                 .onEnded { _ in zoomAtGestureStart = nil })
             .onContinuousHover { phase in
-                switch phase {
-                case .active(let location): hoveredID = node(at: location, size: size)?.id
-                case .ended: hoveredID = nil
-                }
+                var hovered: String?
+                if case .active(let location) = phase { hovered = node(at: location, size: size)?.id }
+                guard hovered != hoveredID else { return }
+                hoveredID = hovered
+                if reduceMotion { highlight.snap(to: hovered) }
             }
             .onTapGesture(coordinateSpace: .local) { location in
                 guard let node = node(at: location, size: size) else { return }
@@ -738,6 +834,16 @@ struct KnowledgeGraphView: View {
         )
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .task(id: knowledge.revision) { await load() }
+        .onChange(of: selectedEntityID) { _, selected in
+            pulseStart = selected == nil || reduceMotion ? nil : Date()
+        }
+        // Reduce Motion turned on mid-bloom: straight to the end of it.
+        .onChange(of: reduceMotion) { _, reduced in
+            guard reduced else { return }
+            simulation.settle()
+            highlight.snap(to: hoveredID)
+            pulseStart = nil
+        }
     }
 
     private var legend: some View {
@@ -765,8 +871,13 @@ struct KnowledgeGraphView: View {
             Button { zoom = min(4, zoom * 1.25) } label: { Image(systemName: "plus.magnifyingglass") }
             Button { zoom = 1; pan = .zero } label: { Image(systemName: "arrow.counterclockwise") }
                 .help("Reset the view")
-            Button { simulation.scatter(); loadedAt = Date() } label: { Image(systemName: "sparkles") }
-                .help("Shake it up: replay the bloom")
+            Button {
+                simulation.scatter()
+                // With Reduce Motion, a new arrangement at once, without the bloom.
+                if reduceMotion { simulation.settle() }
+                loadedAt = Date()
+            } label: { Image(systemName: "shuffle") }
+                .help(reduceMotion ? "Shake it up: a new arrangement" : "Shake it up: replay the bloom")
         }
         .buttonStyle(.borderless)
         .foregroundStyle(.white.opacity(0.85))
@@ -778,25 +889,35 @@ struct KnowledgeGraphView: View {
 
     private func load() async {
         let data = await knowledge.store.graph(documentLimit: 60, entityLimit: 140, binder: binder)
+        // The index moved on without changing the graph: nothing to draw again.
+        if !loading, data.nodes == graph.nodes, data.edges == graph.edges { return }
         var fresh = GraphSimulation(nodes: data.nodes.map { GraphNode(id: $0.id, weight: $0.weight) }, edges: data.edges)
-        // A few frames ahead so the first thing on screen is already a shape, then the bloom continues live.
-        for _ in 0..<12 { fresh.step() }
+        // New data moves the picture on from where it was; the first load blooms.
+        if !graph.nodes.isEmpty { fresh.carryOver(from: simulation) }
+        if reduceMotion {
+            let start = fresh
+            fresh = await Task.detached(priority: .userInitiated) {
+                var settled = start
+                settled.settle()
+                return settled
+            }.value
+        } else if fresh.alpha >= 1 {
+            // A few frames ahead so the first thing on screen is already a shape, then the bloom continues live.
+            for _ in 0..<12 { fresh.step() }
+        }
+        let held = draggingIndex.map { simulation.ids[$0] }
         graph = data
         simulation = fresh
+        draggingIndex = held.flatMap { fresh.index(of: $0) }
         loadedAt = Date()
         loading = false
     }
 
-    /// One frame: advance the physics and ease the hover highlight.
-    private func tick() {
+    /// One frame: advance the physics, ease the hover highlight, and end the selection's pulse when it's had its time.
+    private func tick(at date: Date) {
         if !simulation.isSettled { simulation.step() }
-        var next = hoverAmount
-        for id in Set(next.keys).union(hoveredID.map { [$0] } ?? []) {
-            let target = id == hoveredID ? 1.0 : 0.0
-            let eased = (next[id] ?? 0) + (target - (next[id] ?? 0)) * 0.22
-            if eased < 0.01, target == 0 { next[id] = nil } else { next[id] = eased }
-        }
-        if next != hoverAmount { hoverAmount = next }
+        if highlight.isEasing(toward: hoveredID) { highlight.step(toward: hoveredID) }
+        if let pulseStart, date.timeIntervalSince(pulseStart) >= Self.pulseLength { self.pulseStart = nil }
     }
 
     private func point(_ position: SIMD2<Double>, _ size: CGSize) -> CGPoint {
@@ -814,13 +935,7 @@ struct KnowledgeGraphView: View {
     }
 
     private func radius(_ node: KnowledgeGraphData.Node) -> CGFloat {
-        (node.isDocument ? 8 : 4 + min(10, CGFloat(node.weight).squareRoot() * 2.8)) * (1 + 0.35 * CGFloat(hoverAmount[node.id] ?? 0))
-    }
-
-    /// A tiny drift per node so the settled graph still breathes.
-    private func drift(_ node: KnowledgeGraphData.Node, time: TimeInterval) -> CGSize {
-        let phase = Double(node.id.hashValue % 628) / 100
-        return CGSize(width: cos(time * 0.7 + phase) * 1.6, height: sin(time * 0.9 + phase * 1.3) * 1.6)
+        (node.isDocument ? 8 : 4 + min(10, CGFloat(node.weight).squareRoot() * 2.8)) * (1 + 0.35 * CGFloat(highlight[node.id]))
     }
 
     private func node(at location: CGPoint, size: CGSize) -> KnowledgeGraphData.Node? {
@@ -834,7 +949,7 @@ struct KnowledgeGraphView: View {
         return best?.node
     }
 
-    private func draw(in context: inout GraphicsContext, size: CGSize, time: TimeInterval) {
+    private func draw(in context: inout GraphicsContext, size: CGSize, time: TimeInterval, now: Date) {
         let focus = hoveredID ?? selectedEntityID.map { "e:\($0)" }
         var neighbors = Set<String>()
         if let focus {
@@ -846,9 +961,7 @@ struct KnowledgeGraphView: View {
         var centers: [String: CGPoint] = [:]
         for node in graph.nodes {
             guard let position = position(of: node) else { continue }
-            let base = point(position, size)
-            let drift = drift(node, time: time)
-            centers[node.id] = CGPoint(x: base.x + drift.width, y: base.y + drift.height)
+            centers[node.id] = point(position, size)
         }
         let byID = Dictionary(uniqueKeysWithValues: graph.nodes.map { ($0.id, $0) })
 
@@ -866,8 +979,9 @@ struct KnowledgeGraphView: View {
             if highlighted, let focusNode = byID[focus!] {
                 let color = EntityStyle.color(focusNode.kind)
                 context.stroke(path, with: .color(color.opacity(0.35)), lineWidth: 3)
+                // The dashes flow while the graph is drawing anyway, and hold still when it isn't.
                 context.stroke(path, with: .color(color.opacity(0.95)),
-                               style: StrokeStyle(lineWidth: 1.4, lineCap: .round, dash: [4, 7], dashPhase: -time * 30))
+                               style: StrokeStyle(lineWidth: 1.4, lineCap: .round, dash: [4, 7], dashPhase: reduceMotion ? 0 : -time * 30))
             } else {
                 let opacity = focus == nil ? 0.12 : 0.04
                 context.stroke(path, with: .color(.white.opacity(opacity + min(0.1, edge.weight * 0.025))), lineWidth: 0.9)
@@ -888,7 +1002,7 @@ struct KnowledgeGraphView: View {
             let dimmed = focus != nil && node.id != focus && !neighbors.contains(node.id)
             let color = EntityStyle.color(node.kind)
             let alpha = dimmed ? 0.25 : 1.0
-            let hover = hoverAmount[node.id] ?? 0
+            let hover = highlight[node.id]
             // Glow, then the body.
             let glow = r * (2.2 + hover * 0.8)
             context.fill(Path(ellipseIn: CGRect(x: center.x - glow, y: center.y - glow, width: glow * 2, height: glow * 2)),
@@ -906,7 +1020,12 @@ struct KnowledgeGraphView: View {
                              with: .color(.white.opacity(0.35 * alpha)))
             }
             if node.id == selectedEntityID.map({ "e:\($0)" }) {
-                let ring = r + 6 + CGFloat(sin(time * 3) * 2)
+                // A pulse as it's selected that dies away, then a ring that holds still.
+                let pulse = pulseStart.map { start -> Double in
+                    let age = now.timeIntervalSince(start)
+                    return age < Self.pulseLength ? sin(age * 6) * 2.5 * (1 - age / Self.pulseLength) : 0
+                } ?? 0
+                let ring = r + 6 + CGFloat(pulse)
                 context.stroke(Path(ellipseIn: CGRect(x: center.x - ring, y: center.y - ring, width: ring * 2, height: ring * 2)),
                                with: .color(color.opacity(0.8)), lineWidth: 1.5)
             }
@@ -938,13 +1057,61 @@ struct KnowledgeGraphView: View {
 
 // MARK: - Spoken answers
 
+/// Command Mode's answers, in a panel that floats over what you're doing: the question at once, then the passages found,
+/// then the answer as it's written.
 @MainActor
-final class AnswerPanelController {
+final class AnswerPanelController: NSObject, NSWindowDelegate {
     static let shared = AnswerPanelController()
     private var panel: NSPanel?
+    /// What the panel shows.
+    private(set) var run: AskRun?
+    private var answering: Task<KnowledgeService.Answer, Never>?
+    /// Off for self-tests, which read `run` instead: the panel isn't put on screen.
+    var showsWindow = true
 
-    /// Shows the question with a spinner when `answer` is nil.
+    /// An answer is being written into the panel right now.
+    var isAnswering: Bool { answering != nil }
+
+    /// Shows the question and answers it from the binders as it goes. Nil when the panel was closed, or Esc pressed,
+    /// before the answer was done: that stops it.
+    func ask(_ question: String, searchQuery: String? = nil, knowledge: KnowledgeService) async -> KnowledgeService.Answer? {
+        stopAnswering()
+        let run = AskRun(question: question)
+        present(run)
+        let task = Task { await run.run(with: knowledge, searchQuery: searchQuery) }
+        answering = task
+        let answer = await task.value
+        guard answering == task else { return nil }
+        answering = nil
+        return answer
+    }
+
+    /// Shows the question with its answer when it's already done (the boards' digest), or, with nil, as being looked for.
     func show(question: String, answer: KnowledgeService.Answer?) {
+        stopAnswering()
+        present(answer.map { AskRun(answer: KnowledgeService.Answer(question: question, text: $0.text, sources: $0.sources)) }
+                ?? AskRun(question: question))
+    }
+
+    /// Closes the panel. An answer still being written stops, and so does one being read aloud.
+    func close() {
+        stopAnswering()
+        panel?.orderOut(nil)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        stopAnswering()
+    }
+
+    private func stopAnswering() {
+        answering?.cancel()
+        answering = nil
+        AnswerSpeaker.shared.stop()
+    }
+
+    private func present(_ run: AskRun) {
+        self.run = run
+        guard showsWindow else { return }
         if panel == nil {
             let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 480, height: 440),
                                 styleMask: [.titled, .closable, .resizable, .utilityWindow, .nonactivatingPanel, .fullSizeContentView],
@@ -956,49 +1123,38 @@ final class AnswerPanelController {
             panel.isReleasedWhenClosed = false
             panel.becomesKeyOnlyIfNeeded = true
             panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            panel.delegate = self
             if !panel.setFrameUsingName("BindersAnswer"), let screen = NSScreen.main?.visibleFrame {
                 panel.setFrameOrigin(NSPoint(x: screen.maxX - 500, y: screen.maxY - 470))
             }
-            panel.setFrameAutosaveName("BindersAnswer")
+            panel.setFrameAutosaveName(AppDefaults.frameName("BindersAnswer"))
             self.panel = panel
         }
-        panel?.contentView = NSHostingView(rootView: AnswerPanelView(question: question, answer: answer, onClose: { [weak self] in
+        panel?.contentView = NSHostingView(rootView: AnswerPanelView(run: run, onClose: { [weak self] in
             self?.close()
         }))
         panel?.orderFrontRegardless()
     }
-
-    func close() {
-        panel?.orderOut(nil)
-    }
 }
 
-private struct AnswerPanelView: View {
-    let question: String
-    let answer: KnowledgeService.Answer?
+struct AnswerPanelView: View {
+    let run: AskRun
     let onClose: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(question).font(.headline).lineLimit(3)
-            if let answer {
-                ScrollView {
-                    KnowledgeAnswerView(answer: answer)
-                }
-            } else {
-                VStack(spacing: 10) {
-                    ProgressView()
-                    Text("Searching your meetings, notes and dictations…").foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // What you asked, quoted.
+            Text(run.question).font(BindersTheme.quote(.title3)).lineLimit(3)
+            ScrollView {
+                AskRunView(run: run)
             }
             HStack {
                 Spacer()
-                if let answer {
-                    Button("Copy") { TextInserter.copyToClipboard(answer.text) }
+                if !run.isWorking {
+                    Button("Copy") { TextInserter.copyToClipboard(run.text) }
                 }
                 Button("Open in Knowledge") {
-                    HubWindowController.shared.navigation.pendingKnowledgeQuery = question
+                    HubWindowController.shared.navigation.pendingKnowledgeQuery = run.question
                     HubWindowController.shared.show(section: .knowledge)
                     onClose()
                 }
@@ -1008,5 +1164,6 @@ private struct AnswerPanelView: View {
         .padding(.horizontal, 16)
         .padding(.top, 34)
         .padding(.bottom, 14)
+        .pageGround()
     }
 }

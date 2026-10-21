@@ -1,0 +1,18 @@
+# The -c key paths Binders gives Codex, each found in codex-rs/core/config.schema.json (permissions.<name>.*: in
+# config/src/permissions_toml.rs, PermissionProfileToml) at commit c1382380de69521303b416720a52f42d51af6248 (0.162.0).
+approvals_reviewer
+web_search
+allow_login_shell
+shell_environment_policy.inherit
+shell_environment_policy.ignore_default_excludes
+shell_environment_policy.set
+default_permissions
+permissions.<name>.extends
+permissions.<name>.filesystem
+permissions.<name>.network
+mcp_servers.<name>.command
+mcp_servers.<name>.args
+mcp_servers.<name>.env
+mcp_servers.<name>.required
+mcp_servers.<name>.default_tools_approval_mode
+features.network_proxy

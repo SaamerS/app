@@ -1,0 +1,1173 @@
+{
+ "schema": "binders-kit-named-agents/1",
+ "agents": {
+  "standard": [
+   "Claude Code · pocketfold-app",
+   "Codex · pocketfold-site",
+   "Pennant",
+   "Grok Bot",
+   "Kestrel",
+   "Inkwell",
+   "Hourglass",
+   "Abacus"
+  ],
+  "large": [
+   "Claude Code · pocketfold-app",
+   "Codex · pocketfold-site",
+   "Pennant",
+   "Grok Bot",
+   "Kestrel",
+   "Inkwell",
+   "Hourglass",
+   "Abacus",
+   "Claude Code · pocketfold-android",
+   "Splice",
+   "Coach",
+   "Shutterbug"
+  ]
+ },
+ "cases": [
+  {
+   "id": "explicit-01",
+   "library": "standard",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Give the login bug to Codex",
+   "expected_agent": "Codex · pocketfold-site",
+   "expect": [
+    "Codex · pocketfold-site"
+   ]
+  },
+  {
+   "id": "explicit-02",
+   "library": "standard",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Claude Code, can you look at why the app forgets the font size after a restart",
+   "expected_agent": "Claude Code · pocketfold-app",
+   "expect": [
+    "Claude Code · pocketfold-app"
+   ]
+  },
+  {
+   "id": "explicit-03",
+   "library": "standard",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Have Grok Bot find a place near the venue for the booth team dinner",
+   "expected_agent": "Grok Bot",
+   "expect": [
+    "Grok Bot"
+   ]
+  },
+  {
+   "id": "explicit-04",
+   "library": "standard",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Ask Pennant to book the physio for Thursday afternoon",
+   "expected_agent": "Pennant",
+   "expect": [
+    "Pennant"
+   ]
+  },
+  {
+   "id": "explicit-05",
+   "library": "standard",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Kestrel, check in with the beta testers who went quiet",
+   "expected_agent": "Kestrel",
+   "expect": [
+    "Kestrel"
+   ]
+  },
+  {
+   "id": "explicit-06",
+   "library": "standard",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Get Inkwell to draft the release notes for the iPad update",
+   "expected_agent": "Inkwell",
+   "expect": [
+    "Inkwell"
+   ]
+  },
+  {
+   "id": "explicit-07",
+   "library": "standard",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Hourglass, find a time next week for a call with Orrin Capital",
+   "expected_agent": "Hourglass",
+   "expect": [
+    "Hourglass"
+   ]
+  },
+  {
+   "id": "explicit-08",
+   "library": "standard",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Put the third quarter VAT return on Abacus",
+   "expected_agent": "Abacus",
+   "expect": [
+    "Abacus"
+   ]
+  },
+  {
+   "id": "explicit-09",
+   "library": "standard",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Let Codex move the pricing table to the new layout",
+   "expected_agent": "Codex · pocketfold-site",
+   "expect": [
+    "Codex · pocketfold-site"
+   ]
+  },
+  {
+   "id": "explicit-10",
+   "library": "standard",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "This one's for Claude Code: dark mode colours are off in the share sheet",
+   "expected_agent": "Claude Code · pocketfold-app",
+   "expect": [
+    "Claude Code · pocketfold-app"
+   ]
+  },
+  {
+   "id": "explicit-11",
+   "library": "standard",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Ask Grok to pull together market size numbers for the deck",
+   "expected_agent": "Grok Bot",
+   "expect": []
+  },
+  {
+   "id": "explicit-12",
+   "library": "standard",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Pennant, ask the landlord whether we can paint the bedroom",
+   "expected_agent": "Pennant",
+   "expect": [
+    "Pennant"
+   ]
+  },
+  {
+   "id": "explicit-13",
+   "library": "standard",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Hand the candidate intro emails to Kestrel",
+   "expected_agent": "Kestrel",
+   "expect": [
+    "Kestrel"
+   ]
+  },
+  {
+   "id": "explicit-14",
+   "library": "standard",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Inkwell, an idea for the blog: how sync works without a connection",
+   "expected_agent": "Inkwell",
+   "expect": [
+    "Inkwell"
+   ]
+  },
+  {
+   "id": "explicit-15",
+   "library": "standard",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Give Hourglass the job of moving Thursday's interviews to Friday",
+   "expected_agent": "Hourglass",
+   "expect": [
+    "Hourglass"
+   ]
+  },
+  {
+   "id": "explicit-16",
+   "library": "standard",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Send the booth swag order to Pennant",
+   "expected_agent": "Pennant",
+   "expect": [
+    "Pennant"
+   ]
+  },
+  {
+   "id": "explicit-17",
+   "library": "standard",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Claude Code should write the failing test for the sync conflict first",
+   "expected_agent": "Claude Code · pocketfold-app",
+   "expect": [
+    "Claude Code · pocketfold-app"
+   ]
+  },
+  {
+   "id": "explicit-18",
+   "library": "standard",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Give the pricing page copy to Claude Code",
+   "expected_agent": "Claude Code · pocketfold-app",
+   "expect": [
+    "Claude Code · pocketfold-app"
+   ]
+  },
+  {
+   "id": "explicit-19",
+   "library": "standard",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Ask Kestrel to book a table for Dad's birthday on Sunday",
+   "expected_agent": "Kestrel",
+   "expect": [
+    "Kestrel"
+   ]
+  },
+  {
+   "id": "explicit-20",
+   "library": "standard",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Get Grok Bot to write the intro for the October newsletter",
+   "expected_agent": "Grok Bot",
+   "expect": [
+    "Grok Bot"
+   ]
+  },
+  {
+   "id": "mention-01",
+   "library": "standard",
+   "category": "mentions_agent_no_work",
+   "language": "en",
+   "text": "For the record, Claude Code gets slow after four, so long runs go best in the morning",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "mention-02",
+   "library": "standard",
+   "category": "mentions_agent_no_work",
+   "language": "en",
+   "text": "Ask Sam whether Codex or Claude Code did better on the site work",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "mention-03",
+   "library": "standard",
+   "category": "mentions_agent_no_work",
+   "language": "en",
+   "text": "Look over what Claude Code changed in the sync code before I merge it",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "mention-04",
+   "library": "standard",
+   "category": "mentions_agent_no_work",
+   "language": "en",
+   "text": "Keep in mind Grok Bot's investor summary leaves out anyone we've already met",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "mention-05",
+   "library": "standard",
+   "category": "mentions_agent_no_work",
+   "language": "en",
+   "text": "Pennant booked the wrong train last time, so I'll check the times myself",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "mention-06",
+   "library": "standard",
+   "category": "mentions_agent_no_work",
+   "language": "en",
+   "text": "Kestrel sent the booth follow-ups twice, call Jamie and apologize",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "mention-07",
+   "library": "standard",
+   "category": "mentions_agent_no_work",
+   "language": "en",
+   "text": "Inkwell's release notes were too long last time",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "mention-08",
+   "library": "standard",
+   "category": "mentions_agent_no_work",
+   "language": "en",
+   "text": "Hourglass put the investor call on a Sunday, I'll move it myself",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "mention-09",
+   "library": "standard",
+   "category": "mentions_agent_no_work",
+   "language": "en",
+   "text": "Abacus missed two receipts in September",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "mention-10",
+   "library": "standard",
+   "category": "mentions_agent_no_work",
+   "language": "en",
+   "text": "Turn off Codex for the weekend",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "mention-11",
+   "library": "standard",
+   "category": "mentions_agent_no_work",
+   "language": "en",
+   "text": "Note that Claude Code's UI tests need the simulator open, or they fail",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "mention-12",
+   "library": "standard",
+   "category": "mentions_agent_no_work",
+   "language": "en",
+   "text": "Tell Sam that Grok Bot found the list of places for the booth dinner",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "mention-13",
+   "library": "standard",
+   "category": "mentions_agent_no_work",
+   "language": "en",
+   "text": "Write down which prompts worked best with Claude Code on the widget",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "mention-14",
+   "library": "standard",
+   "category": "mentions_agent_no_work",
+   "language": "en",
+   "text": "Let Chris know Grok Bot can do the salary research for the iOS role",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "mention-15",
+   "library": "standard",
+   "category": "mentions_agent_no_work",
+   "language": "en",
+   "text": "Grok Bot keeps citing old prices, don't trust its flight numbers",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "mention-16",
+   "library": "standard",
+   "category": "mentions_agent_no_work",
+   "language": "en",
+   "text": "Codex did a nice job on the pricing table, tell Sam",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "noisy-01",
+   "library": "standard",
+   "category": "noisy_dictation",
+   "language": "en",
+   "text": "um so can you give the the sync bug to cloud code",
+   "expected_agent": "Claude Code · pocketfold-app",
+   "expect": []
+  },
+  {
+   "id": "noisy-03",
+   "library": "standard",
+   "category": "noisy_dictation",
+   "language": "en",
+   "text": "tell co decks the um the blog images don't load on the, on the new posts",
+   "expected_agent": "Codex · pocketfold-site",
+   "expect": []
+  },
+  {
+   "id": "noisy-04",
+   "library": "standard",
+   "category": "noisy_dictation",
+   "language": "en",
+   "text": "ask pendant to email the letting agent about the the deposit",
+   "expected_agent": "Pennant",
+   "expect": []
+  },
+  {
+   "id": "noisy-05",
+   "library": "standard",
+   "category": "noisy_dictation",
+   "language": "en",
+   "text": "grok but can you find like the cheapest way to get to Porto",
+   "expected_agent": "Grok Bot",
+   "expect": []
+  },
+  {
+   "id": "noisy-08",
+   "library": "standard",
+   "category": "noisy_dictation",
+   "language": "en",
+   "text": "ink well can do the blog post about, um, the new pricing I think",
+   "expected_agent": "Inkwell",
+   "expect": []
+  },
+  {
+   "id": "noisy-10",
+   "library": "standard",
+   "category": "noisy_dictation",
+   "language": "en",
+   "text": "put the hardware store receipts on a bacus",
+   "expected_agent": "Abacus",
+   "expect": []
+  },
+  {
+   "id": "noisy-13",
+   "library": "standard",
+   "category": "noisy_dictation",
+   "language": "en",
+   "text": "castrel should um nudge the angel investors Jordan mentioned",
+   "expected_agent": "Kestrel",
+   "expect": []
+  },
+  {
+   "id": "noisy-14",
+   "library": "standard",
+   "category": "noisy_dictation",
+   "language": "en",
+   "text": "hour glass push the call with Taylor to next week",
+   "expected_agent": "Hourglass",
+   "expect": []
+  },
+  {
+   "id": "long-10",
+   "library": "standard",
+   "category": "long_rambling",
+   "language": "en",
+   "text": "Honestly, I've been using Claude Code on the app a lot this week and it's been mostly great, it fixed the export thing and wrote the tests, but it was really slow yesterday afternoon, like minutes per step, and I couldn't tell if it was the network or it was just busy. Anyway, it's fine now. I just want to remember to keep an eye on how long the runs take.",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "long-14",
+   "library": "standard",
+   "category": "long_rambling",
+   "language": "en",
+   "text": "I was going to do the pricing page myself, but I'm never going to get to it this week. The annual toggle is wrong, the team plan card says five seats instead of ten, and the FAQ still mentions the old free tier. Give the whole thing to Codex, and tell it to keep the layout and just fix the numbers and the copy.",
+   "expected_agent": "Codex · pocketfold-site",
+   "expect": [
+    "Codex · pocketfold-site"
+   ]
+  },
+  {
+   "id": "pt-03",
+   "library": "standard",
+   "category": "other_language",
+   "language": "pt",
+   "text": "Pede ao Codex para arranjar o link partido na página de preços",
+   "expected_agent": "Codex · pocketfold-site",
+   "expect": [
+    "Codex · pocketfold-site"
+   ]
+  },
+  {
+   "id": "es-04",
+   "library": "standard",
+   "category": "other_language",
+   "language": "es",
+   "text": "Dale a Claude Code el fallo de los adjuntos que no se sincronizan",
+   "expected_agent": "Claude Code · pocketfold-app",
+   "expect": [
+    "Claude Code · pocketfold-app"
+   ]
+  },
+  {
+   "id": "de-04",
+   "library": "standard",
+   "category": "other_language",
+   "language": "de",
+   "text": "Lass Kestrel bei Taylors Referenzen nachfragen",
+   "expected_agent": "Kestrel",
+   "expect": [
+    "Kestrel"
+   ]
+  },
+  {
+   "id": "explicit-01",
+   "library": "large",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Give the login bug to Codex",
+   "expected_agent": "Codex · pocketfold-site",
+   "expect": [
+    "Codex · pocketfold-site"
+   ]
+  },
+  {
+   "id": "explicit-02",
+   "library": "large",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Claude Code, can you look at why the app forgets the font size after a restart",
+   "expected_agent": "Claude Code · pocketfold-app",
+   "expect": [
+    "Claude Code · pocketfold-app",
+    "Claude Code · pocketfold-android"
+   ]
+  },
+  {
+   "id": "explicit-03",
+   "library": "large",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Have Grok Bot find a place near the venue for the booth team dinner",
+   "expected_agent": "Grok Bot",
+   "expect": [
+    "Grok Bot"
+   ]
+  },
+  {
+   "id": "explicit-04",
+   "library": "large",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Ask Pennant to book the physio for Thursday afternoon",
+   "expected_agent": "Pennant",
+   "expect": [
+    "Pennant"
+   ]
+  },
+  {
+   "id": "explicit-05",
+   "library": "large",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Kestrel, check in with the beta testers who went quiet",
+   "expected_agent": "Kestrel",
+   "expect": [
+    "Kestrel"
+   ]
+  },
+  {
+   "id": "explicit-06",
+   "library": "large",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Get Inkwell to draft the release notes for the iPad update",
+   "expected_agent": "Inkwell",
+   "expect": [
+    "Inkwell"
+   ]
+  },
+  {
+   "id": "explicit-07",
+   "library": "large",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Hourglass, find a time next week for a call with Orrin Capital",
+   "expected_agent": "Hourglass",
+   "expect": [
+    "Hourglass"
+   ]
+  },
+  {
+   "id": "explicit-08",
+   "library": "large",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Put the third quarter VAT return on Abacus",
+   "expected_agent": "Abacus",
+   "expect": [
+    "Abacus"
+   ]
+  },
+  {
+   "id": "explicit-09",
+   "library": "large",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Let Codex move the pricing table to the new layout",
+   "expected_agent": "Codex · pocketfold-site",
+   "expect": [
+    "Codex · pocketfold-site"
+   ]
+  },
+  {
+   "id": "explicit-10",
+   "library": "large",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "This one's for Claude Code: dark mode colours are off in the share sheet",
+   "expected_agent": "Claude Code · pocketfold-app",
+   "expect": [
+    "Claude Code · pocketfold-app",
+    "Claude Code · pocketfold-android"
+   ]
+  },
+  {
+   "id": "explicit-11",
+   "library": "large",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Ask Grok to pull together market size numbers for the deck",
+   "expected_agent": "Grok Bot",
+   "expect": []
+  },
+  {
+   "id": "explicit-12",
+   "library": "large",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Pennant, ask the landlord whether we can paint the bedroom",
+   "expected_agent": "Pennant",
+   "expect": [
+    "Pennant"
+   ]
+  },
+  {
+   "id": "explicit-13",
+   "library": "large",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Hand the candidate intro emails to Kestrel",
+   "expected_agent": "Kestrel",
+   "expect": [
+    "Kestrel"
+   ]
+  },
+  {
+   "id": "explicit-14",
+   "library": "large",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Inkwell, an idea for the blog: how sync works without a connection",
+   "expected_agent": "Inkwell",
+   "expect": [
+    "Inkwell"
+   ]
+  },
+  {
+   "id": "explicit-15",
+   "library": "large",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Give Hourglass the job of moving Thursday's interviews to Friday",
+   "expected_agent": "Hourglass",
+   "expect": [
+    "Hourglass"
+   ]
+  },
+  {
+   "id": "explicit-16",
+   "library": "large",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Send the booth swag order to Pennant",
+   "expected_agent": "Pennant",
+   "expect": [
+    "Pennant"
+   ]
+  },
+  {
+   "id": "explicit-17",
+   "library": "large",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Claude Code should write the failing test for the sync conflict first",
+   "expected_agent": "Claude Code · pocketfold-app",
+   "expect": [
+    "Claude Code · pocketfold-app",
+    "Claude Code · pocketfold-android"
+   ]
+  },
+  {
+   "id": "explicit-18",
+   "library": "large",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Give the pricing page copy to Claude Code",
+   "expected_agent": "Claude Code · pocketfold-app",
+   "expect": [
+    "Claude Code · pocketfold-app",
+    "Claude Code · pocketfold-android"
+   ]
+  },
+  {
+   "id": "explicit-19",
+   "library": "large",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Ask Kestrel to book a table for Dad's birthday on Sunday",
+   "expected_agent": "Kestrel",
+   "expect": [
+    "Kestrel"
+   ]
+  },
+  {
+   "id": "explicit-20",
+   "library": "large",
+   "category": "explicit_agent",
+   "language": "en",
+   "text": "Get Grok Bot to write the intro for the October newsletter",
+   "expected_agent": "Grok Bot",
+   "expect": [
+    "Grok Bot"
+   ]
+  },
+  {
+   "id": "mention-01",
+   "library": "large",
+   "category": "mentions_agent_no_work",
+   "language": "en",
+   "text": "For the record, Claude Code gets slow after four, so long runs go best in the morning",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "mention-02",
+   "library": "large",
+   "category": "mentions_agent_no_work",
+   "language": "en",
+   "text": "Ask Sam whether Codex or Claude Code did better on the site work",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "mention-03",
+   "library": "large",
+   "category": "mentions_agent_no_work",
+   "language": "en",
+   "text": "Look over what Claude Code changed in the sync code before I merge it",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "mention-04",
+   "library": "large",
+   "category": "mentions_agent_no_work",
+   "language": "en",
+   "text": "Keep in mind Grok Bot's investor summary leaves out anyone we've already met",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "mention-05",
+   "library": "large",
+   "category": "mentions_agent_no_work",
+   "language": "en",
+   "text": "Pennant booked the wrong train last time, so I'll check the times myself",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "mention-06",
+   "library": "large",
+   "category": "mentions_agent_no_work",
+   "language": "en",
+   "text": "Kestrel sent the booth follow-ups twice, call Jamie and apologize",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "mention-07",
+   "library": "large",
+   "category": "mentions_agent_no_work",
+   "language": "en",
+   "text": "Inkwell's release notes were too long last time",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "mention-08",
+   "library": "large",
+   "category": "mentions_agent_no_work",
+   "language": "en",
+   "text": "Hourglass put the investor call on a Sunday, I'll move it myself",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "mention-09",
+   "library": "large",
+   "category": "mentions_agent_no_work",
+   "language": "en",
+   "text": "Abacus missed two receipts in September",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "mention-10",
+   "library": "large",
+   "category": "mentions_agent_no_work",
+   "language": "en",
+   "text": "Turn off Codex for the weekend",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "mention-11",
+   "library": "large",
+   "category": "mentions_agent_no_work",
+   "language": "en",
+   "text": "Note that Claude Code's UI tests need the simulator open, or they fail",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "mention-12",
+   "library": "large",
+   "category": "mentions_agent_no_work",
+   "language": "en",
+   "text": "Tell Sam that Grok Bot found the list of places for the booth dinner",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "mention-13",
+   "library": "large",
+   "category": "mentions_agent_no_work",
+   "language": "en",
+   "text": "Write down which prompts worked best with Claude Code on the widget",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "mention-14",
+   "library": "large",
+   "category": "mentions_agent_no_work",
+   "language": "en",
+   "text": "Let Chris know Grok Bot can do the salary research for the iOS role",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "mention-15",
+   "library": "large",
+   "category": "mentions_agent_no_work",
+   "language": "en",
+   "text": "Grok Bot keeps citing old prices, don't trust its flight numbers",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "mention-16",
+   "library": "large",
+   "category": "mentions_agent_no_work",
+   "language": "en",
+   "text": "Codex did a nice job on the pricing table, tell Sam",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "noisy-01",
+   "library": "large",
+   "category": "noisy_dictation",
+   "language": "en",
+   "text": "um so can you give the the sync bug to cloud code",
+   "expected_agent": "Claude Code · pocketfold-app",
+   "expect": []
+  },
+  {
+   "id": "noisy-03",
+   "library": "large",
+   "category": "noisy_dictation",
+   "language": "en",
+   "text": "tell co decks the um the blog images don't load on the, on the new posts",
+   "expected_agent": "Codex · pocketfold-site",
+   "expect": []
+  },
+  {
+   "id": "noisy-04",
+   "library": "large",
+   "category": "noisy_dictation",
+   "language": "en",
+   "text": "ask pendant to email the letting agent about the the deposit",
+   "expected_agent": "Pennant",
+   "expect": []
+  },
+  {
+   "id": "noisy-05",
+   "library": "large",
+   "category": "noisy_dictation",
+   "language": "en",
+   "text": "grok but can you find like the cheapest way to get to Porto",
+   "expected_agent": "Grok Bot",
+   "expect": []
+  },
+  {
+   "id": "noisy-08",
+   "library": "large",
+   "category": "noisy_dictation",
+   "language": "en",
+   "text": "ink well can do the blog post about, um, the new pricing I think",
+   "expected_agent": "Inkwell",
+   "expect": []
+  },
+  {
+   "id": "noisy-10",
+   "library": "large",
+   "category": "noisy_dictation",
+   "language": "en",
+   "text": "put the hardware store receipts on a bacus",
+   "expected_agent": "Abacus",
+   "expect": []
+  },
+  {
+   "id": "noisy-13",
+   "library": "large",
+   "category": "noisy_dictation",
+   "language": "en",
+   "text": "castrel should um nudge the angel investors Jordan mentioned",
+   "expected_agent": "Kestrel",
+   "expect": []
+  },
+  {
+   "id": "noisy-14",
+   "library": "large",
+   "category": "noisy_dictation",
+   "language": "en",
+   "text": "hour glass push the call with Taylor to next week",
+   "expected_agent": "Hourglass",
+   "expect": []
+  },
+  {
+   "id": "long-10",
+   "library": "large",
+   "category": "long_rambling",
+   "language": "en",
+   "text": "Honestly, I've been using Claude Code on the app a lot this week and it's been mostly great, it fixed the export thing and wrote the tests, but it was really slow yesterday afternoon, like minutes per step, and I couldn't tell if it was the network or it was just busy. Anyway, it's fine now. I just want to remember to keep an eye on how long the runs take.",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "long-14",
+   "library": "large",
+   "category": "long_rambling",
+   "language": "en",
+   "text": "I was going to do the pricing page myself, but I'm never going to get to it this week. The annual toggle is wrong, the team plan card says five seats instead of ten, and the FAQ still mentions the old free tier. Give the whole thing to Codex, and tell it to keep the layout and just fix the numbers and the copy.",
+   "expected_agent": "Codex · pocketfold-site",
+   "expect": [
+    "Codex · pocketfold-site"
+   ]
+  },
+  {
+   "id": "pt-03",
+   "library": "large",
+   "category": "other_language",
+   "language": "pt",
+   "text": "Pede ao Codex para arranjar o link partido na página de preços",
+   "expected_agent": "Codex · pocketfold-site",
+   "expect": [
+    "Codex · pocketfold-site"
+   ]
+  },
+  {
+   "id": "es-04",
+   "library": "large",
+   "category": "other_language",
+   "language": "es",
+   "text": "Dale a Claude Code el fallo de los adjuntos que no se sincronizan",
+   "expected_agent": "Claude Code · pocketfold-app",
+   "expect": [
+    "Claude Code · pocketfold-app",
+    "Claude Code · pocketfold-android"
+   ]
+  },
+  {
+   "id": "de-04",
+   "library": "large",
+   "category": "other_language",
+   "language": "de",
+   "text": "Lass Kestrel bei Taylors Referenzen nachfragen",
+   "expected_agent": "Kestrel",
+   "expect": [
+    "Kestrel"
+   ]
+  },
+  {
+   "id": "hand-01",
+   "library": "large",
+   "category": "hand",
+   "language": "en",
+   "text": "give this to codex",
+   "expected_agent": "Codex · pocketfold-site",
+   "expect": [
+    "Codex · pocketfold-site"
+   ]
+  },
+  {
+   "id": "hand-02",
+   "library": "large",
+   "category": "hand",
+   "language": "en",
+   "text": "ask codex to fix the pricing page typo",
+   "expected_agent": "Codex · pocketfold-site",
+   "expect": [
+    "Codex · pocketfold-site"
+   ]
+  },
+  {
+   "id": "hand-03",
+   "library": "large",
+   "category": "hand",
+   "language": "en",
+   "text": "Give this to Codex",
+   "expected_agent": "Codex · pocketfold-site",
+   "expect": [
+    "Codex · pocketfold-site"
+   ]
+  },
+  {
+   "id": "hand-04",
+   "library": "large",
+   "category": "hand",
+   "language": "en",
+   "text": "Coach should be booked for the team trip",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "hand-05",
+   "library": "large",
+   "category": "hand",
+   "language": "en",
+   "text": "Make Claude Code faster on big repos",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "hand-06",
+   "library": "large",
+   "category": "hand",
+   "language": "en",
+   "text": "Get Grok Bot running on the new server",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "hand-07",
+   "library": "large",
+   "category": "hand",
+   "language": "en",
+   "text": "Get Grok Bot to write the intro",
+   "expected_agent": "Grok Bot",
+   "expect": [
+    "Grok Bot"
+   ]
+  },
+  {
+   "id": "hand-08",
+   "library": "large",
+   "category": "hand",
+   "language": "en",
+   "text": "Codex should never touch the release branch",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "hand-09",
+   "library": "large",
+   "category": "hand",
+   "language": "en",
+   "text": "Codex should no longer touch the release branch",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "hand-10",
+   "library": "large",
+   "category": "hand",
+   "language": "en",
+   "text": "Send the invoice to Codex's reviewer",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "hand-11",
+   "library": "large",
+   "category": "hand",
+   "language": "en",
+   "text": "Don't give this to Codex",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "hand-12",
+   "library": "large",
+   "category": "hand",
+   "language": "en",
+   "text": "Please don't give this to Codex",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "hand-13",
+   "library": "large",
+   "category": "hand",
+   "language": "en",
+   "text": "Book the coach to the airport",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "hand-14",
+   "library": "large",
+   "category": "hand",
+   "language": "en",
+   "text": "Claude Code's tests are flaky",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "hand-15",
+   "library": "large",
+   "category": "hand",
+   "language": "en",
+   "text": "Let Chris know Grok Bot can do the research",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "hand-16",
+   "library": "large",
+   "category": "hand",
+   "language": "en",
+   "text": "Pennant can't reach the dentist",
+   "expected_agent": "nobody",
+   "expect": []
+  },
+  {
+   "id": "hand-17",
+   "library": "large",
+   "category": "hand",
+   "language": "en",
+   "text": "remind me to give the booth plan to Pennant",
+   "expected_agent": "Pennant",
+   "expect": [
+    "Pennant"
+   ]
+  }
+ ]
+}

@@ -16,7 +16,8 @@ public struct NoteTemplate: Equatable, Identifiable, Sendable {
     public func filled(date: Date, binder: String, locale: Locale = .current) -> String {
         let long = date.formatted(Date.FormatStyle(date: .complete, time: .omitted, locale: locale))
         let time = date.formatted(Date.FormatStyle(date: .omitted, time: .shortened, locale: locale))
-        let today = date.formatted(.iso8601.year().month().day())
+        // Local: ISO 8601 alone would give the date in UTC.
+        let today = date.formatted(Date.ISO8601FormatStyle(timeZone: .current).year().month().day())
         return body.replacingOccurrences(of: "{{date}}", with: long)
             .replacingOccurrences(of: "{{time}}", with: time)
             .replacingOccurrences(of: "{{today}}", with: today)

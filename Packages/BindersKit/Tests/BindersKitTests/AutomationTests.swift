@@ -58,6 +58,94 @@ final class AutomationTests: XCTestCase {
         let text = String(decoding: data, as: UTF8.self)
         XCTAssertTrue(text.contains("\"phrase\""), "the file should read like what it is")
         XCTAssertTrue(text.contains("\"meetingReady\""))
+        XCTAssertFalse(text.contains("anyOrigin"), "a rule that doesn't take other to-dos says nothing about it")
+    }
+
+    func testRulesFromBeforeOriginsStillRead() throws {
+        // automations.json as Binders 0.8.0 wrote it.
+        let old = #"""
+        [{"action":{"webhook":{"body":"","url":"https:\/\/example.test\/hook"}},"id":"3F2504E0-4F89-11D3-9A0C-0305E82C3301",
+          "isEnabled":true,"name":"Ping","trigger":{"event":{"name":"todoAdded"}}}]
+        """#
+        let rules = try JSONDecoder().decode([AutomationRule].self, from: Data(old.utf8))
+        XCTAssertEqual(rules.first?.action, .webhook(url: "https://example.test/hook", body: ""))
+        XCTAssertNil(rules.first?.anyOrigin)
+        XCTAssertEqual(rules.first?.runs(for: .voice), true, "it runs for your own to-dos as before")
+        XCTAssertEqual(rules.first?.runs(for: .moment), false, "and not for one said to yourself and done at once")
+        // A rule with the option round-trips it.
+        let wide = AutomationRule(name: "Everything", trigger: .event(name: .todoAdded), action: .script(command: "true"), anyOrigin: true)
+        XCTAssertEqual(try JSONDecoder().decode(AutomationRule.self, from: JSONEncoder().encode(wide)), wide)
+    }
+
+    func testOriginsDecideWhichRulesRun() {
+        let mine = AutomationRule(name: "Mine", trigger: .event(name: .todoAdded), action: .script(command: "true"))
+        let wide = AutomationRule(name: "All", trigger: .event(name: .todoAdded), action: .script(command: "true"), anyOrigin: true)
+        for origin in TodoOrigin.allCases {
+            XCTAssertTrue(wide.runs(for: origin), "\(origin) runs a rule that takes every to-do")
+            XCTAssertEqual(mine.runs(for: origin), [.voice, .phone, .suggestion].contains(origin), "\(origin)")
+        }
+        XCTAssertTrue(mine.runs(for: nil), "an event that isn't a to-do has no origin and runs as before")
+        XCTAssertEqual(TodoOrigin.allCases.filter { !$0.madeByYou }, [.moment, .agent, .link])
+        XCTAssertEqual(TodoOrigin.allCases.filter(\.isSaidToYourself), [.suggestion, .moment], "your own words, quoted where to-dos are listed")
+    }
+
+    func testATodoWithoutAnOriginIsSaidToYourselfByItsSource() {
+        // A Mac before `origin`, or a list_todos reply cached before it: the source says.
+        XCTAssertTrue(TodoOrigin.isSaidToYourself(origin: nil, source: "Said to yourself"))
+        XCTAssertFalse(TodoOrigin.isSaidToYourself(origin: nil, source: "Command Mode"))
+        XCTAssertFalse(TodoOrigin.isSaidToYourself(origin: nil, source: nil), "a checklist item has neither")
+        // An origin this build knows decides.
+        XCTAssertTrue(TodoOrigin.isSaidToYourself(origin: "moment", source: "Board"))
+        XCTAssertTrue(TodoOrigin.isSaidToYourself(origin: "suggestion", source: nil))
+        XCTAssertFalse(TodoOrigin.isSaidToYourself(origin: "agent", source: "Said to yourself"), "an agent's to-do is never quoted as your words")
+        // One from a newer Mac that this build doesn't know: the source again.
+        XCTAssertTrue(TodoOrigin.isSaidToYourself(origin: "watch", source: "Said to yourself"))
+        XCTAssertFalse(TodoOrigin.isSaidToYourself(origin: "watch", source: "Apple Watch"))
+    }
+
+    func testTodoOriginReachesScriptsAndHooks() {
+        let todo = AutomationPayload(event: "todoAdded", text: "call Sam", todoOrigin: .agent)
+        XCTAssertEqual(todo.fields["todo_origin"], "agent")
+        XCTAssertEqual(AutomationTemplate.render("{title} from {todo_origin}", payload: AutomationPayload(title: "call Sam", todoOrigin: .link)),
+                       "call Sam from link")
+        let other = AutomationPayload(event: "meetingReady", title: "Standup")
+        XCTAssertNil(other.fields["todo_origin"], "other events' payloads are as they were")
+        XCTAssertEqual(other.fields.count, 9)
+        // Older payloads decode without it.
+        let decoded = try? JSONDecoder().decode(AutomationPayload.self, from: Data(#"{"event":"phrase","text":"a","title":"a","when":"","date":"","app":"","binder":"","summary":"","link":""}"#.utf8))
+        XCTAssertNotNil(decoded)
+        XCTAssertNil(decoded?.todoOrigin)
+    }
+
+    func testRenderingIsOnePass() {
+        // A value that looks like a placeholder stays as it was said.
+        let payload = AutomationPayload(text: "use {binder} here", title: "{summary}", binder: "Work", summary: "secret")
+        XCTAssertEqual(AutomationTemplate.render("{text} / {title}", payload: payload), "use {binder} here / {summary}")
+        XCTAssertEqual(AutomationTemplate.render("{{text}} {nope} {", payload: AutomationPayload(text: "a")), "{a} {nope} {")
+    }
+
+    func testQueryValuesAreEncodedStrictly() {
+        XCTAssertEqual(AutomationTemplate.percentEncoded("../../etc/passwd"), "%2E%2E%2F%2E%2E%2Fetc%2Fpasswd")
+        XCTAssertEqual(AutomationTemplate.percentEncoded("a&b=c?d#e f+g"), "a%26b%3Dc%3Fd%23e%20f%2Bg")
+        XCTAssertEqual(AutomationTemplate.percentEncoded("Café-1_2~3"), "Caf%C3%A9-1_2~3")
+        let payload = AutomationPayload(title: "x/../y", binder: "Work.Plans")
+        let rendered = AutomationTemplate.render("https://example.test/add?title={title}&in={binder}", payload: payload, encode: AutomationTemplate.percentEncoded)
+        XCTAssertEqual(rendered, "https://example.test/add?title=x%2F%2E%2E%2Fy&in=Work%2EPlans")
+        XCTAssertEqual(URL(string: rendered)?.path, "/add", "the path stays the template's")
+    }
+
+    func testLinkTemplatesTakeValuesOnlyInTheQuery() {
+        XCTAssertNil(AutomationTemplate.urlProblem("things:///add?title={title}&when={date}"))
+        XCTAssertNil(AutomationTemplate.urlProblem("https://example.test/search?q=from%20{app}:{text}"))
+        XCTAssertNil(AutomationTemplate.urlProblem("https://example.test/fixed/path"))
+        XCTAssertNil(AutomationTemplate.urlProblem("mailto:me@example.test?subject={title}&body={text}"))
+        for refused in ["https://example.test/{binder}/new?title={title}", "https://{binder}.example.test/", "{link}",
+                        "https://example.test/?{title}=1", "https://example.test/?q=1#{title}", "obsidian://open?vault=A&file={title}/{binder}#{text}"] {
+            XCTAssertNotNil(AutomationTemplate.urlProblem(refused), refused)
+        }
+        XCTAssertTrue(AutomationTemplate.urlProblem("https://example.test/{binder}")?.contains("{binder}") == true, "the reason names the placeholder")
+        XCTAssertNotNil(AutomationTemplate.urlProblem("  "))
+        XCTAssertNotNil(AutomationTemplate.urlProblem("example.test/add?title={title}"), "a link needs its scheme")
     }
 }
 
@@ -99,7 +187,10 @@ final class MCPCoreTests: XCTestCase {
         XCTAssertEqual(limit?["type"] as? String, "integer")
         // Hosts can tell a lookup from a change; a tool not marked as reading counts as a change.
         XCTAssertEqual((list?.first?["annotations"] as? [String: Any])?["readOnlyHint"] as? Bool, true)
-        XCTAssertEqual((MCPTool(name: "add", description: "Add").schema["annotations"] as? [String: Any])?["readOnlyHint"] as? Bool, false)
+        let write = MCPTool(name: "add", description: "Add").schema["annotations"] as? [String: Any]
+        XCTAssertEqual(write?["readOnlyHint"] as? Bool, false)
+        XCTAssertEqual(write?["destructiveHint"] as? Bool, false, "writes add or change and keep history: an unattended agent may write")
+        XCTAssertEqual(write?["openWorldHint"] as? Bool, false, "nothing leaves this Mac")
     }
 
     func testToolsCallRunsTheToolAndReportsFailures() async {

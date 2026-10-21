@@ -33,6 +33,49 @@ final class TeamFormatTests: XCTestCase {
         XCTAssertEqual(TeamFiles.parseNote(TeamFiles.noteMarkdown(note)), note)
     }
 
+    /// An agent's edit to a shared note goes in the file with the note: who and when, read back exactly, next to what
+    /// other tools keep there.
+    func testAnAgentsEditTravelsWithTheNote() {
+        let edited = Date(timeIntervalSince1970: 1_800_000_000)
+        let mark = TeamNoteMark(madeBy: "Claude Code · app", editedBy: "Codex \"exec\" \\ run", editedAt: edited)
+        let note = TeamNote(id: "n1", author: TeamAuthor(id: "u1", name: "Maya"), body: "Booth rota\n- Sam on Monday",
+                            extraFrontmatter: ["tags: [launch]"] + mark.lines)
+        let parsed = TeamFiles.parseNote(TeamFiles.noteMarkdown(note))
+        XCTAssertEqual(TeamNoteMark(lines: parsed.extraFrontmatter), mark)
+        XCTAssertEqual(TeamNoteMark.removing(from: parsed.extraFrontmatter), ["tags: [launch]"], "taking the mark out leaves the rest")
+        XCTAssertEqual(parsed.body, note.body)
+        XCTAssertEqual(mark.lines, ["binders_made_by: \"Claude Code · app\"", "binders_edited_by: \"Codex \\\"exec\\\" \\\\ run\"",
+                                    "binders_edited_at: \"2027-01-15T08:00:00Z\""])
+    }
+
+    /// Files from before edits were marked, and a note that's all yours, carry no mark; an agent's own note hashes as it
+    /// always did, so updating makes no shared note look changed.
+    func testAMarkIsAddedOnlyWhereThereIsOne() {
+        let plain = TeamFiles.parseNote("---\nbinders_id: \"n1\"\nauthor: \"Maya\"\ntags: [launch]\n---\nBooth rota")
+        XCTAssertTrue(TeamNoteMark(lines: plain.extraFrontmatter).isEmpty)
+        XCTAssertEqual(TeamNoteMark().lines, [])
+        XCTAssertEqual(TeamNoteMark().hashSuffix, "")
+        XCTAssertEqual(TeamNoteMark(madeBy: "Claude Code").hashSuffix, "\n\u{1}made by Claude Code", "as before edits were marked")
+        XCTAssertNotEqual(TeamNoteMark(madeBy: "Claude Code", editedBy: "Codex").hashSuffix, TeamNoteMark(madeBy: "Claude Code").hashSuffix,
+                          "an agent's edit, or taking it off, is a change to sync")
+        XCTAssertEqual(TeamNoteMark(editedBy: "Codex", editedAt: Date()).hashSuffix, TeamNoteMark(editedBy: "Codex").hashSuffix,
+                       "the time isn't in the hash, which a file keeps only to the second")
+        XCTAssertEqual(TeamNoteMark(madeBy: "", editedBy: "", editedAt: Date()), TeamNoteMark(), "empty names count as none")
+        XCTAssertTrue(TeamNoteMark(lines: ["binders_edited_by: \"\"", "binders_edited_at: \"2027-01-15T08:00:00Z\""]).isEmpty,
+                      "a time without an agent is no mark")
+    }
+
+    /// A Binders from before edits were marked writes a shared note back keeping every line it doesn't know, but its own
+    /// `binders_made_by`, which it writes again: an agent's edit stays marked through a teammate's edit there.
+    func testAnOlderBuildKeepsTheEditMark() {
+        let mark = TeamNoteMark(editedBy: "Claude Code", editedAt: Date(timeIntervalSince1970: 1_800_000_000))
+        let file = TeamNote(id: "n1", author: TeamAuthor(id: "u1", name: "Maya"), body: "Booth rota", extraFrontmatter: mark.lines)
+        let read = TeamFiles.parseNote(TeamFiles.noteMarkdown(file))
+        let olderExtra = read.extraFrontmatter.filter { !$0.hasPrefix("binders_made_by:") }
+        let rewritten = TeamNote(id: "n1", author: read.author, editedBy: "Dana", body: read.body + "\n- Dana on Tuesday", extraFrontmatter: olderExtra)
+        XCTAssertEqual(TeamNoteMark(lines: TeamFiles.parseNote(TeamFiles.noteMarkdown(rewritten)).extraFrontmatter), mark)
+    }
+
     func testMeetingHashIgnoresWriteTimeAndSegmentOrderAndSurvivesJson() throws {
         let first = TranscriptSegment(channel: .microphone, start: 1, end: 2, text: "Hi")
         let second = TranscriptSegment(channel: .system, start: 3, end: 4, text: "Hello", speaker: "Speaker 1")

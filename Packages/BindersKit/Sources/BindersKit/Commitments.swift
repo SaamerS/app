@@ -124,6 +124,11 @@ public enum CommitmentDetection {
     public static func dueDate(from phrase: String?, relativeTo now: Date, calendar: Calendar = .current) -> Date? {
         guard var text = phrase?.lowercased().trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
         text = normalizeSpokenTime(text)
+        if let first = monthStart(beforeIn: text, now: now, calendar: calendar) {
+            // "before March", "by March", "until March": the last day before it starts.
+            let last = calendar.date(byAdding: .day, value: -1, to: first) ?? first
+            return calendar.date(bySettingHour: 17, minute: 0, second: 0, of: last) ?? last
+        }
         text = text.replacingOccurrences(of: #"^(by|on|before|until|till|for|due|around|at)\s+"#, with: "", options: .regularExpression)
         text = text.replacingOccurrences(of: #"\b(the|this coming|coming)\s+"#, with: "", options: .regularExpression)
         text = text.trimmingCharacters(in: CharacterSet(charactersIn: ".,!"))
@@ -216,6 +221,32 @@ public enum CommitmentDetection {
         return (text, nil, nil)
     }
 
+    /// Splits the time off the start of something said aloud: "Tomorrow I need to call Sam" → ("I need to call Sam",
+    /// "Tomorrow", the date). The longest run of up to six time words that dueDate reads counts, but only when a comma
+    /// ends it or I, we, need, have, got, don't, remember or remind comes next, so "Friday deck needs a cover" keeps its
+    /// first word.
+    public static func splitLeadingDue(_ text: String, relativeTo now: Date, calendar: Calendar = .current) -> (task: String, due: String?, dueAt: Date?) {
+        let normalized = normalizeSpokenTime(text)
+        let words = normalized.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard words.count >= 2 else { return (text, nil, nil) }
+        for count in stride(from: min(6, words.count - 1), through: 1, by: -1) {
+            let run = Array(words.prefix(count))
+            guard run.allSatisfy(isTimeWord) else { continue }
+            let next = words[count].lowercased().replacingOccurrences(of: "’", with: "'").trimmingCharacters(in: CharacterSet(charactersIn: ".,!?"))
+            guard run[count - 1].hasSuffix(",") || leadsOn.contains(next) else { continue }
+            let phrase = run.joined(separator: " ").trimmingCharacters(in: CharacterSet(charactersIn: ",;:").union(.whitespaces))
+            guard let date = dueDate(from: phrase, relativeTo: now, calendar: calendar) else { continue }
+            let task = words.dropFirst(count).joined(separator: " ").trimmingCharacters(in: CharacterSet(charactersIn: ",;:").union(.whitespaces))
+            guard !task.isEmpty else { continue }
+            return (task, phrase, date)
+        }
+        return (text, nil, nil)
+    }
+
+    /// What can follow a time said first: "Tomorrow I…", "Friday we've…", "Tonight need to…".
+    private static let leadsOn: Set<String> = ["i", "i'll", "i've", "i'm", "i'd", "we", "we'll", "we've", "we're", "we'd", "need", "have",
+                                               "got", "gotta", "don't", "dont", "remember", "remind"]
+
     /// Whether a time phrase names a moment in the day ("3 pm", "noon", "tomorrow morning") rather than just a day.
     public static func mentionsTimeOfDay(_ phrase: String) -> Bool {
         let text = normalizeSpokenTime(phrase.lowercased())
@@ -300,6 +331,19 @@ public enum CommitmentDetection {
         return nil
     }
 
+    /// The 1st of the month named in "before March", "by March", "until March" or "till March" said on its own: the next
+    /// one to start after now. Nil for anything else ("May" needs its full name and one of those words).
+    private static func monthStart(beforeIn text: String, now: Date, calendar cal: Calendar) -> Date? {
+        let months = ["january": 1, "jan": 1, "february": 2, "feb": 2, "march": 3, "mar": 3, "april": 4, "apr": 4, "may": 5,
+                      "june": 6, "jun": 6, "july": 7, "jul": 7, "august": 8, "aug": 8, "september": 9, "sept": 9, "sep": 9,
+                      "october": 10, "oct": 10, "november": 11, "nov": 11, "december": 12, "dec": 12]
+        let trimmed = text.trimmingCharacters(in: CharacterSet(charactersIn: ".,! "))
+        guard let match = trimmed.range(of: #"^(before|by|until|till)\s+([a-z]+)$"#, options: .regularExpression) else { return nil }
+        let words = trimmed[match].split(separator: " ")
+        guard let name = words.last, let month = months[String(name)] else { return nil }
+        return cal.nextDate(after: now, matching: DateComponents(month: month, day: 1), matchingPolicy: .nextTime)
+    }
+
     private static func explicitDate(in text: String, today: Date, calendar cal: Calendar) -> Date? {
         let year = cal.component(.year, from: today)
         func build(month: Int, day: Int, year explicitYear: Int?) -> Date? {
@@ -337,8 +381,15 @@ public enum CommitmentDetection {
         if let match = text.range(of: #"\b(?:the\s+)?(\d{1,2})(st|nd|rd|th)\b"#, options: .regularExpression) {
             let numbers = text[match].components(separatedBy: CharacterSet.decimalDigits.inverted).compactMap { Int($0) }
             if let day = numbers.first, (1...31).contains(day) {
-                let month = cal.component(.month, from: today)
-                if let date = build(month: month, day: day, year: nil) { return date }
+                // "the 20th" means this month's, or next month's once this month's has gone: never next year's.
+                var components = cal.dateComponents([.year, .month], from: today)
+                components.day = day
+                for _ in 0..<3 {
+                    if let date = cal.date(from: components), cal.component(.day, from: date) == day, date >= today {
+                        return cal.startOfDay(for: date)
+                    }
+                    components.month = (components.month ?? 1) + 1
+                }
             }
         }
         return nil

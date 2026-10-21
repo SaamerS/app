@@ -6,6 +6,9 @@ import BindersKit
 ///     binders://todo?text=call%20Sam%20tomorrow      binders://calendar?text=lunch%20with%20Sam%20tomorrow%20at%20noon
 ///     binders://ask?q=what%20did%20we%20decide       binders://dictate   binders://command
 ///     binders://capture/on|off|toggle                binders://meeting/start|stop|toggle   binders://meeting/<id>
+///     binders://card/<id>   opens the card in its own window, without bringing Binders forward or putting the cursor in
+///                           it (the BINDERS_LINK every woken agent gets)
+///     binders://note/<id>   opens the note in its binder (a card put on the board from a note links back with one)
 ///     binders://open?section=home|writing|knowledge|settings[&page=automations]
 ///     binders://link/pair   turns the phone link on and opens pairing; the one-time link is written to
 ///                           Application Support/Binders/link-pairing.txt (yours only), for a phone that isn't at the Mac
@@ -25,7 +28,30 @@ enum URLCommands {
         switch command {
         case "todo":
             guard !text.isEmpty else { return warn("binders://todo needs ?text=") }
-            _ = controller.commitments.addSpoken(text)
+            guard Store.shared.allowsSave() else { return }
+            // Anything on this Mac can open a link: the to-do says it came from one, and your automations leave it be
+            // unless a rule takes such to-dos.
+            _ = controller.commitments.addSpoken(text, origin: .link, madeBy: "a link")
+        case "card":
+            // Opening a card changes nothing, so it asks nothing.
+            guard let id = (path.first ?? query["id"]).flatMap(UUID.init(uuidString:)) else { return warn("binders://card needs a card's id") }
+            guard let card = controller.board.card(id) else {
+                hub.show(section: .home)
+                controller.flowBar.toast("That card isn't on a board any more.", symbol: "exclamationmark.circle", duration: 4)
+                return
+            }
+            // Any app can open a link: the card's window comes forward without Binders taking what you're typing.
+            CardWindows.shared.open(card, controller: controller, fromLink: true)
+        case "note":
+            // Opening a note changes nothing, so it asks nothing.
+            guard let id = NoteCards.noteID(in: url) else { return warn("binders://note needs a note's id") }
+            guard let note = Store.shared.note(id) else {
+                hub.show(section: .home)
+                controller.flowBar.toast("That note isn't in your binders any more.", symbol: "exclamationmark.circle", duration: 4)
+                return
+            }
+            hub.navigation.open(note: note)
+            hub.show()
         case "calendar":
             guard !text.isEmpty else { return warn("binders://calendar needs ?text=") }
             Task { await controller.addToCalendar(described: text) }
@@ -35,6 +61,9 @@ enum URLCommands {
             hub.show(section: .knowledge)
         case "link":
             guard (path.first ?? query["action"] ?? "").lowercased() == "pair" else { return warn("binders://link/pair") }
+            // A paired device acts as you: nothing but you starts pairing one.
+            guard confirmed("Pair a new iPhone?", detail: "Something on this Mac asked Binders to pair a device. A paired iPhone can read and change everything in Binders as you. Only go on if you're pairing your own iPhone.",
+                            action: "Pair") else { return }
             if !controller.settings.phoneLink { controller.settings.phoneLink = true }
             controller.link.start()
             Task {
@@ -46,12 +75,19 @@ enum URLCommands {
                 hub.navigation.pendingSettingsPage = .phone
                 hub.show(section: .settings)
             }
-        case "dictate":
-            controller.toggleSession(.dictation)
-        case "command":
-            controller.toggleSession(.command)
+        case "dictate", "command":
+            // Starting turns the microphone on, and what's heard is kept as a dictation: never without you. Finishing doesn't ask.
+            if case .idle = controller.phase,
+               !confirmed(command == "dictate" ? "Start dictating?" : "Start Command Mode?",
+                          detail: "Something on this Mac asked Binders to start listening, hands-free, with the microphone.", action: "Start") { return }
+            controller.toggleSession(command == "dictate" ? .dictation : .command)
         case "capture":
-            switch (path.first ?? query["state"] ?? "toggle").lowercased() {
+            let asked = (path.first ?? query["state"] ?? "toggle").lowercased()
+            let turningOn = asked == "on" || (asked != "off" && !controller.capture.isOn)
+            // Turning it on reads what you write in other apps: never without you.
+            if turningOn, !confirmed("Turn on writing capture?", detail: "Something on this Mac asked Binders to start keeping what you write in other apps.",
+                                     action: "Turn On") { return }
+            switch asked {
             case "on": controller.capture.start()
             case "off": controller.capture.stop()
             default: controller.capture.toggle()
@@ -67,7 +103,11 @@ enum URLCommands {
                 let recording = controller.meetings.isRecording
                 switch what.lowercased() {
                 case "start" where recording, "stop" where !recording: break
-                default: Task { await controller.meetings.toggle() }
+                default:
+                    // Starting a recording turns the microphone on: never without you.
+                    if !recording, !confirmed("Record a meeting?", detail: "Something on this Mac asked Binders to start recording, with the microphone and what your Mac plays.",
+                                              action: "Record") { return }
+                    Task { await controller.meetings.toggle() }
                 }
             }
         case "open":
@@ -81,6 +121,19 @@ enum URLCommands {
         default:
             warn("Unknown binders:// command: \(command)")
         }
+    }
+
+    /// Asked by a link for the microphone, writing capture or a new paired device: Binders comes forward and asks, every
+    /// time, so no agent, script, web page or link an agent left on a card can do it unseen. Binders' own buttons don't
+    /// go through links.
+    private static func confirmed(_ message: String, detail: String, action: String) -> Bool {
+        NSApp.activate()
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.informativeText = detail
+        alert.addButton(withTitle: action)
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     private static func warn(_ message: String) {

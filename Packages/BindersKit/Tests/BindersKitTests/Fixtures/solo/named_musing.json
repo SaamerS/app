@@ -1,0 +1,154 @@
+{
+ "about": "Musing that names an agent, for NamedAgents.find(…, thinkingAloud: true), the form a capture's item and a sentence kept without a cue are read with (part 3.4 as revised). Written after the critics, with their nine probes among them. `expect` is the agent a name decides for, or none: tentative or taken back, a wish about how an agent is, a remark about one. `limit` marks one the rules can't tell and the reading has to leave out (sarcasm).",
+ "agents": [
+  "Claude Code · app",
+  "Codex · site",
+  "Grok Bot",
+  "Inkwell",
+  "Pennant",
+  "Kestrel"
+ ],
+ "cases": [
+  {
+   "text": "I should get Claude Code to look at the sync bug when the Mac is asleep.",
+   "expect": [
+    "Claude Code · app"
+   ]
+  },
+  {
+   "text": "And I want Inkwell to draft the intro for the October newsletter.",
+   "expect": [
+    "Inkwell"
+   ]
+  },
+  {
+   "text": "We should get Grok Bot to compare the pricing.",
+   "expect": [
+    "Grok Bot"
+   ]
+  },
+  {
+   "text": "I'd like Codex to tidy the footer links.",
+   "expect": [
+    "Codex · site"
+   ]
+  },
+  {
+   "text": "I should ask Codex what it changed.",
+   "expect": [
+    "Codex · site"
+   ]
+  },
+  {
+   "text": "I should tell Pennant the venue is booked.",
+   "expect": [
+    "Pennant"
+   ]
+  },
+  {
+   "text": "I need Claude Code to fix the export before Friday.",
+   "expect": [
+    "Claude Code · app"
+   ]
+  },
+  {
+   "text": "Okay. And I want Grok Bot to compare what the other notes apps charge for teams, for the pricing page.",
+   "expect": [
+    "Grok Bot"
+   ]
+  },
+  {
+   "text": "Inkwell should write the newsletter this time.",
+   "expect": [
+    "Inkwell"
+   ]
+  },
+  {
+   "text": "Codex should probably look at the footer.",
+   "expect": [
+    "Codex · site"
+   ]
+  },
+  {
+   "text": "I might get Codex to rewrite the whole sync engine, but probably not.",
+   "expect": []
+  },
+  {
+   "text": "I could ask Grok Bot, but I'd rather look myself.",
+   "expect": []
+  },
+  {
+   "text": "We could get Inkwell to draft it, or maybe not, I don't know.",
+   "expect": []
+  },
+  {
+   "text": "I could give the sync bug to Claude Code.",
+   "expect": []
+  },
+  {
+   "text": "I'd like Claude Code to be more careful with the sync code.",
+   "expect": []
+  },
+  {
+   "text": "I want Codex to stop touching the release branch.",
+   "expect": []
+  },
+  {
+   "text": "I need Claude Code to be faster, honestly.",
+   "expect": []
+  },
+  {
+   "text": "I should never let Codex near the release branch.",
+   "expect": []
+  },
+  {
+   "text": "Claude Code could probably handle it.",
+   "expect": []
+  },
+  {
+   "text": "Grok Bot would know the answer.",
+   "expect": []
+  },
+  {
+   "text": "Codex can do the footer, I guess.",
+   "expect": []
+  },
+  {
+   "text": "Codex will probably break it again.",
+   "expect": []
+  },
+  {
+   "text": "Claude Code is going to hate this.",
+   "expect": []
+  },
+  {
+   "text": "Codex should know better by now.",
+   "expect": []
+  },
+  {
+   "text": "Claude Code should be smarter about this.",
+   "expect": []
+  },
+  {
+   "text": "Maybe Inkwell should write it, I don't know.",
+   "expect": []
+  },
+  {
+   "text": "Inkwell could draft them from the changelog, actually.",
+   "expect": []
+  },
+  {
+   "text": "Codex could fix that in a second, honestly.",
+   "expect": []
+  },
+  {
+   "text": "Codex did a really nice job on the footer links, by the way.",
+   "expect": []
+  },
+  {
+   "text": "We should get Claude Code to look at it, said nobody ever.",
+   "expect": [],
+   "limit": "sarcasm: the rules name Claude Code; the reading must leave it out as taken back"
+  }
+ ]
+}

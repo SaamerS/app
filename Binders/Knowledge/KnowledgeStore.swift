@@ -30,6 +30,8 @@ struct KnowledgeHit: Identifiable, Hashable, Sendable {
     let author: String?
     let binderID: String?
     var score: Double
+    /// From a note with an agent's words in it, which you haven't made yours: who. Set by `KnowledgeService.search`.
+    var agent: AgentMark? = nil
 
     var id: Int64 { chunkID }
 }

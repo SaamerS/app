@@ -1,5 +1,6 @@
 import AVFoundation
 import BindersKit
+import CryptoKit
 import FluidAudio
 import Foundation
 import Observation
@@ -12,8 +13,108 @@ import Security
 enum VoicePrint {
     private static let service = "io.binders.voice"
     private static let account = "you"
-    /// How alike two voices must sound to be the same person.
+    /// How alike two voices must sound to be the same person, in a whole conversation.
     static let threshold: Float = 0.55
+    /// How alike a few seconds said to yourself must sound to your print before it can be a moment: the one setting for
+    /// it, read by the moment gate (MomentCenter.gate). Stricter than `threshold`, as a 2-5 s clip says less than a
+    /// conversation. The calibration bench (Capture → Calibrate) sets it for about 1% false accepts on 2-5 s clips, from
+    /// your phrases, other voices and TV; until then, and after Reset, it's `defaultMomentThreshold`. Kept with the print:
+    /// forgetting the print, or teaching it again, goes back to the default.
+    static var momentThreshold: Float {
+        get { (UserDefaults.standard.object(forKey: momentThresholdKey) as? Double).map { Float($0) } ?? defaultMomentThreshold }
+        set {
+            UserDefaults.standard.set(Double(newValue), forKey: momentThresholdKey)
+            UserDefaults.standard.set(Date(), forKey: momentThresholdSetKey)
+        }
+    }
+
+    /// A first guess, until the bench has been run.
+    static let defaultMomentThreshold: Float = 0.65
+
+    /// When the bench set `momentThreshold`; nil while it's the default.
+    static var momentThresholdSet: Date? {
+        guard UserDefaults.standard.object(forKey: momentThresholdKey) != nil else { return nil }
+        return UserDefaults.standard.object(forKey: momentThresholdSetKey) as? Date
+    }
+
+    /// Back to the default.
+    static func resetMomentThreshold() {
+        UserDefaults.standard.removeObject(forKey: momentThresholdKey)
+        UserDefaults.standard.removeObject(forKey: momentThresholdSetKey)
+        UserDefaults.standard.removeObject(forKey: startThresholdKey)
+    }
+
+    /// How close a "Binders, …" said on its own must be to your voice for this iPhone to send its yes with it, so your Mac
+    /// may start an agent you let start on cards Binders sends it (MomentAgreement): stricter than `momentThreshold`, and
+    /// above every other voice and Not me the bench heard (MomentBench.startThreshold). Only Calibrate sets it, from at
+    /// least 100 clips of other voices; nil until then. Reset, forgetting the print and teaching it again clear it.
+    static var startThreshold: Float? {
+        get { (UserDefaults.standard.object(forKey: startThresholdKey) as? Double).map { Float($0) } }
+        set {
+            if let newValue { UserDefaults.standard.set(Double(newValue), forKey: startThresholdKey) } else {
+                UserDefaults.standard.removeObject(forKey: startThresholdKey)
+            }
+        }
+    }
+
+    private static let startThresholdKey = "voicePrintStartThreshold"
+
+    private static let momentThresholdKey = "voicePrintMomentThreshold"
+    private static let momentThresholdSetKey = "voicePrintMomentThresholdSet"
+
+    /// A short name for the print you have now and how voices are scored against it, so the bench counts only scores
+    /// that compare: a few hex digits of its hash, nothing that gives the print away, then the scoring ("3fa2c1d0.2").
+    /// Nil without a print.
+    static var fingerprint: String? {
+        guard let print = load() else { return nil }
+        let data = print.withUnsafeBufferPointer { Data(buffer: $0) }
+        return SHA256.hash(data: data).prefix(4).map { String(format: "%02x", $0) }.joined() + ".\(scoring)"
+    }
+
+    /// How a clip said on its own is scored (ConversationProcessor.voiceScore). 2: the clip fills the diarizer's ten-second
+    /// window with its own speech (AudioMath.filledForVoice). Before, padded with silence, a 2-5 s clip scored about 0.3
+    /// whoever said it, so nothing passed the voice threshold and Calibrate's thresholds were set on the wrong scale.
+    static let scoring = 2
+    private static let scoringKey = "voicePrintScoring"
+
+    /// Once, at launch, after an update to `scoring`: the voice threshold, the start bar and the Not me scores, all set
+    /// from scores of the earlier scoring, go, so the default stands until Calibrate is run again. The print stays.
+    static func upgradeScoring() {
+        let defaults = UserDefaults.standard
+        guard defaults.integer(forKey: scoringKey) < scoring else { return }
+        resetMomentThreshold()
+        defaults.removeObject(forKey: missesKey)
+        defaults.set(scoring, forKey: scoringKey)
+    }
+
+    /// Things the gate let through as yours that you said weren't ("Not me"): how alike each sounded to the print (nil
+    /// when it wasn't scored), the hard negatives the bench for `momentThreshold` needs. Numbers only, the last 50; they
+    /// go with the print.
+    static var misses: [Double?] {
+        (UserDefaults.standard.array(forKey: missesKey) as? [Double] ?? []).map { $0 < 0 ? nil : $0 }
+    }
+
+    /// One more Not me, with its score if it had one. When that score was at or past the start bar Calibrate set, the bar
+    /// goes up above it at once (MomentBench.raisedStartBar), so the same voice can't hand anything over without asking
+    /// before the next Calibrate: true when it did.
+    @discardableResult
+    static func notMe(_ score: Double?) -> Bool {
+        let kept = UserDefaults.standard.array(forKey: missesKey) as? [Double] ?? []
+        UserDefaults.standard.set(Array((kept + [score ?? -1]).suffix(50)), forKey: missesKey)
+        guard let score, let bar = startThreshold else { return false }
+        let raised = MomentBench.raisedStartBar(current: Double(bar), notMe: score)
+        guard raised > Double(bar) else { return false }
+        startThreshold = Float(raised)
+        return true
+    }
+
+    private static let missesKey = "voicePrintMisses"
+
+    /// How alike a voice sounds to your print (cosine), or nil without a print.
+    static func score(_ embedding: [Float]) -> Float? {
+        guard let mine = load(), mine.count == embedding.count else { return nil }
+        return cosine(mine, embedding)
+    }
 
     static var isTaught: Bool { load() != nil }
 
@@ -60,6 +161,9 @@ enum VoicePrint {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
                                     kSecAttrAccount as String: account]
         SecItemDelete(query as CFDictionary)
+        UserDefaults.standard.removeObject(forKey: missesKey)
+        // Set against this print, so it goes with it.
+        resetMomentThreshold()
     }
 }
 

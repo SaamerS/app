@@ -62,10 +62,40 @@ final class ConversationSplitterTests: XCTestCase {
         XCTAssertEqual(splitter.finish(), [])
     }
 
+    func testWrappingUpClosesAtOnceAndKeepsAShortOne() {
+        var splitter = ConversationSplitter()
+        for decision in decisions([(8, 5)]) { _ = splitter.add(speech: decision.speech, at: decision.time, duration: decision.duration) }
+        // Eight seconds of speech is under the 20 kept on its own, but you asked for it.
+        XCTAssertEqual(splitter.wrapUp(keepingFrom: 3), [.closed(.init(start: 0, end: 8, speech: 8))])
+        XCTAssertNil(splitter.current)
+        XCTAssertEqual(splitter.wrapUp(keepingFrom: 3), [], "nothing open, nothing to wrap up")
+        // The next speech opens a new one.
+        XCTAssertEqual(splitter.add(speech: true, at: 20, duration: 1), [.opened(at: 20)])
+        XCTAssertEqual(splitter.wrapUp(keepingFrom: 3), [.dropped(.init(start: 20, end: 21, speech: 1))], "a second of it isn't a conversation")
+    }
+
     func testTheSameDecisionsAlwaysCutTheSameWay() {
         let day = decisions([(40, 30), (10, 300), (3, 400), (90, 5), (60, 1000)])
         XCTAssertEqual(ConversationSplitter.conversations(in: day), ConversationSplitter.conversations(in: day))
         XCTAssertEqual(ConversationSplitter.conversations(in: day).count, 2)
+    }
+
+    /// A listening glyph moves while speech is heard, through the gaps between words, and holds still in the quiet after,
+    /// though the conversation stays open for minutes more.
+    func testAListeningGlyphMovesOnlyWhileSpeechIsHeard() {
+        var splitter = ConversationSplitter()
+        for decision in decisions([(8, 20)], from: 1_000) { _ = splitter.add(speech: decision.speech, at: decision.time, duration: decision.duration) }
+        let open = splitter.current
+        XCTAssertEqual(open?.end, 1_008, "still open twenty seconds into the quiet, its last speech at 1008")
+        let last = open.map { Date(timeIntervalSince1970: $0.end) }
+        func speaking(_ time: TimeInterval) -> Bool { ConversationSplitter.isSpeaking(lastSpeech: last, now: Date(timeIntervalSince1970: time)) }
+        XCTAssertTrue(speaking(1_008), "as the last word ends")
+        XCTAssertTrue(speaking(1_008.9), "in the gap before the next word")
+        XCTAssertFalse(speaking(1_009), "a second after the last word")
+        XCTAssertFalse(speaking(1_028), "in the quiet, the conversation still open")
+        XCTAssertFalse(ConversationSplitter.isSpeaking(lastSpeech: nil, now: Date()), "nothing heard since listening began")
+        XCTAssertTrue(ConversationSplitter.isSpeaking(lastSpeech: Date().addingTimeInterval(0.2), now: Date()),
+                      "audio stamped a moment ahead of the clock counts as now")
     }
 
     func testTheLoudnessGateHoldsThroughTheGapsBetweenWords() {

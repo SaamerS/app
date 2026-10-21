@@ -17,9 +17,31 @@ public struct ConversationPayload: Codable, Equatable, Sendable {
     public var device: String
     /// The speech engine that wrote the transcript, e.g. "parakeet-v2".
     public var engine: String
+    /// You wrapped it up yourself: keep it however short it is. Optional, so a Mac or phone without it still reads it.
+    public var wrappedUp: Bool?
+    /// Said to yourself's Mode when it was heard (MomentMode), "add" or "auto", only when Said to yourself was on; only to
+    /// a Mac that lists `soloFeature`, and in Auto only once the sheet was seen with Y2's words. Missing: read as today.
+    public var mode: String?
+    /// The iPhone heard only you in it (SoloRule.verdict). True or missing, never false.
+    public var solo: Bool?
+    /// In Add at Once or Auto, why it isn't vouched, as a word: print, calibrate, diarizer, audio, call, continues, voice,
+    /// voices, dialogue, unsure, parts, or one a newer build adds. Only for the line that says why; the Mac decides on `solo`.
+    public var soloHold: String?
+    /// In Auto, with `solo`: the iPhone's yes for each agent, as MomentPayload.agreed carries it (SoloAgreement).
+    public var agreed: [String: String]?
+    /// The lowest of your voices' scores, and the seconds of other speech let through: numbers, for the Mac's check and the log.
+    public var voice: Double?
+    public var otherSpeech: Double?
+    /// The moments said in it that may go with it: their own span inside your voices' turns, and the "Binders, …" found
+    /// in its transcript.
+    public var soloMoments: [UUID]?
+    /// Kept, though short, for a moment said in it: sent with no segments, read for its vouch only.
+    public var keptForMoment: Bool?
 
     public init(id: UUID = UUID(), started: Date, ended: Date, segments: [TranscriptSegment], speakers: [String: String] = [:],
-                device: String, engine: String) {
+                device: String, engine: String, wrappedUp: Bool? = nil, mode: String? = nil, solo: Bool? = nil, soloHold: String? = nil,
+                agreed: [String: String]? = nil, voice: Double? = nil, otherSpeech: Double? = nil, soloMoments: [UUID]? = nil,
+                keptForMoment: Bool? = nil) {
         self.id = id
         self.started = started
         self.ended = ended
@@ -27,7 +49,20 @@ public struct ConversationPayload: Codable, Equatable, Sendable {
         self.speakers = speakers
         self.device = device
         self.engine = engine
+        self.wrappedUp = wrappedUp
+        self.mode = mode
+        self.solo = solo
+        self.soloHold = soloHold
+        self.agreed = agreed
+        self.voice = voice
+        self.otherSpeech = otherSpeech
+        self.soloMoments = soloMoments
+        self.keptForMoment = keptForMoment
     }
+
+    /// The feature both ends list when they read and send Y2's fields (LinkFeatures.thisPhone, LinkServer.features): Auto
+    /// for what you think out loud. Can't be taken for `momentAuto`, `commentWakes` or `commentsAskFirst`.
+    public static let soloFeature = "soloAuto"
 
     /// The link method that carries one, and the feature a Mac advertises in `binders/hello` when it takes them.
     public static let method = "binders/conversation"
@@ -85,8 +120,10 @@ public struct ConversationPayload: Codable, Equatable, Sendable {
                 copy.end -= offset
                 return copy
             }
+            // A capture in parts is never vouched: each part carries only its mode and the word that says why.
             parts.append(ConversationPayload(id: Self.partID(id, parts.count), started: partStart, ended: partEnd, segments: rebased,
-                                             speakers: speakers, device: device, engine: engine))
+                                             speakers: speakers, device: device, engine: engine, wrappedUp: wrappedUp, mode: mode,
+                                             soloHold: mode == nil ? nil : SoloAgreement.partsHold))
             index += perPart
         }
         // Still too big (one enormous segment): halve again.
@@ -113,6 +150,20 @@ public enum ConversationPrompts {
 
     /// A conversation's notes, from a transcript the iPhone made during the day. The first line is TRIVIAL when there's
     /// nothing worth keeping.
+    ///
+    /// `solo` (lane Y2): a capture in which only the user spoke, read for what they said first, so its notes have the
+    /// thinking-aloud sections (MeetingTemplate.thinkingAloud), no Promises and no checklists. False is today's prompt.
+    public static func summarySystemPrompt(solo: Bool = false) -> String {
+        guard solo else { return summarySystemPrompt() }
+        let today = summarySystemPrompt()
+        return today.replacingOccurrences(of: MeetingTemplate.conversation.sections, with: MeetingTemplate.thinkingAloud.sections)
+            .replacingOccurrences(of: promisesRule, with: noTodosRule)
+    }
+
+    /// Today's rule for Promises, and the thinking-aloud notes' rule in its place.
+    static let promisesRule = "- Promises only when someone clearly said they would do something. A promise the user made is owned by You; one made to the user is owned by the person who made it."
+    static let noTodosRule = "- No checkboxes and no to-dos: what they mean to do is listed elsewhere. Write bullets."
+
     public static func summarySystemPrompt() -> String {
         """
         You write short notes on a conversation the user's iPhone heard during their day, from its transcript. "You" is the user.
@@ -140,8 +191,9 @@ public enum ConversationPrompts {
     }
 
     /// `partNotes` are raw notes on each part of a long conversation, as for a long meeting.
-    public static func summaryUserPrompt(date: String, duration: TimeInterval, transcript: String, partNotes: [String] = []) -> String {
+    public static func summaryUserPrompt(date: String, duration: TimeInterval, transcript: String, partNotes: [String] = [], solo: Bool = false) -> String {
         var parts = ["Heard on the iPhone: \(date), about \(max(1, Int((duration / 60).rounded()))) min."]
+        if solo { parts.append(soloLine) }
         if !partNotes.isEmpty {
             let notes = partNotes.enumerated().map { "### Part \($0.offset + 1)\n\($0.element)" }.joined(separator: "\n\n")
             parts.append("Raw notes taken on each part, a checklist so nothing is missed (the transcript is the source of truth):\n<part_notes>\n\(notes)\n</part_notes>")
@@ -149,6 +201,9 @@ public enum ConversationPrompts {
         parts.append("Transcript:\n<transcript>\n\(transcript)\n</transcript>")
         return parts.joined(separator: "\n\n")
     }
+
+    /// The line a capture that's only you adds before its transcript (lane Y2).
+    public static let soloLine = "Only the user spoke in it: they were thinking out loud."
 
     /// True when the model said there's nothing worth keeping.
     public static func isTrivial(_ output: String) -> Bool {
@@ -159,14 +214,23 @@ public enum ConversationPrompts {
 
     // MARK: Routing
 
-    /// A binder the router can pick, with a few titles of what's in it so the model can tell what it's for.
+    /// A binder the router can pick, with a few titles of what's in it so the model can tell what it's for, and what goes
+    /// in it when you've said ("What goes here").
     public struct BinderHint: Equatable, Sendable {
         public var name: String
         public var titles: [String]
+        public var about: String?
 
-        public init(name: String, titles: [String]) {
+        public init(name: String, titles: [String], about: String? = nil) {
             self.name = name
             self.titles = titles
+            self.about = about
+        }
+
+        /// "- Website", or "- Website: the website: pages, pricing…" when it says what goes in it.
+        public var line: String {
+            guard let about = about.map(PythonText.oneLine), !about.isEmpty else { return "- \(name)" }
+            return "- \(name): \(about)"
         }
     }
 
@@ -183,7 +247,7 @@ public enum ConversationPrompts {
     public static func routingUserPrompt(binders: [BinderHint], title: String, summary: String) -> String {
         let list = binders.map { binder in
             let titles = binder.titles.prefix(6).map { "  - \($0)" }.joined(separator: "\n")
-            return "- \(binder.name)" + (titles.isEmpty ? "" : "\n" + titles)
+            return binder.line + (titles.isEmpty ? "" : "\n" + titles)
         }.joined(separator: "\n")
         return """
         Binders:

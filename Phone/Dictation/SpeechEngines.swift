@@ -3,7 +3,7 @@ import Foundation
 import Speech
 
 enum DictationError: LocalizedError {
-    case microphone, speech, language, unavailable
+    case microphone, speech, language, unavailable, microphoneBusy
 
     var errorDescription: String? {
         switch self {
@@ -11,6 +11,7 @@ enum DictationError: LocalizedError {
         case .speech: "Binders needs speech recognition to write down what you say. Allow it in Settings → Binders."
         case .language: "This iPhone can't transcribe your language on the device yet."
         case .unavailable: "Speech recognition isn't available right now. Try again in a moment."
+        case .microphoneBusy: "The microphone isn't free right now. Try again in a moment."
         }
     }
 }
@@ -24,6 +25,12 @@ protocol SpeechEngine: AnyObject {
     nonisolated func append(_ buffer: AVAudioPCMBuffer)
     /// No more audio: the whole transcript.
     func finish() async throws -> String
+    /// Given up on (cancelled, or `finish` took too long): it stops, and nothing more is waited for.
+    func abandon()
+}
+
+extension SpeechEngine {
+    func abandon() {}
 }
 
 /// Apple's newer engine (iOS 26): on the device, fast, and good with long dictation.
@@ -99,6 +106,14 @@ final class AnalyzerEngine: SpeechEngine {
         await results?.value
         return (settled + pending).trimmingCharacters(in: .whitespacesAndNewlines)
     }
+
+    func abandon() {
+        input?.finish()
+        results?.cancel()
+        guard let analyzer else { return }
+        self.analyzer = nil
+        Task { await analyzer.cancelAndFinishNow() }
+    }
 }
 
 /// The older recognizer, for iPhones before iOS 26, on the device.
@@ -155,5 +170,10 @@ final class RecognizerEngine: SpeechEngine {
         task?.cancel()
         if let failure, latest.isEmpty { throw failure }
         return latest.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func abandon() {
+        request.endAudio()
+        task?.cancel()
     }
 }

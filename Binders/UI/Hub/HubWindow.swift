@@ -3,7 +3,7 @@ import SwiftData
 import SwiftUI
 
 enum HubSection: String, CaseIterable, Identifiable {
-    case home, today, binder, writing, knowledge, dictionary, snippets, style, settings
+    case home, today, work, agents, binder, writing, knowledge, dictionary, snippets, style, settings
 
     var id: String { rawValue }
 
@@ -11,6 +11,8 @@ enum HubSection: String, CaseIterable, Identifiable {
         switch self {
         case .home: "Home"
         case .today: "Today"
+        case .work: "Work"
+        case .agents: "Agents"
         case .binder: "Binder"
         case .writing: "Writing"
         case .knowledge: "Knowledge"
@@ -25,6 +27,8 @@ enum HubSection: String, CaseIterable, Identifiable {
         switch self {
         case .home: "house"
         case .today: "sun.max"
+        case .work: "rectangle.split.3x1"
+        case .agents: "wand.and.stars"
         case .binder: "books.vertical"
         case .writing: "pencil.line"
         case .knowledge: "point.3.connected.trianglepath.dotted"
@@ -57,8 +61,6 @@ final class HubNavigation {
     var pendingKnowledgeQuery: String?
     /// A person, project or topic to show in Knowledge.
     var pendingEntityID: Int64?
-    /// A card to open on the binder's board.
-    var pendingCardID: UUID?
     /// The Settings page to open next, consumed by Settings when it appears.
     var pendingSettingsPage: SettingsPage?
     /// The quick switcher, when it's open: ⌘O to find, ⌘P for commands.
@@ -74,6 +76,15 @@ final class HubWindowController: NSObject, NSWindowDelegate, NSMenuItemValidatio
     var controller: DictationController?
     let navigation = HubNavigation()
     private var window: NSWindow?
+
+    /// Whether the Binders window is open.
+    var isOpen: Bool { window != nil }
+
+    /// The Binders window while it's visible, not minimised and on the Space you're in: what a card opens over.
+    var visibleWindow: NSWindow? {
+        guard let window, window.isVisible, !window.isMiniaturized, window.isOnActiveSpace else { return nil }
+        return window
+    }
 
     func show(section: HubSection? = nil) {
         guard let controller else { return }
@@ -98,9 +109,11 @@ final class HubWindowController: NSObject, NSWindowDelegate, NSMenuItemValidatio
             window.toolbarStyle = .unified
             window.isReleasedWhenClosed = false
             window.contentMinSize = NSSize(width: 840, height: 560)
+            // The ground shows through the title bar, which floats over the page.
+            window.backgroundColor = BindersTheme.NS.ground
             window.contentView = NSHostingView(rootView: root)
             window.center()
-            window.setFrameAutosaveName("BindersHub")
+            window.setFrameAutosaveName(AppDefaults.frameName("BindersHub"))
             window.delegate = self
             self.window = window
         }
@@ -111,6 +124,7 @@ final class HubWindowController: NSObject, NSWindowDelegate, NSMenuItemValidatio
 
     /// ⌘N: a new note in the binder that's open (or the current one), on the Notes page, ready to type in.
     @objc func newNote(_ sender: Any?) {
+        guard Store.shared.allowsSave() else { return }
         let binderID = navigation.selection == .binder ? navigation.binderID : nil
         let binder = Store.shared.binder(binderID ?? AppSettings.shared.currentBinderID) ?? Store.shared.defaultBinder()
         let note = TemplateStore.newNote(from: nil, in: binder)
@@ -145,7 +159,7 @@ final class HubWindowController: NSObject, NSWindowDelegate, NSMenuItemValidatio
     }
 
     @objc func toggleDigest(_ sender: Any?) {
-        let defaults = UserDefaults.standard
+        let defaults = AppDefaults.store
         defaults.set(!(defaults.object(forKey: "notesShowDigest") as? Bool ?? true), forKey: "notesShowDigest")
     }
 
@@ -160,7 +174,7 @@ final class HubWindowController: NSObject, NSWindowDelegate, NSMenuItemValidatio
         case #selector(foldIntoBubble(_:)):
             return noteInFront != nil
         case #selector(toggleDigest(_:)):
-            item.title = (UserDefaults.standard.object(forKey: "notesShowDigest") as? Bool ?? true) ? "Hide Digest" : "Show Digest"
+            item.title = (AppDefaults.store.object(forKey: "notesShowDigest") as? Bool ?? true) ? "Hide Digest" : "Show Digest"
             return true
         case #selector(zoomIn(_:)):
             return TextZoom.level < TextZoom.range.upperBound
@@ -173,6 +187,7 @@ final class HubWindowController: NSObject, NSWindowDelegate, NSMenuItemValidatio
 
     /// ⌥⌘N: a new note in a small window of its own.
     @objc func newNoteWindow(_ sender: Any?) {
+        guard Store.shared.allowsSave() else { return }
         let binder = Store.shared.binder(AppSettings.shared.currentBinderID) ?? Store.shared.defaultBinder()
         NotePopouts.shared.open(TemplateStore.newNote(from: nil, in: binder))
     }
@@ -187,7 +202,8 @@ final class HubWindowController: NSObject, NSWindowDelegate, NSMenuItemValidatio
     }
 
     func windowWillClose(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
+        // A card still open keeps Binders in the Dock and in ⌘Tab until it closes too.
+        if !CardWindows.shared.hasOpenWindows { NSApp.setActivationPolicy(.accessory) }
         // The views go with the window. Kept alive, they would carry on observing, polling and rendering unseen.
         window?.contentView = nil
         window = nil
@@ -203,6 +219,10 @@ struct HubView: View {
                 .navigationSplitViewColumnWidth(min: 220, ideal: 240, max: 290)
         } detail: {
             detail
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    if Store.shared.isFallback { LibraryUnavailableBanner() }
+                }
+                .pageGround()
         }
         .overlay(alignment: .top) {
             if let mode = navigation.switcher {
@@ -224,6 +244,8 @@ struct HubView: View {
         switch navigation.selection ?? .home {
         case .home: HomeView()
         case .today: TodayView()
+        case .work: WorkView()
+        case .agents: AgentsView()
         case .binder: BinderPage(binderID: navigation.binderID).id(navigation.binderID)
         case .writing: WritingView()
         case .knowledge: KnowledgeView()
@@ -235,8 +257,36 @@ struct HubView: View {
     }
 }
 
+/// While the library didn't open: an amber strip above every page, as it needs you, with the problem style's glyph and
+/// what to do. Nothing new is kept until Binders is reopened, and a save you ask for says so instead.
+struct LibraryUnavailableBanner: View {
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: BindersTheme.problemSymbol)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.primary)
+            Text(Store.unavailableMessage)
+                .font(.callout.weight(.medium))
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 8)
+            Link("Learn More", destination: Store.unavailableHelp)
+                .font(.callout)
+                .foregroundStyle(.tintText)
+            Button("Quit Binders") { NSApp.terminate(nil) }
+                .controlSize(.small)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // Its own strip under the title bar, not tinting the bar too.
+        .background(BindersTheme.needsYou.opacity(0.14), ignoresSafeAreaEdges: [])
+        .overlay(alignment: .bottom) { BindersTheme.needsYou.opacity(0.4).frame(height: 1) }
+    }
+}
+
 /// The binder's spine: the brand at the top, the sections grouped by what they hold, and what the app is doing at
-/// the bottom. Quiet by design: a barely-tinted surface, with the indigo kept for the icon and the selection.
+/// the bottom. Quiet by design: the second ground, a shade off the page's, with the indigo kept for the icon and the
+/// selection.
 struct HubSidebar: View {
     @Environment(HubNavigation.self) private var navigation
     @Environment(DictationController.self) private var controller
@@ -261,9 +311,8 @@ struct HubSidebar: View {
     private var archivedCount: Int { allBinders.filter(\.archived).count }
 
     private var dark: Bool { colorScheme == .dark }
-    private var surface: Color { dark ? Color(red: 0.11, green: 0.10, blue: 0.16) : Color(red: 0.95, green: 0.945, blue: 0.975) }
-    private var edge: Color { dark ? .white.opacity(0.06) : .black.opacity(0.07) }
-    private var ink: Color { dark ? .white : Color(red: 0.11, green: 0.10, blue: 0.20) }
+    private var edge: Color { BindersTheme.line }
+    private var ink: Color { BindersTheme.ink }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -279,7 +328,7 @@ struct HubSidebar: View {
                         .foregroundStyle(ink)
                     Text("Private, on this Mac.")
                         .font(.caption)
-                        .foregroundStyle(ink.opacity(0.55))
+                        .foregroundStyle(BindersTheme.muted)
                 }
             }
             .padding(.horizontal, 20)
@@ -306,9 +355,12 @@ struct HubSidebar: View {
                 VStack(alignment: .leading, spacing: 2) {
                     row(.home)
                     row(.today)
+                    row(.work)
+                    row(.agents)
                     groupLabel("Binders")
                     ForEach(binders) { binderRow($0) }
                     Button {
+                        guard Store.shared.allowsSave() else { return }
                         newName = ""
                         creating = true
                     } label: {
@@ -377,7 +429,7 @@ struct HubSidebar: View {
             status
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(surface)
+        .background(BindersTheme.ground2)
         .overlay(alignment: .trailing) { edge.frame(width: 1) }
         .toolbar(removing: .sidebarToggle)
     }
@@ -400,7 +452,7 @@ struct HubSidebar: View {
 
     private func createBinder() {
         let name = newName.trimmed
-        guard !name.isEmpty else { return }
+        guard !name.isEmpty, Store.shared.allowsSave() else { return }
         let used = Set(allBinders.map(\.colorIndex))
         let binder = BinderRecord(name: name, colorIndex: (0..<BinderRecord.paletteSize).first { !used.contains($0) } ?? allBinders.count % BinderRecord.paletteSize)
         Store.shared.insert(binder)
@@ -436,7 +488,7 @@ struct HubSidebar: View {
             .padding(.vertical, 6)
             .padding(.horizontal, 10)
             .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(selected ? Color.accentColor.opacity(dark ? 0.28 : 0.16) : (hoveredBinder == binder.id ? ink.opacity(0.06) : .clear)))
+                .fill(selected ? BindersTheme.accent.opacity(dark ? 0.3 : 0.14) : (hoveredBinder == binder.id ? ink.opacity(0.06) : .clear)))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -446,6 +498,7 @@ struct HubSidebar: View {
         .contextMenu {
             if !binder.isTeamCopy {
                 Button("Rename…") {
+                    guard Store.shared.allowsSave() else { return }
                     renameDraft = binder.name
                     renamingBinder = binder
                 }
@@ -469,7 +522,7 @@ struct HubSidebar: View {
                 Image(systemName: section.symbol)
                     .font(.system(size: 13.5, weight: .medium))
                     .frame(width: 20)
-                    .foregroundStyle(selected ? Color.accentColor : ink.opacity(0.7))
+                    .foregroundStyle(selected ? BindersTheme.accentText : ink.opacity(0.7))
                 Text(section.title)
                     .font(.system(size: 13.5, weight: selected ? .semibold : .regular))
                     .foregroundStyle(ink.opacity(selected ? 1 : 0.82))
@@ -478,7 +531,7 @@ struct HubSidebar: View {
             .padding(.vertical, 6)
             .padding(.horizontal, 10)
             .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(selected ? Color.accentColor.opacity(dark ? 0.28 : 0.16) : (hovered == section ? ink.opacity(0.06) : .clear)))
+                .fill(selected ? BindersTheme.accent.opacity(dark ? 0.3 : 0.14) : (hovered == section ? ink.opacity(0.06) : .clear)))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -490,14 +543,14 @@ struct HubSidebar: View {
     private var status: some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
-                Circle().fill(statusColor).frame(width: 7, height: 7)
+                Image(systemName: statusSymbol).foregroundStyle(statusStyle)
                 Text(statusText).lineLimit(1)
             }
             Text("Hold \(settings.hotkeys.dictation.displayString()) to dictate · \(settings.hotkeys.meeting?.displayString() ?? "⌥M") for a meeting")
                 .lineLimit(2)
         }
         .font(.caption)
-        .foregroundStyle(ink.opacity(0.55))
+        .foregroundStyle(BindersTheme.muted)
         .padding(.horizontal, 20)
         .padding(.vertical, 14)
     }
@@ -513,13 +566,24 @@ struct HubSidebar: View {
         }
     }
 
-    private var statusColor: Color {
-        if AppPaths.isDemo { return .green }
+    /// Ready wears a check, not green, which is for done; a failure, the problem style's glyph.
+    private var statusSymbol: String {
+        if AppPaths.isDemo { return BindersTheme.readySymbol }
         switch controller.speech.state {
-        case .ready: return .green
-        case .failed: return .red
-        case .idle: return ink.opacity(0.3)
-        default: return .orange
+        case .ready: return BindersTheme.readySymbol
+        case .failed: return BindersTheme.problemSymbol
+        case .idle: return "circle.dotted"
+        case .downloading: return "arrow.down.circle"
+        case .loading: return "hourglass"
+        }
+    }
+
+    private var statusStyle: Color {
+        if AppPaths.isDemo { return BindersTheme.accentText }
+        switch controller.speech.state {
+        case .ready: return BindersTheme.accentText
+        case .failed: return ink
+        default: return BindersTheme.faint
         }
     }
 }
@@ -536,16 +600,25 @@ struct PageHeader: View {
     }
 }
 
+/// A small capsule label. A semantic colour comes with its glyph.
 struct Badge: View {
     let text: String
-    var color: Color = .secondary
+    var symbol: String? = nil
+    var color: Color = BindersTheme.muted
+    /// Wears the accent, or the binder's colour on its pages, in place of `color`: for a badge you click, or on a
+    /// binder's own card. One that only tells you something inside a binder takes `color`.
+    var tinted = false
 
     var body: some View {
-        Text(text)
-            .font(.caption2.weight(.semibold))
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(Capsule().fill(color.opacity(0.15)))
-            .foregroundStyle(color)
+        HStack(spacing: 3) {
+            // The words carry the meaning for VoiceOver; the glyph is for the eye.
+            if let symbol { Image(systemName: symbol).imageScale(.small).accessibilityHidden(true) }
+            Text(text)
+        }
+        .font(.caption2.weight(.semibold))
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(Capsule().fill(tinted ? AnyShapeStyle(TintFill().opacity(0.16)) : AnyShapeStyle(color.opacity(0.15))))
+        .foregroundStyle(tinted ? AnyShapeStyle(.tintText) : AnyShapeStyle(color))
     }
 }

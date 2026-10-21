@@ -25,7 +25,7 @@ final class MeetingWindowController {
             if !panel.setFrameUsingName("BindersMeetingNotes"), let screen = NSScreen.main?.visibleFrame {
                 panel.setFrameOrigin(NSPoint(x: screen.maxX - 440, y: screen.maxY - 580))
             }
-            panel.setFrameAutosaveName("BindersMeetingNotes")
+            panel.setFrameAutosaveName(AppDefaults.frameName("BindersMeetingNotes"))
             self.panel = panel
         }
         panel?.contentView = NSHostingView(rootView: LiveMeetingView(meeting: meeting)
@@ -53,10 +53,10 @@ struct LiveMeetingView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                PulsingDot()
+                RecordingDot(hearing: { service.hearsSpeech })
                 TextField("Title", text: $meeting.title)
                     .textFieldStyle(.plain)
-                    .font(.headline)
+                    .font(BindersTheme.cardTitle)
                     .renamesLinks(of: meeting.title)
                 if let start = service.liveStartedAt {
                     TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -71,13 +71,13 @@ struct LiveMeetingView: View {
                     Label("Stop", systemImage: "stop.fill")
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(.red)
+                // Red: the microphone is live.
+                .tint(BindersTheme.live)
                 .controlSize(.small)
             }
             if let issue = service.systemAudioIssue {
                 HStack(alignment: .top) {
-                    Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
-                    Text("Only your microphone is being recorded. \(issue)").font(.caption)
+                    StatusLabel("Only your microphone is being recorded. \(issue)", .problem).font(.caption)
                     Button("Settings") { Permissions.openSystemAudioSettings() }.controlSize(.small)
                 }
             }
@@ -99,12 +99,14 @@ struct LiveMeetingView: View {
         .padding(.horizontal, 14)
         .padding(.top, 32)
         .padding(.bottom, 12)
+        .pageGround()
     }
 }
 
 struct LiveTranscriptView: View {
     let segments: [TranscriptSegment]
     let names: [String: String]
+    @ReducedMotion private var reduceMotion
 
     var body: some View {
         let blocks = TranscriptFormatter.blocks(segments, names: names)
@@ -122,7 +124,8 @@ struct LiveTranscriptView: View {
             }
             .onChange(of: blocks.count) {
                 guard !blocks.isEmpty else { return }
-                withAnimation { proxy.scrollTo(blocks.count - 1, anchor: .bottom) }
+                // Follows the newest line; it jumps there under Reduce Motion.
+                withAnimation(reduceMotion ? nil : .default) { proxy.scrollTo(blocks.count - 1, anchor: .bottom) }
             }
         }
     }
@@ -134,34 +137,101 @@ struct TranscriptBlockRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
-                Text(block.speaker).font(.caption.weight(.semibold)).foregroundStyle(SpeakerColor.color(for: block.speaker))
-                Text(TranscriptFormatter.timestamp(block.start)).font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
+                Text(block.speaker).font(.caption.weight(.semibold)).foregroundStyle(SpeakerColor.style(for: block.speaker))
+                Text(TranscriptFormatter.timestamp(block.start)).font(BindersTheme.time()).foregroundStyle(.tertiary)
             }
-            Text(block.text).textSelection(.enabled)
+            // What was said, quoted.
+            Text(block.text).font(BindersTheme.quote()).textSelection(.enabled)
         }
     }
 }
 
+/// The live microphone's red dot. It breathes while speech is heard and holds still otherwise. Under Reduce Motion it
+/// never moves: a ring fades in around it while speech is heard instead.
 struct PulsingDot: View {
+    /// Speech is heard now.
+    var hearing: Bool
+    @ReducedMotion private var reduceMotion
+
     var body: some View {
-        TimelineView(.animation) { context in
-            let phase = context.date.timeIntervalSinceReferenceDate
+        TimelineView(.animation(minimumInterval: nil, paused: !hearing || reduceMotion)) { context in
             Circle()
-                .fill(Color.red)
+                .fill(BindersTheme.live)
                 .frame(width: 8, height: 8)
-                .opacity(0.55 + 0.45 * abs(sin(phase * 2)))
+                .opacity(Self.opacity(at: context.date.timeIntervalSinceReferenceDate, hearing: hearing, reduceMotion: reduceMotion))
         }
         .frame(width: 8, height: 8)
+        .background {
+            Circle()
+                .strokeBorder(BindersTheme.live.opacity(0.5), lineWidth: 1.5)
+                .frame(width: 14, height: 14)
+                .opacity(reduceMotion && hearing ? 1 : 0)
+                .animation(.easeInOut(duration: 0.25), value: hearing)
+        }
+    }
+
+    /// The dot's opacity at a moment: breathing while speech is heard, still otherwise and under Reduce Motion.
+    static func opacity(at time: TimeInterval, hearing: Bool, reduceMotion: Bool) -> Double {
+        guard hearing, !reduceMotion else { return 1 }
+        return 0.55 + 0.45 * abs(sin(time * 2))
     }
 }
 
+/// The red dot for a recording in progress: asks `hearing` a few times a second whether speech is heard, and moves only
+/// then.
+struct RecordingDot: View {
+    let hearing: @MainActor () -> Bool
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 0.25)) { _ in
+            PulsingDot(hearing: hearing())
+        }
+    }
+}
+
+/// All-day capture's waveform while it listens: red, as the microphone is live, and moving only while speech is heard,
+/// still through the quiet of a conversation that's still open, as on the iPhone. It asks `hearing` four times a second,
+/// only while it shows. Under Reduce Motion it never moves: it dims in the quiet instead.
+struct ListeningWaveform: View {
+    let hearing: @MainActor () async -> Bool
+    @ReducedMotion private var reduceMotion
+    @State private var speaking = false
+
+    var body: some View {
+        Image(systemName: "waveform")
+            .foregroundStyle(BindersTheme.live)
+            .symbolEffect(.variableColor.iterative, options: .repeating, isActive: speaking && !reduceMotion)
+            .opacity(reduceMotion && !speaking ? 0.55 : 1)
+            .animation(.easeInOut(duration: 0.25), value: speaking)
+            .task {
+                while !Task.isCancelled {
+                    let heard = await hearing()
+                    if heard != speaking { speaking = heard }
+                    try? await Task.sleep(for: .milliseconds(250))
+                }
+            }
+            .accessibilityHidden(true)
+    }
+}
+
+/// Each speaker's colour in a transcript: you in the accent's words, the others from colours that mean nothing else (no
+/// red, amber, green or lavender).
 enum SpeakerColor {
     static func color(for speaker: String) -> Color {
-        if speaker == TranscriptSegment.you { return .accentColor }
-        let palette: [Color] = [.orange, .green, .pink, .teal, .purple, .brown, .indigo, .mint]
+        if speaker == TranscriptSegment.you { return BindersTheme.accentText }
         let hash = speaker.unicodeScalars.reduce(0) { ($0 &* 31 &+ Int($1.value)) & 0x7FFF_FFFF }
         return palette[hash % palette.count]
     }
+
+    /// The same, as it's drawn: you in the accent's words, or muted on a binder's pages, where the accent doesn't go.
+    static func style(for speaker: String) -> AnyShapeStyle {
+        speaker == TranscriptSegment.you ? AnyShapeStyle(.infoText) : AnyShapeStyle(color(for: speaker))
+    }
+
+    private static let palette: [Color] = [
+        (0x4299E6, 0x2668B0), (0xE65C94, 0xB8336A), (0x2FA9A7, 0x1D7F7D), (0xC77DD9, 0x8E44A8),
+        (0xC08A62, 0x8A5A36), (0x45B4D0, 0x22809A), (0x7F8FB8, 0x4E5F8C), (0xD98AB4, 0xA4527E),
+    ].enumerated().map { index, pair in Color(nsColor: BindersTheme.dynamic("speaker\(index)", dark: pair.0, light: pair.1)) }
 }
 
 // MARK: - Hub: Meetings
@@ -170,6 +240,7 @@ struct MeetingsView: View {
     @Environment(MeetingService.self) private var service
     @Environment(HubNavigation.self) private var navigation
     @Environment(AppSettings.self) private var settings
+    @Environment(\.binderTint) private var binderTint
     @Query private var meetings: [MeetingRecord]
     @State private var selection: UUID?
     @State private var search = ""
@@ -209,8 +280,8 @@ struct MeetingsView: View {
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 10) {
                 if showsConversations {
-                    Text("Captures").font(BindersTheme.columnTitle)
-                    Text("Heard by Binders on your iPhone during the day. Only the text came to this Mac, and it stays here.")
+                    Text("Captures").font(BindersTheme.columnTitle).foregroundStyle(.sectionInk)
+                    Text("Heard by All-day capture on your iPhone or this Mac. From the iPhone, only the text came here, and it's never shared with your team.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -226,7 +297,7 @@ struct MeetingsView: View {
                             .help("Captures with nothing worth keeping are hidden, and deleted a week after they were heard.")
                     }
                 } else {
-                    Text("Meetings").font(BindersTheme.columnTitle)
+                    Text("Meetings").font(BindersTheme.columnTitle).foregroundStyle(.sectionInk)
                     Button {
                         Task {
                             await service.toggle()
@@ -238,7 +309,8 @@ struct MeetingsView: View {
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(service.isRecording ? .red : .accentColor)
+                    // Red only while the microphone is live; otherwise the binder's colour, in the shade its white words read on.
+                    .tint(service.isRecording ? BindersTheme.live : (binderTint?.control ?? BindersTheme.accent))
                     .controlSize(.large)
                     Button { importing = true } label: {
                         Label("Import Recording…", systemImage: "square.and.arrow.down").frame(maxWidth: .infinity)
@@ -253,6 +325,7 @@ struct MeetingsView: View {
                         .tag(meeting.id)
                 }
                 .listStyle(.inset)
+                .scrollContentBackground(.hidden)
             }
             .padding(.top, 24)
             .padding(.horizontal, 12)
@@ -357,22 +430,22 @@ private struct MeetingRow: View {
                 Text(meeting.createdAt, format: .dateTime.month(.abbreviated).day().hour().minute())
                 if meeting.duration > 0 { Text("· \(max(1, Int((meeting.duration / 60).rounded()))) min") }
             }
-            .font(.caption)
+            .font(BindersTheme.time())
             .foregroundStyle(.secondary)
             if meeting.isTeamCopy {
-                Label(meeting.teamAuthorName ?? "Teammate", systemImage: "person.2.fill").font(.caption).foregroundStyle(.blue)
+                Label(meeting.teamAuthorName ?? "Teammate", systemImage: "person.2.fill").font(.caption).foregroundStyle(.secondary)
             } else if showsSharing, meeting.sharedWithTeam {
-                Label("Shared", systemImage: "person.2").font(.caption).foregroundStyle(.teal)
+                Label("Shared", systemImage: "person.2").font(.caption).foregroundStyle(.secondary)
             }
             if recording {
-                Badge(text: "Recording", color: .red)
+                Badge(text: "Recording", symbol: "record.circle", color: BindersTheme.live)
             } else if busy {
                 HStack(spacing: 4) {
                     ProgressView().controlSize(.mini)
                     Text("Writing notes…").font(.caption2).foregroundStyle(.secondary)
                 }
             } else if meeting.status == "failed" {
-                Badge(text: "Failed", color: .red)
+                Badge(text: "Failed", symbol: BindersTheme.problemSymbol, color: BindersTheme.ink)
             }
         }
         .padding(.vertical, 3)
@@ -386,6 +459,7 @@ struct MeetingDetailView: View {
 
     @Environment(MeetingService.self) private var service
     @Environment(TeamSyncService.self) private var team
+    @ReducedMotion private var reduceMotion
     @Bindable var meeting: MeetingRecord
     let onDelete: () -> Void
     @State private var tab: DetailTab = .summary
@@ -411,15 +485,15 @@ struct MeetingDetailView: View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 4) {
                 if meeting.isTeamCopy {
-                    Text(meeting.title).font(.title.weight(.bold)).textSelection(.enabled)
+                    Text(meeting.title).font(BindersTheme.title(26)).textSelection(.enabled)
                 } else {
                     TextField("Title", text: $meeting.title)
                         .textFieldStyle(.plain)
-                        .font(.title.weight(.bold))
+                        .font(BindersTheme.title(26))
                         .renamesLinks(of: meeting.title)
                 }
                 HStack(spacing: 10) {
-                    Text(metaLine).foregroundStyle(.secondary)
+                    Text(metaLine).monospacedDigit().foregroundStyle(.secondary)
                     Spacer()
                     if meeting.isTeamCopy {
                         Label("Shared by \(meeting.teamAuthorName ?? "a teammate") · read-only", systemImage: "person.2")
@@ -442,7 +516,10 @@ struct MeetingDetailView: View {
                     Text("With " + meeting.attendees.joined(separator: ", ")).font(.callout).foregroundStyle(.secondary)
                 }
                 if let error = meeting.errorMessage {
-                    Label(error, systemImage: "exclamationmark.triangle").font(.callout).foregroundStyle(.orange)
+                    StatusLabel(error, .problem).font(.callout)
+                }
+                if meeting.isConversation, !meeting.soloJSON.isEmpty {
+                    CaptureFoundView(meeting: meeting)
                 }
                 if meeting.isConversation, meeting.suggestions.contains(where: { $0.status == .offered }) {
                     ConversationSuggestionsView(meeting: meeting)
@@ -660,7 +737,7 @@ struct MeetingDetailView: View {
                         Text("Speakers").font(.caption).foregroundStyle(.secondary)
                         ForEach(labels, id: \.self) { label in
                             HStack(spacing: 4) {
-                                Circle().fill(SpeakerColor.color(for: meeting.speakerNames[label] ?? label)).frame(width: 7, height: 7)
+                                Circle().fill(SpeakerColor.style(for: meeting.speakerNames[label] ?? label)).frame(width: 7, height: 7)
                                 TextField(label, text: Binding(
                                     get: { meeting.speakerNames[label] ?? "" },
                                     set: { newValue in
@@ -720,7 +797,7 @@ struct MeetingDetailView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .onChange(of: meeting.chat.count) {
-                    withAnimation { proxy.scrollTo(meeting.chat.count - 1, anchor: .bottom) }
+                    withAnimation(reduceMotion ? nil : .default) { proxy.scrollTo(meeting.chat.count - 1, anchor: .bottom) }
                 }
             }
             HStack {
@@ -752,7 +829,7 @@ private struct ChatBubble: View {
                     .textSelection(.enabled)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
-                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.accentColor.opacity(0.15)))
+                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(.infoFill(0.16)))
             }
         } else {
             MarkdownBlocks(markdown: message.text)
@@ -826,18 +903,19 @@ struct MarkdownBlocks: View {
             let text = String(line.drop { $0 != "]" }.dropFirst()).trimmingCharacters(in: .whitespaces)
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 if let onToggleTask {
+                    // A ticked to-do is done: green.
                     Button { onToggleTask(index) } label: {
                         Image(systemName: checked ? "checkmark.square.fill" : "square")
                     }
                     .buttonStyle(.plain)
-                    .foregroundStyle(checked ? Color.accentColor : Color.secondary)
+                    .foregroundStyle(checked ? AnyShapeStyle(BindersTheme.done) : AnyShapeStyle(.secondary))
                     .help(checked ? "Mark as not done" : "Mark as done")
                 } else {
                     Image(systemName: checked ? "checkmark.square" : "square").foregroundStyle(.secondary)
                 }
                 inlineText(text)
                     .strikethrough(checked, color: .secondary)
-                    .foregroundStyle(checked ? Color.secondary : Color.primary)
+                    .foregroundStyle(checked ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.leading, indent(raw))
@@ -882,7 +960,7 @@ private struct MicRescueSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Replace my mic track").font(.title3.weight(.semibold))
+            Text("Replace my mic track").font(.system(size: 17, weight: .heavy, design: .rounded))
             Text("Use another recording of yourself from this meeting, such as a conference speaker or a phone. Binders lines it up with what it recorded, transcribes your side again and rewrites the notes. The other side's transcript is kept.")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -916,30 +994,115 @@ private struct MicRescueSheet: View {
         }
         .padding(24)
         .frame(width: 520)
+        .pageGround()
         .fileImporter(isPresented: $choosing, allowedContentTypes: [.audio, .movie]) { result in
             if case .success(let url) = result { fileURL = url }
         }
     }
 }
 
-/// What a conversation brought up: cards to put on a board, answers from your binders. Yes, no, or later.
+/// What a conversation brought up: cards to put on a board, ideas for its Backlog, answers from your binders. Yes, no,
+/// later, or Give to an agent. They wait on you, so amber.
+/// Lane Y2: a capture in which your iPhone heard only you, read for what you said: each thing it found or that went with
+/// it, with what became of it and Open Card, Stop, Undo and Give to; Stop All; and where Not Only Me is. For one from a
+/// Auto iPhone that wasn't read, why. Plain, not amber, and no sparkle: nothing here is an agent's doing yet.
+private struct CaptureFoundView: View {
+    @Environment(MeetingService.self) private var service
+    @Bindable var meeting: MeetingRecord
+    @State private var message: String?
+    @State private var registry = AgentRegistry.shared
+    @State private var tick = 0
+
+    private var vouch: SoloVouch? { SoloVouch.decode(meeting.soloJSON) }
+    private var moments: MomentService? { service.conversations?.controller?.moments }
+
+    var body: some View {
+        if let vouch, [MomentMode.add, .auto].contains(vouch.heardMode) {
+            VStack(alignment: .leading, spacing: 8) {
+                let found = moments?.found(in: meeting.id) ?? []
+                if vouch.vouched, vouch.reply == SoloPrompts.State.items.rawValue || !found.isEmpty {
+                    Text(AutoText.macSection(mode: vouch.heardMode)).font(.callout.weight(.semibold))
+                    ForEach(found, id: \.id) { entry in row(entry.id, said: entry.state.said) }
+                    Text(AutoText.notOnlyMeOnPhone).font(.caption).foregroundStyle(.secondary)
+                    if found.filter({ moments?.outcome($0.id)?.handedOver != nil }).count >= 2 {
+                        HStack {
+                            Spacer()
+                            Button("Stop All") {
+                                Task {
+                                    message = await service.conversations?.act(on: meeting.id, action: "stop-all")?.message
+                                    tick += 1
+                                }
+                            }
+                        }
+                    }
+                } else if vouch.heardMode == .auto, let why = vouch.why {
+                    StatusLabel(AutoText.macUnread(why: why), .problem).font(.callout)
+                }
+                if let message { Text(message).font(.caption).foregroundStyle(.secondary) }
+            }
+            .controlSize(.small)
+            .padding(10)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.06)))
+            .id(tick)
+        }
+    }
+
+    @ViewBuilder
+    private func row(_ id: UUID, said: String) -> some View {
+        let outcome = moments?.outcome(id)
+        let handed = outcome?.handedOver != nil
+        let waits = outcome?.waiting != nil
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: handed ? "arrowshape.turn.up.right" : outcome?.state == "acted" ? "checkmark" : "circle")
+                .foregroundStyle(handed ? BindersTheme.accentText : Color.primary)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(outcome?.line ?? "").foregroundStyle(waits ? BindersTheme.needsYou : Color.primary)
+                Text("“\(SoloReading.cardWords(said))”").font(BindersTheme.quote(.callout)).foregroundStyle(.secondary).lineLimit(2)
+            }
+            Spacer(minLength: 8)
+            if let card = outcome?.card.flatMap(UUID.init(uuidString:)).flatMap({ service.conversations?.controller?.board.card($0) }) {
+                Button("Open Card") { CardWindows.shared.open(card, controller: service.conversations?.controller) }
+            }
+            if outcome?.actions?.contains("stop") == true {
+                Button("Stop") { act(id, "stop") }
+            }
+            if outcome?.actions?.contains("undo") == true {
+                Button("Undo") { act(id, "undo") }
+            }
+            if outcome?.actions?.contains("assign") == true, let agent = outcome?.agent, registry.agent(named: agent) != nil {
+                Button(LockScreenText.giveTo(agent)) { act(id, "assign", agent: agent) }
+            }
+        }
+    }
+
+    private func act(_ id: UUID, _ action: String, agent: String? = nil) {
+        message = moments?.act(on: id, action: action, agent: agent)?.message
+        tick += 1
+    }
+}
+
 private struct ConversationSuggestionsView: View {
     @Environment(MeetingService.self) private var service
     @Bindable var meeting: MeetingRecord
     @State private var message: String?
+    @State private var registry = AgentRegistry.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(meeting.suggestions.filter { $0.status == .offered }) { suggestion in
                 HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: suggestion.kind == .card ? "rectangle.split.3x1" : "questionmark.bubble")
+                    Image(systemName: suggestion.kind == .answer ? "questionmark.bubble" : suggestion.kind == .idea ? "lightbulb" : "rectangle.split.3x1")
                         .foregroundStyle(.secondary)
                         .frame(width: 18)
                     VStack(alignment: .leading, spacing: 3) {
                         if suggestion.kind == .card {
                             Text("Put “\(suggestion.text)” on the \(suggestion.binder) board?")
+                        } else if suggestion.kind == .idea {
+                            Text("An idea for the \(suggestion.binder) board: “\(suggestion.text)”. Put it in Backlog?")
                         } else {
-                            Text("You asked: \(suggestion.text)").font(.callout.weight(.semibold))
+                            // Your own question, quoted.
+                            (Text("You asked: ").font(.callout.weight(.semibold)) + Text(suggestion.text).font(BindersTheme.quote(.callout)))
                             Text(suggestion.answer ?? "").textSelection(.enabled)
                             if !suggestion.sources.isEmpty {
                                 Text("From " + suggestion.sources.joined(separator: ", ")).font(.caption).foregroundStyle(.secondary)
@@ -947,8 +1110,9 @@ private struct ConversationSuggestionsView: View {
                         }
                     }
                     Spacer(minLength: 8)
-                    if suggestion.kind == .card {
+                    if suggestion.kind != .answer {
                         Button("Add to Board") { message = service.conversations?.accept(suggestion.id).message }
+                        giveMenu(suggestion)
                         Button("Not Now") { service.conversations?.dismiss(suggestion.id) }
                     } else {
                         Button("Got It") { service.conversations?.accept(suggestion.id) }
@@ -959,6 +1123,22 @@ private struct ConversationSuggestionsView: View {
             if let message { Text(message).font(.caption).foregroundStyle(.secondary) }
         }
         .padding(10)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.accentColor.opacity(0.08)))
+        .background(RoundedRectangle(cornerRadius: 8).fill(BindersTheme.needsYou.opacity(0.08)))
+    }
+
+    /// Give to: the agents that take this binder's cards. The card lands in Ready, meant for the one you pick, and Binders
+    /// hands it over at once.
+    @ViewBuilder
+    private func giveMenu(_ suggestion: ConversationSuggestion) -> some View {
+        let agents = registry.agents.filter { $0.isEnabled && $0.takesCards(from: meeting.binderID) }
+        if !agents.isEmpty {
+            Menu("Give to") {
+                ForEach(agents) { agent in
+                    Button(agent.name) { message = service.conversations?.give(suggestion.id, to: agent.name).message }
+                }
+            }
+            .fixedSize()
+            .help(registry.paused ? "Agents are paused: it waits in Ready until you resume them" : "It goes to Ready, and Binders hands it over")
+        }
     }
 }

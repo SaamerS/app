@@ -10,7 +10,7 @@ struct NotePropertiesPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Properties").font(.headline)
+            Text("Properties").font(BindersTheme.cardTitle).foregroundStyle(.sectionInk)
             Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 6) {
                 GridRow {
                     Text("Status").foregroundStyle(.secondary)
@@ -44,7 +44,7 @@ struct NotePropertiesPanel: View {
                         Button("Add a date") {
                             update { $0.due = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: Date())) }
                         }
-                        .buttonStyle(.link)
+                        .themedLink()
                     }
                 }
             }
@@ -55,10 +55,10 @@ struct NotePropertiesPanel: View {
                         Button("#\(tag)") { TagSearch.show(tag) }
                             .buttonStyle(.plain)
                             .font(.caption.weight(.medium))
-                            .foregroundStyle(Color.accentColor)
+                            .foregroundStyle(.tintText)
                             .padding(.horizontal, 7)
                             .padding(.vertical, 2)
-                            .background(Capsule().fill(Color.accentColor.opacity(0.1)))
+                            .background(Capsule().fill(TintFill().opacity(0.12)))
                             .help("Everything tagged #\(tag)")
                     }
                 }

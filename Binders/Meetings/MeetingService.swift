@@ -218,6 +218,13 @@ final class MeetingService {
 
     var isRecording: Bool { recordingMeetingID != nil }
 
+    /// Speech heard in the last second, from the microphone or the call, while a meeting records: the recording dot
+    /// moves only then.
+    var hearsSpeech: Bool {
+        guard let live else { return false }
+        return min(live.mic.secondsSinceSpeech, live.system.secondsSinceSpeech) < 1
+    }
+
     func startMonitoring() {
         detectionTimer?.invalidate()
         detectionTimer = Timer.scheduledTimer(withTimeInterval: 4, repeats: true) { [weak self] _ in
@@ -242,6 +249,8 @@ final class MeetingService {
             if live != nil { showLiveWindow(activate: true) }
             return
         }
+        // Its notes and transcript go into the library: not while it didn't open.
+        guard Store.shared.allowsSave() else { return }
         // Permission prompts suspend; don't let a second hotkey press or prompt start another session meanwhile.
         isStarting = true
         defer { isStarting = false }
@@ -305,7 +314,7 @@ final class MeetingService {
             recordingMeetingID = record.id
             liveSegments = []
             liveStartedAt = session.startedAt
-            flowBar.meetingStarted(at: session.startedAt)
+            flowBar.meetingStarted(at: session.startedAt, hearsSpeech: { [weak self] in self?.hearsSpeech ?? false })
             if settings.playSounds { Sounds.start() }
             if systemAudioIssue != nil {
                 flowBar.toast("Recording your mic only — allow System Audio Recording for the other side", symbol: "exclamationmark.triangle", duration: 6)
@@ -472,6 +481,8 @@ final class MeetingService {
 
     /// Offers to take notes when a call app starts using the mic; stops when the call is clearly over.
     private func tick() {
+        // Lane Y2: when a meeting app holds this Mac's microphone, whatever meeting detection's setting, as times only.
+        if MeetingDetector.meetingApp(capturingInput: AudioProcesses.bundleIDsCapturingInput()) != nil { Self.noteCall(at: Date()) }
         if let session = live {
             guard let source = session.sourceBundleID else { return }
             let capturing = AudioProcesses.bundleIDsCapturingInput()
@@ -489,6 +500,44 @@ final class MeetingService {
         promptedAt[app.bundleID] = Date()
         flowBar.showPrompt("\(app.name) is using your mic") { [weak self] in
             Task { await self?.start(detected: app) }
+        }
+    }
+
+    // MARK: Calls on this Mac (lane Y2)
+
+    /// When a meeting app held this Mac's microphone, the last day, as start and end times only (UserDefaults
+    /// "callSpans"): a capture from the iPhone whose time overlaps one isn't read as only you.
+    static let callSpansKey = "callSpans"
+    /// Ticks this far apart are one call.
+    static let callGap: TimeInterval = 20
+
+    static var callSpans: [ClosedRange<Date>] {
+        let raw = AppDefaults.store.array(forKey: callSpansKey) as? [[Double]] ?? []
+        return raw.compactMap { pair in pair.count == 2 && pair[0] <= pair[1] ? Date(timeIntervalSince1970: pair[0])...Date(timeIntervalSince1970: pair[1]) : nil }
+    }
+
+    /// A tick that saw a meeting app holding the microphone: the last span goes on, or a new one starts.
+    static func noteCall(at time: Date) {
+        var spans = callSpans.filter { time.timeIntervalSince($0.upperBound) < 86_400 }
+        if let last = spans.last, time.timeIntervalSince(last.upperBound) <= callGap {
+            spans[spans.count - 1] = last.lowerBound...max(last.upperBound, time)
+        } else {
+            spans.append(time...time)
+        }
+        AppDefaults.store.set(spans.map { [$0.lowerBound.timeIntervalSince1970, $0.upperBound.timeIntervalSince1970] }, forKey: callSpansKey)
+    }
+
+    /// Whether this Mac was on a call between `start` and `end`: a meeting app held its microphone then, or it recorded a
+    /// meeting then.
+    static func wasOnACall(from start: Date, to end: Date) -> Bool {
+        if callSpans.contains(where: { $0.lowerBound <= end && $0.upperBound >= start }) { return true }
+        let kind = "meeting"
+        let meetings = (try? Store.shared.context.fetch(FetchDescriptor<MeetingRecord>(predicate: #Predicate {
+            $0.kind == kind && $0.createdAt <= end
+        }))) ?? []
+        return meetings.contains { meeting in
+            let ended = meeting.endedAt ?? meeting.createdAt.addingTimeInterval(meeting.duration)
+            return ended >= start && meeting.appName != "iPhone"
         }
     }
 
@@ -656,8 +705,12 @@ final class MeetingService {
         }
     }
 
-    func summarize(_ record: MeetingRecord, segments: [TranscriptSegment]? = nil, templateID: String? = nil, markBusy: Bool = true) async {
-        guard let client = settings.makeLLMClient() else {
+    /// `solo` and `client` (lane Y2): a capture in which only you spoke, read for what you said first, gets notes with the
+    /// thinking-aloud sections, no Promises and no checklists, and stays a conversation; `client` is the conversations'
+    /// model (ConversationService.model), which the self-tests replace.
+    func summarize(_ record: MeetingRecord, segments: [TranscriptSegment]? = nil, templateID: String? = nil, markBusy: Bool = true,
+                   solo: Bool = false, client given: LLMClient? = nil) async {
+        guard let client = given ?? settings.makeLLMClient(lane: .later) else {
             record.errorMessage = "Choose a language model in Settings to write meeting notes"
             Store.shared.save()
             return
@@ -668,7 +721,7 @@ final class MeetingService {
 
         let template = MeetingTemplate.template(id: templateID ?? record.templateID)
         record.templateID = template.id
-        let segments = segments ?? Store.shared.segments(for: meetingID)
+        var segments = segments ?? Store.shared.segments(for: meetingID)
         var names = record.speakerNames
         let stopWhenLooping: @Sendable (String) -> Bool = { LoopGuard.isLooping($0) }
         do {
@@ -685,6 +738,9 @@ final class MeetingService {
                 }
                 guard exists(record) else { return }
             }
+            // A conversation's notes leave out the "Binders, …" said in it that became a moment, which made its to-do or gave
+            // its answer already; the transcript stays whole.
+            if record.isConversation, let conversations { segments = conversations.writeUp(record, segments) }
             let transcript = TranscriptFormatter.plainText(segments, names: names)
 
             // Long calls get raw notes per part first: the final pass then has a checklist and can't lose the middle.
@@ -707,8 +763,9 @@ final class MeetingService {
             let date = record.createdAt.formatted(date: .complete, time: .shortened)
             let system: String, user: String
             if record.isConversation {
-                system = ConversationPrompts.summarySystemPrompt()
-                user = ConversationPrompts.summaryUserPrompt(date: date, duration: record.duration, transcript: transcript, partNotes: partNotes)
+                system = ConversationPrompts.summarySystemPrompt(solo: solo)
+                user = ConversationPrompts.summaryUserPrompt(date: date, duration: record.duration, transcript: transcript, partNotes: partNotes,
+                                                             solo: solo)
             } else {
                 let hasRealTitle = !Self.hasPlaceholderTitle(record)
                 system = MeetingPrompts.summarySystemPrompt(template: template)
@@ -810,6 +867,7 @@ final class MeetingService {
     /// Transcribes an existing recording (audio or video) into meeting notes.
     @discardableResult
     func importRecording(_ url: URL) async -> MeetingRecord? {
+        guard Store.shared.allowsSave() else { return nil }
         let record = MeetingRecord(title: Self.placeholderPrefix + url.deletingPathExtension().lastPathComponent, appName: "Imported file",
                                    templateID: settings.meetingTemplateID)
         record.status = "processing"

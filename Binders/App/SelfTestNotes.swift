@@ -122,33 +122,55 @@ extension SelfTest {
         }
         print("UNDONE: \(undone) · editors made \(gone.count), still alive \(gone.filter { $0.object != nil }.count) · window undo \(window.undoManager?.canUndo == true) · same manager \(editor()?.undoManager === window.undoManager)")
         check(mismatches == 0, "the note always holds what the editor shows (\(mismatches) times it didn't)")
-        // A card's description, edited in a sheet that then closes: its undo is the hub window's.
+        // A card's description, edited in the card's own window, which then closes. Its undo is the editor's own and goes
+        // with it: undo in the Binders window afterwards never reaches the card's editor, which is gone.
         let card = TaskCard(title: "Plan the offsite", binderID: binder.id)
         card.binderID = binder.id
         Store.shared.insert(card)
         navigation.pendingBinderTab = .board
         try? await Task.sleep(for: .milliseconds(500))
+        var cardEditors: [Weak] = []
         for round in 0..<3 {
-            navigation.pendingCardID = card.id
-            try? await Task.sleep(for: .milliseconds(700))
-            let sheet = window.attachedSheet
-            check(sheet != nil, "the card opens in a sheet (\(round + 1))")
+            // A marker on the Binders window's undo stack, to see that nothing of the card's lands on it.
+            window.undoManager?.registerUndo(withTarget: window) { _ in }
+            window.undoManager?.setActionName("Before the card \(round)")
+            CardWindows.shared.open(card, controller: controller)
+            try? await Task.sleep(for: .milliseconds(900))
+            let cardWindow = CardWindows.shared.window(for: card.id)
+            check(cardWindow != nil && cardWindow !== window && window.attachedSheet == nil, "the card opens in a window of its own (\(round + 1))")
             func findEditor(_ view: NSView) -> MarkdownTextView? { (view as? MarkdownTextView) ?? view.subviews.lazy.compactMap(findEditor).first }
-            if let sheet, let content = sheet.contentView, let textView = findEditor(content) {
-                sheet.makeFirstResponder(textView)
+            if let cardWindow, let content = cardWindow.contentView, let textView = findEditor(content) {
+                cardEditors.append(Weak(textView))
+                cardWindow.makeFirstResponder(textView)
                 for word in ["Book", " the", " room", " for round \(round)."] {
                     end(textView)
                     textView.insertText(word, replacementRange: textView.selectedRange())
                     try? await Task.sleep(for: .milliseconds(20))
                 }
-                window.endSheet(sheet)
+                let typed = textView.string
+                if !(cardWindow.firstResponder ?? cardWindow).tryToPerform(Selector(("undo:")), with: nil) { cardWindow.undoManager?.undo() }
+                try? await Task.sleep(for: .milliseconds(40))
+                check(textView.string != typed && textView.undoManager != nil && textView.undoManager !== window.undoManager,
+                      "⌘Z in the card's window undoes in its description, on the editor's own undo manager, never the Binders window's (\(round + 1))")
+                if !(cardWindow.firstResponder ?? cardWindow).tryToPerform(Selector(("redo:")), with: nil) { cardWindow.undoManager?.redo() }
+                try? await Task.sleep(for: .milliseconds(40))
+                MarkdownEditor.flushAll()
+                CardWindows.shared.close(card.id)
+            } else {
+                check(false, "the card's description has its editor (\(round + 1))")
             }
             try? await Task.sleep(for: .milliseconds(700))
+            check(window.undoManager?.undoActionName == "Before the card \(round)",
+                  "nothing of the card's is on the Binders window's undo stack: \(window.undoManager?.undoActionName ?? "nothing")")
             for _ in 0..<3 {
                 send("undo:")
                 try? await Task.sleep(for: .milliseconds(20))
             }
         }
+        check(card.details.contains("for round 2."), "the card's description holds what was typed, whatever the Binders window undid: \(card.details)")
+        try? await Task.sleep(for: .milliseconds(300))
+        check(!CardWindows.shared.isOpen(card.id) && cardEditors.allSatisfy { $0.object == nil },
+              "the card's window and its editors are gone once it closed: \(cardEditors.filter { $0.object != nil }.count) still alive")
         // The Scratchpad: shown again, it gets a new editor.
         ScratchpadController.shared.show()
         try? await Task.sleep(for: .milliseconds(500))
@@ -619,6 +641,11 @@ extension SelfTest {
         pasteboard.clearContents()
         pasteboard.setString("Just words", forType: .string)
         check(RichPaste.markdown(from: pasteboard) == nil, "plain words paste as they are")
+        // Nothing in a pasted page is fetched from the web: no pictures, frames, styles or scripts, and no picture in a style.
+        let page = #"<p style="font-weight:bold;background:url('https://tracker.example/b.png')">Hi</p><img src="https://tracker.example/p.png"><iframe src="https://x.example"></iframe><link rel="stylesheet" href="https://x.example/s.css"><script>fetch('https://x.example')</script><p>Text about url(styles) stays.</p>"#
+        let cleaned = String(decoding: RichPaste.withoutFetches(Data(page.utf8)), as: UTF8.self)
+        check(!cleaned.contains("tracker.example") && !cleaned.contains("x.example") && cleaned.contains("font-weight:bold")
+              && cleaned.contains("Text about url(styles) stays."), "a pasted page fetches nothing from the web: \(cleaned)")
 
         check(editor.usesFindBar, "⌘F finds in the note")
         window.close()
@@ -724,7 +751,8 @@ extension SelfTest {
 }
 
 extension SelfTest {
-    /// A note popped out, typed in, folded into a bubble and opened again, on a throwaway store.
+    /// A note popped out, typed in, folded into a bubble and opened again, on a throwaway store; it and the Scratchpad
+    /// follow the app's appearance, dark or light, and both are drawn to `directory`.
     @MainActor
     static func popoutsSelfTest(directory: URL) async -> Int32 {
         guard AppPaths.isDemo else {
@@ -737,8 +765,8 @@ extension SelfTest {
             if !passed { failures += 1 }
         }
         // The saved pop-outs live in this app's settings: keep whatever's there and put it back after.
-        let kept = UserDefaults.standard.data(forKey: "notePopouts")
-        defer { UserDefaults.standard.set(kept, forKey: "notePopouts") }
+        let kept = AppDefaults.store.data(forKey: "notePopouts")
+        defer { AppDefaults.store.set(kept, forKey: "notePopouts") }
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let note = NoteItem(text: "# 🚀 Launch checklist\n\n- [ ] Pricing page\n- [ ] Support macros")
         note.binderID = Store.shared.defaultBinder().id
@@ -750,15 +778,59 @@ extension SelfTest {
         check(window?.isVisible == true && window?.level == .floating, "the note opens in its own window, in front")
         check(window?.title == "🚀 Launch checklist", "titled with the note: \(window?.title ?? "")")
         func find(_ view: NSView) -> MarkdownTextView? { (view as? MarkdownTextView) ?? view.subviews.lazy.compactMap(find).first }
+        // A note's window is its page in the app's appearance: dark in the dark, light paper in the light, nothing forced.
+        let appDark = NSApp.effectiveAppearance.isDark
+        let mode = appDark ? "dark" : "light"
+        /// WCAG relative luminance of `color` as `view` draws it, and the contrast between two of them.
+        func luminance(_ color: NSColor, in view: NSView) -> Double {
+            let c = color.resolved(for: view.effectiveAppearance)
+            func channel(_ value: CGFloat) -> Double {
+                let v = Double(value)
+                return v <= 0.03928 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4)
+            }
+            return 0.2126 * channel(c.redComponent) + 0.7152 * channel(c.greenComponent) + 0.0722 * channel(c.blueComponent)
+        }
+        func contrast(_ a: Double, _ b: Double) -> Double { (max(a, b) + 0.05) / (min(a, b) + 0.05) }
+        func checkPage(_ window: NSWindow, _ editor: MarkdownTextView, _ name: String) {
+            check(window.appearance == nil && editor.enclosingScrollView?.appearance == nil && editor.effectiveAppearance.isDark == appDark,
+                  "\(name) follows the app's appearance (\(mode)) and sets none of its own")
+            let page = luminance(window.backgroundColor, in: editor), words = luminance(editor.styler.ink, in: editor)
+            check((appDark ? page < 0.05 : page > 0.9) && contrast(page, words) >= 7,
+                  "its page is \(appDark ? "dark" : "light paper"), and its words read on it (\(String(format: "%.1f", contrast(page, words))) to 1)")
+        }
         if let window, let editor = window.contentView.flatMap(find) {
             window.makeFirstResponder(editor)
             editor.setSelectedRange(NSRange(location: (editor.string as NSString).length, length: 0))
             editor.insertText("\n- [ ] Tell the team", replacementRange: editor.selectedRange())
             MarkdownEditor.flushAll()
             check(note.text.hasSuffix("- [ ] Tell the team"), "typing in it changes the note")
+            checkPage(window, editor, "the note's window")
             if let content = window.contentView { capture(content, name: "popout-window", directory: directory) }
+            // Switching the app's appearance, as Settings does, turns the open note's page over at once.
+            let kept = NSApp.appearance
+            AppAppearance.apply(appDark ? "light" : "dark")
+            try? await Task.sleep(for: .milliseconds(400))
+            let turned = luminance(window.backgroundColor, in: editor), words = luminance(editor.styler.ink, in: editor)
+            check(editor.effectiveAppearance.isDark == !appDark && (appDark ? turned > 0.9 : turned < 0.05) && contrast(turned, words) >= 7,
+                  "switching the app to \(appDark ? "light" : "dark") turns the open note's page over, words and all")
+            NSApp.appearance = kept
+            try? await Task.sleep(for: .milliseconds(400))
         } else {
             check(false, "the window has an editor")
+        }
+        // The Scratchpad, the other note in a window of its own, drawn with a few words in it.
+        ScratchpadController.shared.show()
+        try? await Task.sleep(for: .milliseconds(700))
+        if let panel = NSApp.windows.first(where: { $0.title == "Scratchpad" }), let content = panel.contentView, let editor = find(content) {
+            panel.makeFirstResponder(editor)
+            editor.insertText("# Call the venue\n\nThe room is booked for the 28th. Catering next.\n- [ ] Confirm the menu",
+                              replacementRange: NSRange(location: 0, length: (editor.string as NSString).length))
+            try? await Task.sleep(for: .milliseconds(300))
+            checkPage(panel, editor, "the Scratchpad")
+            capture(content, name: "scratchpad", directory: directory)
+            panel.orderOut(nil)
+        } else {
+            check(false, "the Scratchpad opens, with an editor")
         }
         NotePopouts.shared.collapse(note.id)
         try? await Task.sleep(for: .milliseconds(400))
@@ -782,12 +854,12 @@ extension SelfTest {
            let content = second.contentView {
             capture(content, name: "popout-bubble-green", directory: directory)
         }
-        let colors = (UserDefaults.standard.data(forKey: "notePopouts")).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [[String: Any]] }?
+        let colors = (AppDefaults.store.data(forKey: "notePopouts")).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [[String: Any]] }?
             .first { $0["id"] as? String == other.id.uuidString }?["color"] as? Int
         check(NotePopouts.shared.color(of: other.id) == 4 && colors == 4, "the colour you pick is kept")
         NotePopouts.shared.close(other.id)
         Store.shared.delete(other)
-        let saved = (UserDefaults.standard.data(forKey: "notePopouts")).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [[String: Any]] }
+        let saved = (AppDefaults.store.data(forKey: "notePopouts")).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [[String: Any]] }
         check(saved?.first?["collapsed"] as? Bool == true && saved?.first?["id"] as? String == note.id.uuidString, "and it's remembered for next time")
         NotePopouts.shared.expand(note.id)
         try? await Task.sleep(for: .milliseconds(400))
@@ -846,14 +918,14 @@ extension SelfTest {
             if !passed { failures += 1 }
         }
         // This app's settings: keep what's there and put it back.
-        let keptShortcuts = UserDefaults.standard.data(forKey: "menuShortcuts")
-        let keptZoom = UserDefaults.standard.object(forKey: TextZoom.key)
+        let keptShortcuts = AppDefaults.store.data(forKey: "menuShortcuts")
+        let keptZoom = AppDefaults.store.object(forKey: TextZoom.key)
         defer {
-            UserDefaults.standard.set(keptShortcuts, forKey: "menuShortcuts")
-            UserDefaults.standard.set(keptZoom, forKey: TextZoom.key)
+            AppDefaults.store.set(keptShortcuts, forKey: "menuShortcuts")
+            AppDefaults.store.set(keptZoom, forKey: TextZoom.key)
         }
-        UserDefaults.standard.removeObject(forKey: "menuShortcuts")
-        UserDefaults.standard.removeObject(forKey: TextZoom.key)
+        AppDefaults.store.removeObject(forKey: "menuShortcuts")
+        AppDefaults.store.removeObject(forKey: TextZoom.key)
         func item(_ menu: NSMenu, _ title: String) -> NSMenuItem? {
             menu.items.lazy.compactMap { $0.submenu }.flatMap { $0.items }.first { $0.title == title && !$0.isHidden }
         }

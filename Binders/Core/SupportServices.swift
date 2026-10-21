@@ -137,6 +137,17 @@ final class SpeechService {
         }
     }
 
+    /// For the self-tests: `engine` in place of a model, ready at once or, with `downloading`, still on its way. Nothing is
+    /// downloaded or loaded.
+    func standIn(_ engine: any SpeechEngine, downloading fraction: Double? = nil) {
+        loadTask?.cancel()
+        loadTask = nil
+        loadToken = UUID()
+        self.engine = engine
+        modelID = engine.modelID
+        state = fraction.map { .downloading($0) } ?? .ready
+    }
+
     func waitUntilReady() async throws -> any SpeechEngine {
         while let task = loadTask {
             let token = loadToken

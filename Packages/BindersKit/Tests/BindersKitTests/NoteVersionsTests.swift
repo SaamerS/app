@@ -27,4 +27,16 @@ final class NoteVersionsTests: XCTestCase {
         XCTAssertEqual(change.added, 2)
         XCTAssertEqual(change.removed, 1)
     }
+
+    func testShowsWhatChangedLineByLine() {
+        XCTAssertEqual(NoteVersions.lines(from: "# Plan\nOne\nTwo", to: "# Plan\nOne\nThree\nFour"),
+                       [.same("# Plan"), .same("One"), .removed("Two"), .added("Three"), .added("Four")])
+        // An agent's line appended to the end, as append_to_note does.
+        XCTAssertEqual(NoteVersions.lines(from: "# Booth\nStand 14", to: "# Booth\nStand 14\n\nCalled the venue: confirmed."),
+                       [.same("# Booth"), .same("Stand 14"), .added(""), .added("Called the venue: confirmed.")])
+        // A line changed in the middle: what was there, then what replaced it, and the rest as it was.
+        XCTAssertEqual(NoteVersions.lines(from: "a\nb\nc", to: "a\nB\nc"), [.same("a"), .removed("b"), .added("B"), .same("c")])
+        XCTAssertEqual(NoteVersions.lines(from: "same", to: "same"), [.same("same")])
+        XCTAssertEqual(NoteVersions.lines(from: "gone\nkept", to: "kept"), [.removed("gone"), .same("kept")])
+    }
 }

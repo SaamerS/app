@@ -1,0 +1,86 @@
+{
+ "about": "One voice talking to someone the iPhone can't hear, written after the critics and after SoloRules.talkingTo was fixed, and held out: run once, never tuned on. No real people's names. Each is what the iPhone would write down of his side only. None of them should be read as thinking out loud.",
+ "calls": [
+  {
+   "id": "held-c01",
+   "about": "a call on the Watch, joined late, no greeting",
+   "segments": [
+    "Yeah, no, I think that's right.",
+    "The export is the main thing for me, honestly.",
+    "If we can get that out by Friday, great.",
+    "Okay. Yeah. I'll send it over tonight.",
+    "Mm-hm. Okay, cheers."
+   ]
+  },
+  {
+   "id": "held-c02",
+   "about": "walking with a friend who only listens",
+   "segments": [
+    "So this is the harbour I was telling you about.",
+    "The boats go out at six, every morning.",
+    "I'm thinking about the team plan for the app, actually.",
+    "Per seat, probably. It's fairer.",
+    "We could get a coffee at the place on the corner, if you like."
+   ]
+  },
+  {
+   "id": "held-c03",
+   "about": "a voice message said into the Watch",
+   "segments": [
+    "Hey, it's me, just checking you got the deck.",
+    "Let me know if the numbers look off to you.",
+    "Talk soon."
+   ]
+  },
+  {
+   "id": "held-c04",
+   "about": "a call to the garage, on AirPods with the Mac",
+   "segments": [
+    "Hi, yes, I'm calling about the car, it's booked in for Tuesday.",
+    "It's making a rattle when it's cold.",
+    "Could you take a look at that too?",
+    "Great, thanks. See you Tuesday."
+   ]
+  },
+  {
+   "id": "held-c05",
+   "about": "a support call on the iPad, statements only",
+   "segments": [
+    "Yes, the order number is four four one seven.",
+    "No, it never arrived.",
+    "Okay, so you'll send a new one.",
+    "Thank you."
+   ]
+  },
+  {
+   "id": "held-c06",
+   "about": "explaining the board on a video call, no questions",
+   "segments": [
+    "So the board has five columns.",
+    "Ready is where the agents pick things up.",
+    "When it's done it goes to Review and I look at it.",
+    "Right, exactly.",
+    "And then Done."
+   ]
+  },
+  {
+   "id": "held-c07",
+   "about": "agreeing to someone's request on a call",
+   "segments": [
+    "Sure, I can do that.",
+    "Yeah, I'll have the release notes to you by Thursday.",
+    "No problem at all.",
+    "Okay, speak then."
+   ]
+  },
+  {
+   "id": "held-c08",
+   "about": "giving a driver directions from the back seat",
+   "segments": [
+    "Left here, please.",
+    "And then the second right, by the church.",
+    "Just here is fine, thank you."
+   ]
+  }
+ ]
+}

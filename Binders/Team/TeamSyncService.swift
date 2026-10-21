@@ -183,7 +183,9 @@ final class TeamSyncService {
 
     func start() {
         let center = NotificationCenter.default
-        observers.append(center.addObserver(forName: ModelContext.didSave, object: nil, queue: .main) { [weak self] _ in
+        observers.append(center.addObserver(forName: ModelContext.didSave, object: nil, queue: .main) { [weak self] notification in
+            // Cards aren't shared with the team: a board's save, such as an agent's progress report, changes nothing here.
+            guard !TaskCard.onlyBoards(notification.userInfo) else { return }
             MainActor.assumeIsolated {
                 guard let self else { return }
                 if self.syncing { self.resyncRequested = true } else { self.scheduleSync(after: 3) }
@@ -302,7 +304,8 @@ final class TeamSyncService {
     }
 
     /// Sharing is decided per binder: everything in it syncs, and whatever lands in it later is shared too. Conversations
-    /// the iPhone heard are the exception: they stay on this Mac.
+    /// the iPhone heard, and notes made from what you said to yourself (`NoteItem.staysUnshared`, marked on the note, so
+    /// deleting History doesn't unmark one), are the exception: they stay on this Mac.
     func setShared(_ binder: BinderRecord, _ shared: Bool) {
         guard !binder.isTeamCopy else { return }
         binder.sharedWithTeam = shared
@@ -311,7 +314,7 @@ final class TeamSyncService {
         for meeting in (try? store.context.fetch(FetchDescriptor<MeetingRecord>(predicate: #Predicate { $0.binderID == binderID }))) ?? []
             where !meeting.isTeamCopy && !meeting.isConversation { meeting.sharedWithTeam = shared }
         for note in (try? store.context.fetch(FetchDescriptor<NoteItem>(predicate: #Predicate { $0.binderID == binderID }))) ?? []
-            where !note.isTeamCopy { note.sharedWithTeam = shared }
+            where !note.isTeamCopy { note.sharedWithTeam = shared && !note.staysUnshared }
         store.save()
         scheduleSync(after: 0.5)
     }
@@ -323,22 +326,46 @@ final class TeamSyncService {
         scheduleSync(after: 0.5)
     }
 
+    /// Never for a note made from what you said: it stays on this Mac.
     func setShared(_ note: NoteItem, _ shared: Bool) {
-        guard !note.isTeamCopy else { return }
+        guard !note.isTeamCopy, !(shared && note.staysUnshared) else { return }
         note.sharedWithTeam = shared
         store.save()
         scheduleSync(after: 0.5)
     }
 
-    /// What sync compares for a note: its text, and its properties when it has any.
-    private func hash(of note: NoteItem) -> String { TeamFiles.noteHash(note.text, note.properties) }
-    private func hash(of item: RemoteNote) -> String { TeamFiles.noteHash(item.note.body, item.note.properties) }
+    /// What sync compares for a note: its text, its properties when it has any, and the agents whose words are in it: the
+    /// one that made it, and the one that changed it since, until someone makes it theirs.
+    private func hash(of note: NoteItem) -> String { TeamFiles.noteHash(note.text + Self.mark(of: note).hashSuffix, note.properties) }
+    private func hash(of item: RemoteNote) -> String {
+        TeamFiles.noteHash(item.note.body + TeamNoteMark(lines: item.note.extraFrontmatter).hashSuffix, item.note.properties)
+    }
 
-    /// A teammate's version of a note replaces this Mac's: its words and its properties.
-    private func take(_ item: RemoteNote, into note: NoteItem) {
+    /// An agent's words in a note stay its own on teammates' Macs: labelled, left out of Ask, and its corrections steering
+    /// nothing until someone makes it theirs. It goes in the note file's front matter (TeamNoteMark).
+    private static func mark(of note: NoteItem) -> TeamNoteMark {
+        TeamNoteMark(madeBy: note.madeBy, editedBy: note.editedBy, editedAt: note.editedAt)
+    }
+
+    /// Whose words a teammate's version holds go with it, as its file says.
+    private static func setMark(_ mark: TeamNoteMark, on note: NoteItem) {
+        note.madeBy = mark.madeBy
+        note.editedBy = mark.editedBy
+        note.editedAt = mark.editedAt
+    }
+
+    /// A teammate's version of a note replaces this Mac's: its words, its properties and whose words they are, so a teammate
+    /// making it theirs counts here too. `keepingAgentEdit`, for a conflict: an agent's edit marked here stays marked when
+    /// the team's version says nothing of one, as that version may still hold the agent's earlier words.
+    private func take(_ item: RemoteNote, into note: NoteItem, keepingAgentEdit: Bool = false) {
         keepVersion(of: note, before: item.note.body)
         note.text = item.note.body
         note.properties = item.note.properties
+        var mark = TeamNoteMark(lines: item.note.extraFrontmatter)
+        if keepingAgentEdit, mark.editedBy == nil, note.editedBy != nil {
+            mark = TeamNoteMark(madeBy: mark.madeBy, editedBy: note.editedBy, editedAt: note.editedAt)
+        }
+        Self.setMark(mark, on: note)
     }
 
     /// A teammate's change is about to replace a note: keep it as it was first, in the app's own history.
@@ -509,6 +536,13 @@ final class TeamSyncService {
             let remoteItem = remote.removeValue(forKey: id)
             let tombstone = scan.tombstones[id]
 
+            // A note made from what you said never goes, even marked shared by mistake: it's unshared here, and taken out
+            // of the folder below if it ever reached it.
+            if note.staysUnshared, note.sharedWithTeam, !note.isTeamCopy {
+                note.sharedWithTeam = false
+                changed = true
+            }
+
             // Stopped sharing on this Mac.
             if !note.sharedWithTeam && !note.isTeamCopy {
                 guard let entry else { continue }
@@ -522,6 +556,8 @@ final class TeamSyncService {
                         } else {
                             let copy = NoteItem(text: remoteItem.note.body)
                             copy.properties = remoteItem.note.properties
+                            // An agent's words stay the agent's in the copy kept aside too.
+                            Self.setMark(TeamNoteMark(lines: remoteItem.note.extraFrontmatter), on: copy)
                             store.context.insert(copy)
                         }
                         changed = true
@@ -583,7 +619,12 @@ final class TeamSyncService {
                 continue
             }
 
-            let localHash = hash(of: note)
+            // Synced before an agent's edit was marked in the team folder, and unchanged here since: it hashes as it did
+            // then, so the mark alone neither pushes it again nor keeps a copy aside when a teammate changed it. The mark
+            // goes with its next change.
+            let unmarkedHash = TeamFiles.noteHash(note.text + TeamNoteMark(madeBy: note.madeBy).hashSuffix, note.properties)
+            let syncedUnmarked = note.editedBy != nil && entry.map { $0.hash != hash(of: note) && $0.hash == unmarkedHash } == true
+            let localHash = syncedUnmarked ? unmarkedHash : hash(of: note)
             let remoteHash = hash(of: remoteItem)
             switch SyncDecision.decide(local: localHash, remote: remoteHash, lastSynced: entry?.hash) {
             case .upToDate:
@@ -592,7 +633,7 @@ final class TeamSyncService {
             case .pushLocal:
                 writeNote(folder, note: note, existing: remoteItem)
             case .pullRemote:
-                take(remoteItem, into: note)
+                take(remoteItem, into: note, keepingAgentEdit: syncedUnmarked)
                 note.updatedAt = remoteItem.note.updatedAt ?? Date()
                 state.notes[id] = .init(hash: remoteHash, path: remoteItem.path)
                 if note.isTeamCopy { _ = fileBinder(of: note, from: remoteItem) }
@@ -601,8 +642,12 @@ final class TeamSyncService {
                 // Keep the team's version and save this Mac's edit as a private note so nothing is lost.
                 let mine = NoteItem(text: note.text)
                 mine.properties = note.properties
+                // Whose words they are goes with them: an agent's note, or an agent's edit to yours, until you make it yours.
+                mine.madeBy = note.madeBy
+                mine.editedBy = note.editedBy
+                mine.editedAt = note.editedAt
                 store.context.insert(mine)
-                take(remoteItem, into: note)
+                take(remoteItem, into: note, keepingAgentEdit: true)
                 note.updatedAt = remoteItem.note.updatedAt ?? Date()
                 state.notes[id] = .init(hash: remoteHash, path: remoteItem.path)
                 let editor = remoteItem.note.editedBy ?? remoteItem.note.author?.name ?? "a teammate"
@@ -644,6 +689,8 @@ final class TeamSyncService {
             }
             let note = NoteItem(text: item.note.body)
             note.properties = item.note.properties
+            // An agent's words in it arrive as the agent's: labelled, and left out of Ask here too.
+            Self.setMark(TeamNoteMark(lines: item.note.extraFrontmatter), on: note)
             note.id = UUID(uuidString: id) ?? UUID()
             let mine = item.note.author?.id == me.id
             note.isTeamCopy = !mine
@@ -1020,9 +1067,9 @@ final class TeamSyncService {
     /// Pictures and files in shared notes go next to the note's file, where teammates' Macs and Obsidian find them.
     private func syncAttachments(_ folder: URL) {
         guard let notes = try? store.context.fetch(FetchDescriptor<NoteItem>(predicate: #Predicate { $0.sharedWithTeam || $0.isTeamCopy })) else { return }
-        for note in notes {
+        for note in notes where !note.staysUnshared {
             guard let path = state.notes[note.id.uuidString]?.path else { continue }
-            Attachments.sync(note.text, noteFile: folder.appendingPathComponent(path))
+            Attachments.sync(note.text, noteFile: folder.appendingPathComponent(path), upload: !note.isTeamCopy)
         }
     }
 
@@ -1036,9 +1083,11 @@ final class TeamSyncService {
         let author = existing?.note.author
             ?? (note.isTeamCopy ? TeamAuthor(id: note.teamAuthorID ?? "", name: note.teamAuthorName ?? "Team") : me)
         let binder = store.binder(note.binderID)
+        // Whose words it holds goes with it: the agent that made it, and the one that changed it since.
+        let extra = TeamNoteMark.removing(from: existing?.note.extraFrontmatter ?? []) + Self.mark(of: note).lines
         let teamNote = TeamNote(id: id, author: author, editedBy: author.id == me.id ? nil : me.name,
                                 createdAt: existing?.note.createdAt ?? note.createdAt, updatedAt: Date(), body: note.text,
-                                extraFrontmatter: existing?.note.extraFrontmatter ?? [],
+                                extraFrontmatter: extra,
                                 binderID: binder?.id.uuidString ?? existing?.note.binderID, binderName: binder?.name ?? existing?.note.binderName,
                                 properties: note.properties)
         do {

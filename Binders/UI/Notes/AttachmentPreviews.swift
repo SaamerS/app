@@ -60,16 +60,13 @@ final class AttachmentPreviews {
         }
     }
 
-    /// A picture, at most 2,400 pixels across, the way it should stand; its size in points from its own resolution.
+    /// A picture, at most 2,400 pixels across, the way it should stand; its size in points from its own resolution. Only
+    /// a file on this Mac: a picture on the web isn't fetched just because a note, a card or a teammate's note shows it,
+    /// which would tell its site you're reading (and whatever its address carries). It shows as its caption, and a
+    /// double-click opens it in the browser.
     private nonisolated static func picture(_ url: URL) async -> (CGImage, NSSize, Double?)? {
-        let source: CGImageSource?
-        if url.isFileURL {
-            source = CGImageSourceCreateWithURL(url as CFURL, nil)
-        } else {
-            guard let (data, response) = try? await URLSession.shared.data(from: url),
-                  (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? true else { return nil }
-            source = CGImageSourceCreateWithData(data as CFData, nil)
-        }
+        guard url.isFileURL else { return nil }
+        let source = CGImageSourceCreateWithURL(url as CFURL, nil)
         guard let source, let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else { return nil }
         var width = (properties[kCGImagePropertyPixelWidth] as? CGFloat) ?? 0
         var height = (properties[kCGImagePropertyPixelHeight] as? CGFloat) ?? 0
@@ -83,8 +80,9 @@ final class AttachmentPreviews {
         return (image, NSSize(width: width / scale, height: height / scale), nil)
     }
 
-    /// A video's first frame, upright, and how long it runs.
+    /// A video's first frame, upright, and how long it runs: from a file on this Mac only, as for a picture.
     private nonisolated static func videoFrame(_ url: URL) async -> (CGImage, NSSize, Double?)? {
+        guard url.isFileURL else { return nil }
         let asset = AVURLAsset(url: url)
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true

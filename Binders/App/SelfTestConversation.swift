@@ -130,6 +130,26 @@ extension SelfTest {
                 try? await Task.sleep(for: .milliseconds(500))
             }
 
+            // What the phone's capture rows say about each, asked over the link only.
+            check((hello["features"] as? [String])?.contains(CaptureOutcome.feature) == true, "the Mac says it tells the phone what became of each capture")
+            let asked = [conversation.id, blip.id, UUID()].map(\.uuidString)
+            let answered = (try await phone.request(CaptureOutcome.listMethod, ["ids": asked]) as? [String: Any])?["outcomes"] as? [Any] ?? []
+            let outcomes = Dictionary(CaptureOutcome.decodeEach(answered).map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+            check(outcomes.count == 2, "an outcome for each capture it has, none for one it doesn't know")
+            check(outcomes[blip.id]?.state == CaptureOutcome.States.notKept && outcomes[blip.id]?.line == "Not kept: too short"
+                  && outcomes[blip.id]?.settled == true, "a blip: \(outcomes[blip.id]?.line ?? "none")")
+            let written = !(record(conversation.id)?.summary.trimmed.isEmpty ?? true)
+            let main = outcomes[conversation.id]
+            check(written ? main?.state == CaptureOutcome.States.filed && (main?.line.hasPrefix("Filed in ") ?? false)
+                          : main?.state == CaptureOutcome.States.failed && (main?.line.hasPrefix("Couldn't write up") ?? false),
+                  "the conversation: \(main?.line ?? "none")")
+            if written, let main, let binder = main.binder {
+                // The iPhone's Today reads the binder back out of the line it keeps, for the binder's chip.
+                let names = ((try? store.context.fetch(FetchDescriptor<BinderRecord>())) ?? []).map(\.name)
+                check(CaptureOutcome.filedBinder(in: main.line, among: names) == binder, "the iPhone reads its binder from the line: \(binder)")
+            }
+            if !written { check(record(conversation.id)?.routingReason == nil, "with no notes, no model call was spent filing it") }
+
             let kept = ((try? store.context.fetch(FetchDescriptor<MeetingRecord>())) ?? []).filter { $0.id == conversation.id }
             check(kept.count == 1, "sent twice, kept once: \(kept.count)")
             guard let first = kept.first else { throw MCPCore.ToolFailure("the conversation wasn't kept") }
@@ -286,6 +306,8 @@ extension SelfTest {
             check(record.state == .sent && record.audioDeleted, "written down on this Mac, and its audio deleted: \(record.state.rawValue)")
             let speakers = Set((record.transcript ?? []).map(\.speaker))
             check(speakers.count >= 2, "the voices are told apart: \(speakers.sorted())")
+            let steps = (record.steps ?? []).map(\.step)
+            check(steps.starts(with: [CaptureStep.heard, CaptureStep.closed]), "its timeline starts with when it was heard and closed: \(steps)")
             print("TRANSCRIPT:")
             for segment in record.transcript ?? [] { print("  [\(TranscriptFormatter.timestamp(segment.start))] \(segment.speaker): \(segment.text)") }
         }

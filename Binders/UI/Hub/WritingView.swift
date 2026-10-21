@@ -45,15 +45,9 @@ struct WritingView: View {
                     PageHeader(title: "Writing",
                                subtitle: "What you wrote in the apps you allow, kept once it was sent or saved. Never keystrokes, never passwords. Hold \(capture.hotkeyHint) to switch it on or off anywhere.")
                     Spacer()
-                    Button {
-                        capture.toggle()
-                    } label: {
-                        Label(capture.isOn ? "Capturing" : "Start capturing", systemImage: capture.isOn ? "pencil.line" : "pencil")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(capture.isOn ? .green : .accentColor)
-                    .controlSize(.large)
-                    .fixedSize()
+                    captureButton
+                        .controlSize(.large)
+                        .fixedSize()
                 }
 
                 HStack(spacing: 12) {
@@ -118,6 +112,27 @@ struct WritingView: View {
         }
     }
 
+    /// On, it says so with a check (green is kept for done); off, it's the page's primary button.
+    @ViewBuilder
+    private var captureButton: some View {
+        if capture.isOn {
+            Button { capture.toggle() } label: {
+                Label {
+                    Text("Capturing")
+                } icon: {
+                    Image(systemName: BindersTheme.readySymbol).foregroundStyle(.tintText)
+                }
+            }
+            .buttonStyle(.bordered)
+            .help("Writing capture is on. Click to switch it off.")
+        } else {
+            Button { capture.toggle() } label: {
+                Label("Start capturing", systemImage: "pencil")
+            }
+            .buttonStyle(.borderedProminent)
+        }
+    }
+
     private func consumePendingSearch() {
         guard let pending = navigation.pendingWritingSearch else { return }
         search = pending
@@ -158,22 +173,26 @@ struct WritingRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
                     Text(headline).font(.body.weight(.medium)).lineLimit(1)
-                    Text(record.createdAt, format: .dateTime.hour().minute()).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                    if let binderName { Badge(text: binderName, color: .secondary) }
-                    if record.redactions > 0 { Badge(text: "\(record.redactions) redacted", color: .orange) }
+                    Text(record.createdAt, format: .dateTime.hour().minute()).font(BindersTheme.time()).foregroundStyle(.secondary)
+                    if let binderName { Badge(text: binderName) }
+                    if record.redactions > 0 { Badge(text: "\(record.redactions) redacted", symbol: "eye.slash") }
                 }
+                // What you wrote, quoted in New York italic.
                 Text(record.text)
+                    .font(BindersTheme.quote())
                     .lineLimit(expanded ? nil : 3)
                     .textSelection(.enabled)
                 ForEach(commitments) { commitment in
+                    let done = commitment.status == "done", open = commitment.status == "open"
                     HStack(spacing: 6) {
-                        Image(systemName: commitment.status == "done" ? "checkmark.circle.fill" : "hand.raised").font(.caption)
-                        Text(commitment.task).font(.callout).strikethrough(commitment.status == "done", color: .secondary)
-                        if let due = commitment.dueAt, commitment.status == "open" {
-                            Badge(text: CommitmentService.dueLabel(due), color: due < Date() ? .red : .secondary)
+                        Image(systemName: done ? BindersTheme.doneSymbol : "hand.raised").font(.caption)
+                            .foregroundStyle(done ? AnyShapeStyle(BindersTheme.done) : AnyShapeStyle(open ? AnyShapeStyle(.tintText) : AnyShapeStyle(.secondary)))
+                        Text(commitment.task).font(.callout).strikethrough(done, color: .secondary)
+                            .foregroundStyle(open ? AnyShapeStyle(.tintText) : AnyShapeStyle(.secondary))
+                        if let due = commitment.dueAt, open {
+                            DueBadge(due: due)
                         }
                     }
-                    .foregroundStyle(commitment.status == "open" ? Color.accentColor : Color.secondary)
                 }
                 HStack(spacing: 6) {
                     if let app = record.appName { Text(app) }
@@ -202,7 +221,7 @@ struct WritingRow: View {
         }
         .padding(.vertical, 9)
         .padding(.horizontal, 10)
-        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(hovering ? Color.primary.opacity(0.05) : .clear))
+        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(hovering ? BindersTheme.ink.opacity(0.05) : .clear))
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .onTapGesture { expanded.toggle() }

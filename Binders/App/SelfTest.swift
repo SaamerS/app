@@ -435,6 +435,36 @@ enum SelfTest {
             return await correctionsSelfTest()
         }
 
+        if args.contains("--selftest-index") {
+            return await indexSelfTest(noteCount: Int(value("--notes") ?? "") ?? 2_000)
+        }
+
+        if let directory = value("--selftest-ask") {
+            // Ask's passages at once and its answer as it's written: the model clients, the Knowledge page, Command Mode's
+            // panel and the phone link, with stand-ins for the models.
+            return await askSelfTest(directory: URL(fileURLWithPath: directory))
+        }
+
+        if let directory = value("--selftest-pages") {
+            // Home, Today, the work-streams digest, the board's columns and the graph, on a heavy user's library.
+            return await pagesSelfTest(directory: URL(fileURLWithPath: directory))
+        }
+
+        if let directory = value("--selftest-settings") {
+            // Settings in six pages: each part on one page, and a link to a part landing on its section. Seeds the demo data.
+            return await settingsSelfTest(directory: URL(fileURLWithPath: directory))
+        }
+
+        if let directory = value("--selftest-motion") {
+            // Filing, rolling counts, the recording dot and the waveform, and how each behaves under Reduce Motion.
+            return await motionSelfTest(directory: URL(fileURLWithPath: directory))
+        }
+
+        if let directory = value("--selftest-theme") {
+            // The design tokens: their values, how they read and follow the appearance, and a sheet of them in both.
+            return await themeSelfTest(directory: URL(fileURLWithPath: directory))
+        }
+
         if args.contains("--selftest-agent-capture") {
             return await agentCaptureSelfTest()
         }
@@ -451,6 +481,19 @@ enum SelfTest {
 
         if let model = value("--selftest-mlx") {
             return await mlxSelfTest(model: model, embedding: value("--embed"))
+        }
+
+        // The router model's dev tools: parity with Python and the router bench (SelfTestRouterModel.swift). They need the
+        // model folder, so they aren't in the normal run.
+        if args.contains("--selftest-router-model") {
+            return await routerModelSelfTest(args)
+        }
+        if args.contains("--selftest-router-bench") {
+            return await routerBenchSelfTest(args)
+        }
+        if args.contains("--selftest-solo-bench") {
+            // Lane Y2's reading of a capture that's only you, on its bench, through this data folder's language model.
+            return await soloBenchSelfTest(args)
         }
 
         if args.contains("--selftest-menus") {
@@ -747,6 +790,79 @@ enum SelfTest {
         if args.contains("--selftest-board") {
             return await boardSelfTest()
         }
+        if args.contains("--selftest-mcp-reads") {
+            return await mcpReadsSelfTest()
+        }
+        if args.contains("--selftest-capture-records") {
+            return captureRecordsSelfTest()
+        }
+        if args.contains("--selftest-capture-worker") {
+            return await captureWorkerSelfTest()
+        }
+        if args.contains("--selftest-capture-index") {
+            return captureIndexSelfTest()
+        }
+        if args.contains("--selftest-agents") {
+            return await agentsSelfTest()
+        }
+        if args.contains("--selftest-agent-reports") {
+            return await agentReportsSelfTest()
+        }
+        if args.contains("--selftest-agent-comments") {
+            // Your comment wakes the agent holding a card in progress, with stand-ins for its command and a phone on the link.
+            return await agentCommentsSelfTest()
+        }
+        if args.contains("--selftest-card-windows") {
+            return await cardWindowsSelfTest()
+        }
+        if args.contains("--selftest-agent-handoffs") {
+            return await agentHandoffsSelfTest()
+        }
+        if args.contains("--selftest-agent-sessions") {
+            // A folder after the flag gets a drawing of a Claude Code agent's settings, posting to your open session.
+            return await agentSessionsSelfTest(drawingTo: value("--selftest-agent-sessions").flatMap { $0.hasPrefix("-") ? nil : URL(fileURLWithPath: $0) })
+        }
+        if args.contains("--selftest-cli-agents") {
+            // Codex, OpenCode and GitHub Copilot CLI as agents, with stand-ins for the tools, in a throwaway BINDERS_DATA_DIR.
+            // A folder after the flag gets a drawing of each one's settings.
+            return await cliAgentsSelfTest(drawingTo: value("--selftest-cli-agents").flatMap { $0.hasPrefix("-") ? nil : URL(fileURLWithPath: $0) })
+        }
+        if args.contains("--selftest-moment") {
+            return await momentSelfTest()
+        }
+        if args.contains("--selftest-router") {
+            // The card router with a stand-in decision backend, in a throwaway BINDERS_DATA_DIR: no model needed.
+            return await routerSelfTest()
+        }
+        if args.contains("--selftest-fallback") {
+            // A folder after the flag gets a drawing of the hub with its banner.
+            return await fallbackSelfTest(drawingTo: value("--selftest-fallback").flatMap { $0.hasPrefix("-") ? nil : URL(fileURLWithPath: $0) })
+        }
+        if args.contains("--selftest-agent-text") {
+            // A folder after the flag gets drawings of an agent's note and of an answer that left agents' notes out.
+            return await agentTextSelfTest(drawingTo: value("--selftest-agent-text").flatMap { $0.hasPrefix("-") ? nil : URL(fileURLWithPath: $0) })
+        }
+        if args.contains("--selftest-agent-doing") {
+            // In throwaway BINDERS_DATA_DIR and BINDERS_AGENT_HOME folders. A folder after the flag gets drawings of a card,
+            // its page and Home's digest saying what a run is doing.
+            return await agentDoingSelfTest(drawingTo: value("--selftest-agent-doing").flatMap { $0.hasPrefix("-") ? nil : URL(fileURLWithPath: $0) })
+        }
+        if args.contains("--selftest-mcp-fresh") {
+            return await mcpFreshSelfTest()
+        }
+        if args.contains("--selftest-todo-origin") {
+            return await todoOriginSelfTest()
+        }
+        if args.contains("--selftest-automation-hooks") {
+            // A folder after the flag gets drawings of the automation editor: a kept token, and a link it refuses.
+            return await automationHooksSelfTest(drawingTo: value("--selftest-automation-hooks").flatMap { $0.hasPrefix("-") ? nil : URL(fileURLWithPath: $0) })
+        }
+        if args.contains("--selftest-dedupe") {
+            return await dedupeSelfTest()
+        }
+        if let page = value("--selftest-draw"), let out = args.drop(while: { $0 != "--selftest-draw" }).dropFirst(2).first {
+            return await drawSelfTest(page: page, to: URL(fileURLWithPath: out), colour: value("--colour").flatMap { Int($0) }, size: value("--size"))
+        }
         if let directory = value("--selftest-board-serve") {
             // The app's side of real agents on the Harbor board in a throwaway folder, drawing the board as it changes.
             let size = NSSize(width: Double(value("--width") ?? "") ?? 1600, height: Double(value("--height") ?? "") ?? 1000)
@@ -1008,13 +1124,20 @@ enum SelfTest {
                 editor.setSelectedRange(NSRange(location: (editor.string as NSString).length, length: 0))
                 editor.insertText("Called the venue: the room is booked.", replacementRange: editor.selectedRange())
             }
+            // The next keystrokes, straight after, before that save is read back, go into the same note.
+            if let editor = textViews(in: hosting).first {
+                editor.insertText(" Catering next.", replacementRange: editor.selectedRange())
+            }
             try? await Task.sleep(for: .milliseconds(500))
             let made = daily()
             let passed = before == nil && made?.text.contains("Called the venue") == true && made?.binderID == Store.shared.defaultBinder().id
             print("\(passed ? "PASS" : "FAIL"): the day's note is made on the first keystroke, titled \(title), in General")
+            let dated = ((try? Store.shared.context.fetch(FetchDescriptor<NoteItem>())) ?? []).filter { $0.title == title }
+            let once = dated.count == 1 && made?.text.contains("booked. Catering next.") == true
+            print("\(once ? "PASS" : "FAIL"): and only once: the next keystrokes go into it (\(dated.count) notes titled \(title))")
             capture(hosting, name: "today-written", directory: folder)
             window.close()
-            return passed ? 0 : 1
+            return passed && once ? 0 : 1
         }
 
         if let directory = value("--selftest-links") {
@@ -1126,7 +1249,7 @@ open reports/import.html
         if args.contains("--selftest-wispr-import") {
             do {
                 let summary = try WisprImporter.importAll()
-                UserDefaults.standard.set(true, forKey: "importedFromWispr")
+                AppDefaults.store.set(true, forKey: "importedFromWispr")
                 print("WISPR_IMPORTED: \(summary.words) words, \(summary.snippets) snippets, \(summary.skipped) skipped")
                 return 0
             } catch {
@@ -1399,6 +1522,139 @@ open reports/import.html
         check(!files().keys.contains { $0.contains(overheard.id.uuidString) || $0.localizedCaseInsensitiveContains("Hallway chat") }
               && !meetings(dana.store).contains { $0.id == overheard.id }, "a conversation the iPhone heard never reaches the team folder")
 
+        // An agent's note stays the agent's on a teammate's Mac: labelled there, its correction steering nothing.
+        let agentsNote = NoteItem(text: "Launch date\n\nWrong: launch is May 3\nRight: launch is June 9\n#correction")
+        agentsNote.sharedWithTeam = true
+        agentsNote.madeBy = "Claude Code · app"
+        maya.store.insert(agentsNote)
+        await maya.team.syncNow()
+        await danaAgain.syncNow()
+        let danaAgents = notes(dana.store).first { $0.id == agentsNote.id }
+        check(danaAgents?.madeBy == "Claude Code · app", "an agent's note reaches a teammate as the agent's: \(danaAgents?.madeBy ?? "unmarked")")
+        agentsNote.madeBy = nil
+        maya.store.save()
+        await maya.team.syncNow()
+        await danaAgain.syncNow()
+        check(danaAgents != nil && notes(dana.store).first { $0.id == agentsNote.id }?.madeBy == nil, "and once Maya makes it hers, it's hers there too")
+
+        // An agent adds to Maya's shared note while Dana edits it: the version Maya keeps aside in the conflict is still the
+        // agent's edit, so answers leave it out and it's labelled until she makes it hers.
+        let rota = NoteItem(text: "Booth rota\n- Sam on Monday")
+        rota.sharedWithTeam = true
+        maya.store.insert(rota)
+        await maya.team.syncNow()
+        await danaAgain.syncNow()
+        let agentEdited = Date(timeIntervalSinceNow: -60)
+        rota.text += "\n- Venue opens at 8"
+        rota.markEdited(by: "Claude Code", at: agentEdited)
+        maya.store.save()
+        let danaRota = notes(dana.store).first { $0.id == rota.id }
+        danaRota?.text += "\n- Dana on Tuesday"
+        dana.store.save()
+        await danaAgain.syncNow()
+        await maya.team.syncNow()
+        let keptAside = notes(maya.store).first { $0.id != rota.id && !$0.sharedWithTeam && $0.text.contains("Venue opens at 8") }
+        check(danaRota != nil && rota.text.hasSuffix("- Dana on Tuesday") && keptAside?.editedBy == "Claude Code"
+              && keptAside?.editedAt.map { abs($0.timeIntervalSince(agentEdited)) < 0.01 } == true
+              && keptAside.map { maya.store.agentMarks()[$0.id.uuidString]?.editedBy == "Claude Code" } == true,
+              "a conflict on a note an agent edited keeps the agent's edit marked on the copy kept aside: \(keptAside?.editedBy ?? "unmarked")")
+        check(rota.editedBy == "Claude Code", "and on the shared note, which may still hold earlier words of the agent's")
+
+        // An agent's edit to Maya's shared note reaches Dana as the agent's: labelled there, and left out of Ask, its words
+        // never arriving as Maya's. Once Maya makes it hers, it's hers on Dana's Mac too.
+        let plan = NoteItem(text: "Booth plan\n- Tables by the door")
+        plan.sharedWithTeam = true
+        maya.store.insert(plan)
+        await maya.team.syncNow()
+        await danaAgain.syncNow()
+        let agentChanged = Date(timeIntervalSinceNow: -120)
+        plan.text += "\n- Banner on the left wall"
+        plan.markEdited(by: "Codex", at: agentChanged)
+        maya.store.save()
+        await maya.team.syncNow()
+        await danaAgain.syncNow()
+        let danaPlan = notes(dana.store).first { $0.id == plan.id }
+        check(danaPlan?.text.hasSuffix("- Banner on the left wall") == true && danaPlan?.editedBy == "Codex"
+              && danaPlan?.editedAt.map { abs($0.timeIntervalSince(agentChanged)) < 1 } == true
+              && dana.store.agentMarks()[plan.id.uuidString]?.editedBy == "Codex",
+              "an agent's edit to a shared note reaches a teammate as the agent's, which Ask there leaves out: \(danaPlan?.editedBy ?? "unmarked")")
+        let planFile = files().keys.first { $0.hasPrefix("Notes/Booth plan") }
+            .flatMap { try? String(contentsOf: folder.appendingPathComponent($0), encoding: .utf8) } ?? ""
+        check(planFile.contains("binders_edited_by: \"Codex\"") && planFile.contains("binders_edited_at: "),
+              "the edit's mark is in the note's file, which a Binders that doesn't know it keeps as it is")
+        await syncBoth(maya.team, danaAgain)
+        await syncBoth(maya.team, danaAgain)
+        let marked = files()
+        await syncBoth(maya.team, danaAgain)
+        check(files() == marked, "a note with an agent's edit marked syncs once, then writes nothing more")
+        plan.makeMine()
+        maya.store.save()
+        await maya.team.syncNow()
+        await danaAgain.syncNow()
+        check(danaPlan?.editedBy == nil && danaPlan?.editedAt == nil && dana.store.agentMarks()[plan.id.uuidString] == nil,
+              "once Maya makes it hers, it's hers on Dana's Mac too")
+
+        // A note an agent edited that synced before edits were marked in the team folder (its sync hash had no mark):
+        // updating writes nothing for the mark alone, and a teammate's change since is taken, not kept aside as Maya's.
+        let menu = NoteItem(text: "Lunch order\n- Soup for Sam")
+        menu.sharedWithTeam = true
+        maya.store.insert(menu)
+        await maya.team.syncNow()
+        await danaAgain.syncNow()
+        menu.editedBy = "Codex"
+        menu.editedAt = Date(timeIntervalSinceNow: -300)
+        maya.store.save()
+        let beforeUpdate = files()
+        await maya.team.syncNow()
+        check(files() == beforeUpdate, "a note synced before edits were marked isn't written again for its mark alone")
+        let danaMenu = notes(dana.store).first { $0.id == menu.id }
+        danaMenu?.text += "\n- Salad for Dana"
+        dana.store.save()
+        await danaAgain.syncNow()
+        let asideBefore = notes(maya.store).filter { !$0.sharedWithTeam && $0.text.hasPrefix("Lunch order") }.count
+        await maya.team.syncNow()
+        let asideAfter = notes(maya.store).filter { !$0.sharedWithTeam && $0.text.hasPrefix("Lunch order") }.count
+        check(menu.text.hasSuffix("- Salad for Dana") && asideAfter == asideBefore && menu.editedBy == "Codex",
+              "and a teammate's change since is taken with no copy kept aside, the agent's edit still marked: \(asideAfter - asideBefore) kept aside")
+
+        // A note made from what Maya said to herself stays on her Mac wherever it goes: moved into a shared binder, its
+        // binder deleted into a shared General, its binder shared after Delete All took away the moment it was made from,
+        // and even marked shared by mistake. One from before the mark is found by its moment while History still has it.
+        let launch = BinderRecord(name: "Launch", colorIndex: 1)
+        launch.sharedWithTeam = true
+        maya.store.insert(launch)
+        let errands = BinderRecord(name: "Errands", colorIndex: 3)
+        maya.store.insert(errands)
+        let said = NoteItem(text: "# Book the dentist\n\nRemind me to book the dentist for Thursday.")
+        said.binderID = errands.id
+        said.staysUnshared = true
+        maya.store.insert(said)
+        maya.store.move(said, to: launch)
+        check(said.binderID == launch.id && !said.sharedWithTeam, "moved into a shared binder, a note made from what you said stays unshared")
+        let older = NoteItem(text: "# Call the venue\n\nRemind me to call the venue about the booth.")
+        older.binderID = errands.id
+        maya.store.insert(older)
+        maya.store.insert(TranscriptRecord(id: older.id, mode: "moment", rawText: "remind me to call the venue about the booth", finalText: "Call the venue",
+                                           appName: "iPhone", bundleID: nil, category: nil, duration: 3, asrMillis: 0, llmMillis: 0, engine: "parakeet-v2",
+                                           llmModel: nil, usedLLM: false, fallbackReason: nil, audioFileName: nil, status: "answered"))
+        maya.store.markMomentNotes()
+        // Settings → Delete All takes the moments away (here without the recordings, which this test doesn't own).
+        try? maya.store.context.delete(model: TranscriptRecord.self)
+        maya.store.save()
+        maya.team.setShared(errands, true)
+        check(older.staysUnshared && !older.sharedWithTeam, "one from before the mark is marked, and stays unshared when its binder is shared after Delete All")
+        let general = maya.store.defaultBinder()
+        maya.team.setShared(general, true)
+        maya.store.deleteBinder(errands, movingItemsTo: general)
+        check(older.binderID == general.id && !older.sharedWithTeam, "its binder deleted, it moves into a shared General and stays unshared")
+        said.sharedWithTeam = true
+        maya.store.save()
+        await maya.team.syncNow()
+        await danaAgain.syncNow()
+        check(!said.sharedWithTeam && !files().keys.contains { $0.contains("Book the dentist") || $0.contains("Call the venue") }
+              && !notes(dana.store).contains { $0.id == said.id || $0.id == older.id },
+              "team sync never sends one, even marked shared by mistake, and unshares it")
+
         print("TEAM_FOLDER: \(folder.path)")
         for path in files().keys.sorted() { print("  \(path)") }
         if let markdown = try? String(contentsOf: folder.appendingPathComponent("Notes/Launch checklist.md"), encoding: .utf8) {
@@ -1464,19 +1720,118 @@ open reports/import.html
 
         check((await call("ask_on_task", ["id": id, "question": "Should the notes mention the pricing change?"], as: agentA)).ok && card.column == .blocked,
               "asking moves it to Blocked")
+        controller.board.sweep(now: Date().addingTimeInterval(3 * BoardRules.lease))
+        check(card.column == .blocked && card.assignee == "Agent A", "a question nobody answers for an hour and a half keeps the card waiting for Agent A")
         check((await call("comment_task", ["id": id, "text": "Yes, one line."], as: .you)).ok && card.column == .inProgress,
               "your answer (as from the phone) sends it back to In progress")
+        let fresh = (card.claimExpiresAt ?? .distantPast).timeIntervalSinceNow
+        check(fresh > BoardRules.lease - 60 && fresh <= BoardRules.lease, "the answer gives Agent A a fresh 30 minutes")
 
         let finish = await call("update_task", ["id": id, "column": "done"], as: agentA)
         check(!finish.ok && finish.text.localizedCaseInsensitiveContains("review"), "Agent A can't move it to Done: \(finish.text)")
         check((await call("complete_task", ["id": id, "summary": "Notes are in the PR."], as: agentA)).ok && card.column == .review,
               "complete_task hands it over for review")
+        let sentBack = await call("update_task", ["id": id, "column": "in_progress"], as: .you)
+        let lease = (card.claimExpiresAt ?? .distantPast).timeIntervalSinceNow
+        check(sentBack.ok && card.column == .inProgress && card.assignee == "Agent A" && lease > BoardRules.lease - 60 && lease <= BoardRules.lease
+              && controller.board.timeline(card.id).last?.text == "Sent back to Agent A.",
+              "sending it back from Review gives it to Agent A again, for 30 minutes")
+        check(list((await call("list_tasks", ["mine": true], as: agentA)).text).count == 1, "and Agent A finds it with `mine`")
+        check((await call("complete_task", ["id": id, "summary": "Pricing line added."], as: agentA)).ok && card.column == .review,
+              "Agent A hands it over again")
         check((await call("update_task", ["id": id, "column": "done"], as: .you)).ok && card.column == .done, "you approve it: Done")
         check(list((await call("list_tasks", ["binder": "Launch"], as: agentA)).text).isEmpty, "Done cards drop out of list_tasks")
 
         let timeline = object((await call("get_task", ["id": id], as: agentA)).text)["timeline"] as? [[String: Any]] ?? []
         let kinds = timeline.compactMap { $0["kind"] as? String }
-        check(kinds == ["created", "claimed", "progress", "question", "answer", "completed", "moved"], "the timeline tells the story: \(kinds)")
+        check(kinds == ["created", "claimed", "progress", "question", "answer", "completed", "moved", "completed", "moved"],
+              "the timeline tells the story: \(kinds)")
+
+        // A board's saves don't send the knowledge index over the whole library again; a save that changes a note does.
+        let updated = ModelContext.NotificationKey.updatedIdentifiers.rawValue, inserted = ModelContext.NotificationKey.insertedIdentifiers.rawValue
+        let events = controller.board.timeline(card.id).map(\.persistentModelID)
+        check(TaskCard.onlyBoards([updated: [card.persistentModelID], inserted: events]), "a board's save doesn't start the index")
+        check(!TaskCard.onlyBoards([updated: [card.persistentModelID, launch.persistentModelID]]), "a save that changes anything else does")
+        check(!TaskCard.onlyBoards(nil) && !TaskCard.onlyBoards([:]), "and so does a save that doesn't say what changed")
+
+        // You can take a card over from an agent, and the agent can't take it back.
+        let third = object((await call("create_task", ["title": "Tidy the changelog", "binder": "Launch", "column": "ready"], as: .you)).text)["id"] as? String ?? ""
+        _ = await call("claim_task", ["id": third], as: agentA)
+        let taken = await call("claim_task", ["id": third], as: .you)
+        if let tidy = UUID(uuidString: third).flatMap(controller.board.card) {
+            check(taken.ok && tidy.assignee == BoardActor.you.name && !tidy.assigneeIsAgent && tidy.claimExpiresAt == nil
+                  && controller.board.timeline(tidy.id).last?.text == "Took it over from Agent A.", "you take a card over from Agent A: \(taken.text)")
+            check(!(await call("update_task", ["id": third, "column": "review"], as: agentA)).ok, "and Agent A can't move it any more")
+            let late = await call("update_task", ["id": third, "progress": "Sorted the 0.8 entries"], as: agentA)
+            check(late.ok && late.text.contains("The user has it now"), "a report from Agent A tells it the card is yours now: \(late.text)")
+        } else {
+            check(false, "a card to take over")
+        }
+        // An agent can't put another agent's card on hold with a question.
+        let fourth = object((await call("create_task", ["title": "Check the screenshots", "binder": "Launch", "column": "ready"], as: .you)).text)["id"] as? String ?? ""
+        _ = await call("claim_task", ["id": fourth], as: agentA)
+        let meddling = await call("ask_on_task", ["id": fourth, "question": "Shall I take this over?"], as: agentB)
+        check(!meddling.ok && UUID(uuidString: fourth).flatMap(controller.board.card)?.column == .inProgress,
+              "Agent B can't ask about Agent A's card and block it: \(meddling.text)")
+
+        // Who a card is meant for, apart from who has it: yours to decide, an agent's only to suggest.
+        let release = object((await call("create_task", ["title": "Draft the release email", "binder": "Launch", "column": "ready", "for": "Pennant"],
+                                          as: .you)).text)["id"] as? String ?? ""
+        let forPennant = list((await call("list_tasks", ["for": "pennant"], as: agentA)).text)
+        check(forPennant.count == 1 && forPennant.first?["meant_for"] as? String == "Pennant" && forPennant.first?["meant_for_confirmed"] as? Bool == true,
+              "a card you meant for Pennant is listed for Pennant, and confirmed")
+        let changelog = object((await call("create_task", ["title": "Write the changelog", "binder": "Launch", "for": "Codex"], as: agentA)).text)["id"] as? String ?? ""
+        let suggested = list((await call("list_tasks", ["for": "Codex"], as: agentA)).text).first
+        check(suggested?["meant_for_confirmed"] as? Bool == false, "an agent's choice of who a card is for is only a suggestion")
+        _ = await call("update_task", ["id": changelog, "for": "Codex"], as: .you)
+        let confirmed = list((await call("list_tasks", ["for": "Codex"], as: agentA)).text).first
+        check(confirmed?["meant_for_confirmed"] as? Bool == true, "and you confirm it")
+        let recent = list((await call("list_tasks", ["since": AutomationPayload.iso(Date().addingTimeInterval(-60))], as: agentA)).text)
+        check(recent.contains { ($0["id"] as? String) == release }, "since finds the cards changed in the last minute")
+        check(!(await call("list_tasks", ["since": "yesterday"], as: agentA)).ok, "since needs a time")
+        // A host that pins its name (BINDERS_AGENT in its configuration) is named first, whatever the agent says.
+        setenv("BINDERS_AGENT", "Claude Code", 1)
+        _ = await call("claim_task", ["id": release, "agent": "Pennant"], as: agentA)
+        unsetenv("BINDERS_AGENT")
+        check(UUID(uuidString: release).flatMap(controller.board.card)?.assignee == "Claude Code · Pennant",
+              "an agent in Claude Code can't pass itself off as Pennant")
+        // Your choice of who a card is for stands: an agent can only say what it thinks.
+        let venue = object((await call("create_task", ["title": "Choose the venue", "binder": "Launch", "column": "ready", "for": "Pennant"],
+                                        as: .you)).text)["id"] as? String ?? ""
+        let overruled = await call("update_task", ["id": venue, "for": "Codex"], as: agentA)
+        _ = await call("update_task", ["id": venue, "for": ""], as: agentA)
+        let venueCard = UUID(uuidString: venue).flatMap(controller.board.card)
+        check(overruled.text.contains("The user chose who it's for") && venueCard?.meantFor == "Pennant" && venueCard?.meantForByAgent == false,
+              "an agent can't change or clear who you meant a card for: \(overruled.text)")
+        // And no agent acts as you, whatever it calls itself.
+        _ = await call("claim_task", ["id": venue], as: .you)
+        let posing = await call("update_task", ["id": venue, "column": "done", "agent": "You"], as: agentA)
+        check(venueCard?.assignee == BoardActor.you.name && venueCard?.column == .inProgress,
+              "an agent that calls itself You can't finish the card you hold: \(posing.text)")
+        // A host with a pinned name finds what's meant for it with for "me".
+        let deploy = object((await call("create_task", ["title": "Check the deploy", "binder": "Launch", "column": "ready", "for": "Claude Code"],
+                                         as: .you)).text)["id"] as? String ?? ""
+        setenv("BINDERS_AGENT", "Claude Code", 1)
+        let forMe = list((await call("list_tasks", ["for": "me"], as: agentA)).text).compactMap { $0["id"] as? String }
+        unsetenv("BINDERS_AGENT")
+        check(forMe.contains(deploy) && !forMe.contains(venue), "for \"me\" lists the cards meant for the host's pinned name")
+        // Once Agent A has gone quiet, before the sweep comes round, the card is let go first: asking about it doesn't hand
+        // Agent A a hold with no end.
+        if let screenshots = UUID(uuidString: fourth).flatMap(controller.board.card) {
+            screenshots.claimExpiresAt = Date().addingTimeInterval(-1)
+            let asked = await call("ask_on_task", ["id": fourth, "question": "Which devices should the screenshots show?"], as: agentB)
+            let kinds = controller.board.timeline(screenshots.id).suffix(2).map(\.kind)
+            check(asked.ok && screenshots.column == .blocked && screenshots.assignee == nil && kinds == [.lapsed, .question],
+                  "asking about a card whose agent went quiet lets it go first: \(kinds)")
+        }
+        // A card left in Review by an earlier version keeps no lease, so no one reads a time that means nothing.
+        if let older = UUID(uuidString: third).flatMap(controller.board.card) {
+            older.state = CardState(column: .review, assignee: agentA.name, assigneeIsAgent: true, claimExpires: Date().addingTimeInterval(-600))
+            controller.board.sweep()
+            check(older.claimExpiresAt == nil && older.assignee == agentA.name && older.column == .review, "the sweep clears an old lease in Review")
+            let listed = list((await call("list_tasks", ["binder": "Launch", "column": "review"], as: agentB)).text).first { ($0["id"] as? String) == third }
+            check(listed?["claim_expires"] as? String == "", "list_tasks gives no end time for a card waiting in Review")
+        }
 
         // An agent that goes quiet loses the card.
         let second = object((await call("create_task", ["title": "Check the import tool", "binder": "Launch", "column": "ready"], as: .you)).text)["id"] as? String ?? ""
@@ -1494,6 +1849,11 @@ open reports/import.html
         _ = await call("claim_task", ["id": second], as: agentA)
         check((await call("complete_task", ["id": second, "summary": "Import works up to 50k rows."], as: agentA)).ok && quiet.column == .done,
               "where agents may finish, complete_task goes straight to Done")
+        let fifth = object((await call("create_task", ["title": "Write the FAQ", "binder": "Launch", "column": "ready"], as: .you)).text)["id"] as? String ?? ""
+        _ = await call("claim_task", ["id": fifth], as: agentA)
+        let finished = await call("update_task", ["id": fifth, "column": "done", "progress": "Published"], as: agentA)
+        check(finished.ok && !finished.text.contains("hold") && !finished.text.contains("has it now"),
+              "an agent that finishes its own card isn't told it lost it: \(finished.text)")
         check(!(await call("claim_task", ["id": UUID().uuidString], as: agentA)).ok, "an unknown card is refused")
 
         // To-dos become cards and stay linked: a card that's done ticks its to-do off where it lives.
@@ -1534,6 +1894,45 @@ open reports/import.html
             check(false, "a promise can be found by its id")
         }
         check(!(await call("create_task", ["todo": "note:\(UUID().uuidString):0badf00d"], as: agentA)).ok, "a to-do that's gone is refused")
+
+        // What's happening with the work streams, from the boards alone.
+        let proofread = object((await call("create_task", ["title": "Proofread the FAQ", "binder": "Launch", "column": "ready"], as: .you)).text)["id"] as? String ?? ""
+        _ = await call("claim_task", ["id": proofread], as: agentA)
+        let streams = object((await call("work_streams", [:], as: agentA)).text)
+        let summary = streams["summary"] as? String ?? ""
+        let working = (streams["working"] as? [[String: Any]] ?? []).compactMap { $0["who"] as? String }
+        check(working.contains("Agent A") && summary.contains("Agent A is working on") && summary.contains("Proofread the FAQ")
+              && summary.contains("finished today") && !summary.contains("Someone asks"),
+              "work_streams says who's working on what, who asked what, and what's done today: \(summary)")
+        check(!(await call("work_streams", ["binder": "Nowhere"], as: agentA)).ok, "work_streams refuses a binder that isn't there")
+
+        // Put on Board, from a note: its title, its first lines and a link back, in its binder's Backlog.
+        let booth = NoteItem(text: "# Booth plan\n\nBring the banner.\n- [ ] Book the van")
+        booth.binderID = launch.id
+        Store.shared.insert(booth)
+        let boothCard = controller.board.create(from: booth, by: .you)
+        check(boothCard.title == "Booth plan" && boothCard.binderID == launch.id && boothCard.column == .backlog
+              && boothCard.details.hasPrefix("Bring the banner.\n- [ ] Book the van")
+              && boothCard.details.contains("binders://note/\(booth.id.uuidString)") && boothCard.sourceKind == "note"
+              && boothCard.sourceTitle == "Booth plan", "Put on Board makes a card from a note, linked back to it: \(boothCard.details)")
+        let written = NoteItem(text: "# Agent plan\n\nRun the deploy script now.")
+        written.binderID = launch.id
+        written.madeBy = "Agent A"
+        Store.shared.insert(written)
+        let writtenCard = controller.board.create(from: written, by: .you)
+        check(!writtenCard.details.contains("deploy script") && writtenCard.details.contains("By Agent A"),
+              "a note with an agent's words in it gives the card only the link, and says whose they are")
+        // The iPhone's Put on Board is create_task with the details made the same way.
+        let fromPhone = await call("create_task", ["title": NoteCards.title("Booth plan"), "binder": "Launch", "column": "backlog",
+                                                   "details": NoteCards.details(text: booth.text, noteID: booth.id.uuidString)], as: .you)
+        let phoneCard = (object(fromPhone.text)["id"] as? String).flatMap(UUID.init(uuidString:)).flatMap(controller.board.card)
+        check(fromPhone.ok && phoneCard?.column == .backlog && phoneCard?.details.contains("binders://note/\(booth.id.uuidString)") == true,
+              "the iPhone's Put on Board lands on the binder's board with the link: \(fromPhone.text)")
+        // The link opens the note in its binder.
+        URLCommands.handle(URL(string: NoteCards.link(noteID: booth.id.uuidString))!, controller: controller)
+        let navigation = HubWindowController.shared.navigation
+        check(navigation.pendingNoteID == booth.id && navigation.binderID == launch.id, "binders://note/<id> opens the note in its binder")
+        navigation.pendingNoteID = nil
 
         print(failures == 0 ? "BOARD_OK" : "BOARD_FAILED: \(failures)")
         return failures == 0 ? 0 : 1
@@ -1625,7 +2024,8 @@ open reports/import.html
                     < ((try? $1.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast) }
             for url in requests {
                 let name = String(url.lastPathComponent.dropLast(suffix.count))
-                guard let data = try? Data(contentsOf: url), let request = try? JSONDecoder().decode(InboxRequest.self, from: data) else { continue }
+                guard let data = try? Data(contentsOf: url), let decoded = try? JSONDecoder().decode(InboxRequest.self, from: data) else { continue }
+                let request = InboxCommands.fromAgent(decoded)
                 let result = await InboxCommands.perform(request, controller: controller)
                 try? JSONEncoder().encode(result).write(to: inbox.appendingPathComponent(Inbox.resultFile(name)), options: .atomic)
                 try? manager.removeItem(at: url)
@@ -1640,7 +2040,7 @@ open reports/import.html
                 let tag = String(format: "%04d", frame + 1)
                 if result.ok, ["ask_on_task", "complete_task"].contains(request.action),
                    let id = UUID(uuidString: request.fields["id"] ?? ""), let card = controller.board.card(id) {
-                    closeUps.append(("card-\(tag)-\(request.action)", AnyView(environment(CardDetailView(card: card))), NSSize(width: 760, height: 640)))
+                    closeUps.append(("card-\(tag)-\(request.action)", AnyView(environment(CardDetailView(card: card)).environment(HubNavigation())), NSSize(width: CardLayout.defaultWidth, height: CardLayout.defaultHeight)))
                 }
                 if result.ok, request.action == "add_note", let id = result.id.flatMap(UUID.init(uuidString:)) {
                     let notes = HubNavigation()
@@ -1665,7 +2065,7 @@ open reports/import.html
                     notes.pendingNoteID = id
                     closeUps.append(("note-\(id.uuidString.prefix(8))", AnyView(environment(HubView().environment(notes))), size))
                 } else if file.hasPrefix("card-"), let id = UUID(uuidString: String(file.dropFirst(5))), let card = controller.board.card(id) {
-                    closeUps.append(("card-\(id.uuidString.prefix(8))", AnyView(environment(CardDetailView(card: card))), NSSize(width: 760, height: 640)))
+                    closeUps.append(("card-\(id.uuidString.prefix(8))", AnyView(environment(CardDetailView(card: card)).environment(HubNavigation())), NSSize(width: CardLayout.defaultWidth, height: CardLayout.defaultHeight)))
                 } else { continue }
                 try? manager.removeItem(at: path)
                 changed = true
@@ -1682,6 +2082,8 @@ open reports/import.html
 
     /// For developing the iPhone app: the fictional demo data behind a real phone link, a pairing link on standard output
     /// (with 127.0.0.1 first, for the Simulator), and commands on standard input: "todo <text>", "note <text>", "pair".
+    /// It offers made-up addresses, as screenshots are taken against it; `--real-network` offers this Mac's own, for a
+    /// real iPhone on this network (Tailscale is never asked here).
     @MainActor
     private static func linkServe() async -> Int32 {
         guard AppPaths.isDemo else {
@@ -1692,6 +2094,7 @@ open reports/import.html
         guard await DemoData.seed(knowledge: controller.knowledge) else { return 1 }
         // Spare ports, so it runs alongside the real app's phone link.
         let server = LinkServer(controller: controller, port: 0, pairingPort: 0, devicesURL: AppPaths.support.appendingPathComponent("link-devices.json"))
+        if CommandLine.arguments.contains("--real-network") { server.networkForTests = nil }
         server.start()
         for _ in 0..<50 where server.status != .listening { try? await Task.sleep(for: .milliseconds(100)) }
         guard server.status == .listening else {
@@ -1704,6 +2107,20 @@ open reports/import.html
             print("PAIR_URL: \(pairing.url.absoluteString)")
             fflush(stdout)
         }
+        // Killed rather than ended by closing standard input (the UI tests' runner stops it so): the run's device keys
+        // still leave the Keychain.
+        signal(SIGTERM, SIG_IGN)
+        signal(SIGINT, SIG_IGN)
+        let stops = [SIGTERM, SIGINT].map { number in
+            let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
+            source.setEventHandler {
+                MainActor.assumeIsolated { server.stop() }
+                exit(0)
+            }
+            source.resume()
+            return source
+        }
+        defer { stops.forEach { $0.cancel() } }
         print("SERVING on port \(server.boundPort ?? 0)")
         await printPairing()
         let lines = AsyncStream<String> { continuation in
@@ -1727,6 +2144,31 @@ open reports/import.html
             } else if text.hasPrefix("note ") {
                 let result = await InboxCommands.perform(InboxRequest(action: "add_note", fields: ["text": String(text.dropFirst(5))]), controller: controller)
                 print("NOTE: \(result.message)")
+            } else if text.hasPrefix("ask "), let bar = text.firstIndex(of: "|") {
+                // "ask Fix the import|Which staging database?": an agent takes the card that starts so and asks you.
+                let title = String(text[text.index(text.startIndex, offsetBy: 4)..<bar])
+                if let card = controller.board.cards(in: nil).first(where: { $0.title.hasPrefix(title) }) {
+                    let agent = ["id": card.id.uuidString, "actor": "Claude Code · harbor-web", "actor_kind": BoardActor.Kind.agent.rawValue]
+                    _ = await InboxCommands.perform(InboxRequest(action: "claim_task", fields: agent), controller: controller)
+                    let question = agent.merging(["text": String(text[text.index(after: bar)...])]) { a, _ in a }
+                    let result = await InboxCommands.perform(InboxRequest(action: "ask_on_task", fields: question), controller: controller)
+                    print("ASKED: \(result.ok ? card.id.uuidString : result.error ?? "failed")")
+                } else {
+                    print("ASKED: no card starting “\(title)”")
+                }
+            } else if text.hasPrefix("card ") {
+                // "card Fix the import": where that card is, who has it, and for how long.
+                let title = String(text.dropFirst(5))
+                if let card = controller.board.cards(in: nil).first(where: { $0.title.hasPrefix(title) }) {
+                    let minutes = card.claimExpiresAt.map { "\(Int(($0.timeIntervalSinceNow / 60).rounded()))" } ?? "none"
+                    let last = controller.board.timeline(card.id).last
+                    print("CARD: column=\(card.column.rawValue) assignee=\(card.assignee ?? "") lease=\(minutes) last=\(last?.kindRaw ?? ""):\(last?.author ?? ""):\(last?.text ?? "")")
+                } else {
+                    print("CARD: none")
+                }
+            } else if text == "hellos" {
+                // How many times the phone has connected: one per launch, and none for a quick trip to the background.
+                print("HELLOS: \(server.hellos)")
             } else if text == "conversations" {
                 // What the phone's All-day capture sent, as the Mac wrote it up.
                 let kind = MeetingRecord.conversationKind
@@ -1776,6 +2218,11 @@ open reports/import.html
         do {
             let paired = try await LinkClient.pair(local, deviceName: "Test iPhone")
             check(server.devices.map(\.name) == ["Test iPhone"], "paired, and the Mac keeps the device")
+            // Its key is in the Keychain, never in the data folder, so nothing that reads the folder can connect as it.
+            let listed = (try? Data(contentsOf: devicesURL)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [[String: Any]] } ?? []
+            check(listed.count == 1 && listed.allSatisfy { $0["key"] == nil } && listed.first?["name"] as? String == "Test iPhone"
+                  && LinkServer.storedKey(for: paired.device) == paired.key.withUnsafeBytes({ Data($0) }),
+                  "its key is kept in the Keychain, and link-devices.json says only who's paired: \(listed.first.map { $0.keys.sorted() } ?? [])")
             try? await Task.sleep(for: .milliseconds(600))
             check(server.pairing == nil, "pairing closes after one use")
             let reused = try? await LinkClient.pair(local, deviceName: "Someone else")
@@ -1815,6 +2262,46 @@ open reports/import.html
             for _ in 0..<30 where heard.kinds.isEmpty { try? await Task.sleep(for: .milliseconds(100)) }
             check(heard.kinds.contains("notes") && heard.kinds.contains("todos"), "the phone hears that notes changed: \(heard.kinds.sorted())")
 
+            // A phone that lists nothing in its hello is iPhone 2.0: it's sent nothing new. One that lists more gets it.
+            check(server.phoneFeatures == [LinkFeatures.firstPhone], "a phone that lists nothing reads what iPhone 2.0 reads")
+            let modern = LinkClient(host: "127.0.0.1", port: port, identity: paired.device.uuidString, key: paired.key)
+            try await modern.connect()
+            try await modern.hello(device: paired.device, key: paired.key, name: "Test iPhone",
+                                   features: LinkFeatures.thisPhone + [LinkFeatures.notification("binders/test")])
+            let modernHeard = LinkEvents()
+            modern.onNotification { modernHeard.add($0) }
+            _ = try await modern.request("binders/subscribe")
+            check(server.phoneFeatures.contains { $0.contains(LinkFeatures.notification("binders/test")) }, "the Mac keeps what each phone reads")
+            let before = heard.count
+            server.notify("binders/test", ["kinds": ["test"]])
+            for _ in 0..<30 where modernHeard.count == 0 { try? await Task.sleep(for: .milliseconds(100)) }
+            try? await Task.sleep(for: .milliseconds(300))
+            check(modernHeard.count == 1 && heard.count == before, "a new notification goes only to the phone that reads it")
+            let hello = try await modern.hello(device: paired.device, key: paired.key, name: "Test iPhone")
+            check((hello["features"] as? [String] ?? []).contains(LinkFeatures.warm), "the Mac says it warms its model for the phone")
+            check((try? await modern.request(LinkFeatures.warmMethod, timeout: 5)) != nil, "and answers binders/warm at once")
+            // The heartbeat's footing: how long the Mac has been quiet, and a word when a request goes unanswered.
+            try? await Task.sleep(for: .milliseconds(1100))
+            check(modern.quietFor >= 1, "the phone knows how long the Mac has been quiet")
+            let timeouts = LinkEvents()
+            modern.onTimeout { timeouts.add([:]) }
+            server.stalls = true
+            let stalled = try? await modern.request("ping", timeout: 1)
+            server.stalls = false
+            check(stalled == nil && timeouts.count == 1, "a request the Mac doesn't answer times out, and the phone is told")
+            check((try? await modern.request("ping", timeout: 3)) != nil, "and a Mac that wakes answers again")
+            modern.close()
+            // A Mac that takes the connection and then says nothing is given up on in the phone's handshake time, rather
+            // than leaving the phone "Connecting…" for minutes.
+            let silent = LinkClient(host: "127.0.0.1", port: port, identity: paired.device.uuidString, key: paired.key)
+            try await silent.connect()
+            server.stalls = true
+            let helloStarted = Date()
+            let unanswered = try? await silent.hello(device: paired.device, key: paired.key, name: "Test iPhone", timeout: 1)
+            server.stalls = false
+            check(unanswered == nil && Date().timeIntervalSince(helloStarted) < 3, "a hello the Mac doesn't answer gives up in its time")
+            silent.close()
+
             let intruder = LinkClient(host: "127.0.0.1", port: port, identity: paired.device.uuidString, key: SymmetricKey(size: .bits256))
             let intruded = (try? await intruder.connect(timeout: 3)) != nil
             check(!intruded, "a wrong key can't connect")
@@ -1828,12 +2315,115 @@ open reports/import.html
             let reconnected = (try? await again.connect(timeout: 3)) != nil
             check(!reconnected, "and can't connect again")
             again.close()
+            check(LinkServer.storedKey(for: paired.device) == nil, "and its key is gone from the Keychain")
+
+            await checkKeysMove(check, controller: controller)
+
+            // In a throwaway folder, a run's devices leave the Keychain when the link stops, so the self-tests leave nothing.
+            if var second = await server.beginPairing(), let secondPort = server.boundPairingPort {
+                second.addresses = ["127.0.0.1:\(secondPort)"]
+                let other = try await LinkClient.pair(second, deviceName: "Second iPhone")
+                let kept = LinkServer.storedKey(for: other.device) != nil
+                server.stop()
+                check(kept && LinkServer.storedKey(for: other.device) == nil, "in a throwaway folder, the devices' keys leave the Keychain when the link stops")
+            } else {
+                check(false, "pairing opens a second time")
+            }
         } catch {
             check(false, "the conversation failed: \(error.localizedDescription)")
         }
         server.stop()
+        // Where a phone can reach the Mac: the addresses, in the hello and as notices, and the parallel dial.
+        await linkAddressesSelfTest(check, controller: controller)
         print(failures == 0 ? "LINK_OK" : "LINK_FAILED: \(failures)")
         return failures == 0 ? 0 : 1
+    }
+
+    /// A devices file from before 0.8.1, with the keys in it: they move to the Keychain without anyone pairing again, and
+    /// the file is written without them. After that a key put into the file never gets in, and a device whose key the
+    /// Keychain doesn't have (a data folder from another Mac) stays listed in the file but can't connect.
+    @MainActor
+    private static func checkKeysMove(_ check: (Bool, String) -> Void, controller: DictationController) async {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("link-devices-before-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        func entries() -> [[String: Any]] {
+            (try? Data(contentsOf: url)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [[String: Any]] } ?? []
+        }
+        func listening(_ server: LinkServer) async -> UInt16? {
+            server.start()
+            for _ in 0..<50 where server.status != .listening { try? await Task.sleep(for: .milliseconds(100)) }
+            return server.boundPort
+        }
+        /// Whether a phone with this key gets past hello.
+        func connects(_ device: UUID, _ key: SymmetricKey, port: UInt16) async -> Bool {
+            let phone = LinkClient(host: "127.0.0.1", port: port, identity: device.uuidString, key: key)
+            defer { phone.close() }
+            guard (try? await phone.connect(timeout: 3)) != nil else { return false }
+            return (try? await phone.hello(device: device, key: key, name: "Old iPhone", timeout: 3)) != nil
+        }
+        /// A device as builds before 0.8.1 wrote it, key and all.
+        struct Before: Codable {
+            let id: UUID
+            var name: String
+            var key: Data
+            var pairedAt: Date
+            var lastSeen: Date?
+        }
+        let old = UUID(), oldKey = SymmetricKey(size: .bits256)
+        let oldData = oldKey.withUnsafeBytes { Data($0) }
+        try? JSONEncoder().encode([Before(id: old, name: "Old iPhone", key: oldData, pairedAt: Date().addingTimeInterval(-86_400), lastSeen: nil)])
+            .write(to: url)
+        let moved = LinkServer(controller: controller, port: 0, pairingPort: 0, devicesURL: url)
+        check(moved.devices.map(\.name) == ["Old iPhone"] && LinkServer.storedKey(for: old) == oldData
+              && entries().count == 1 && entries().allSatisfy { $0["key"] == nil },
+              "a devices file from before moves its keys to the Keychain, keeps the device, and is written again without them")
+        var still = false
+        if let port = await listening(moved) { still = await connects(old, oldKey, port: port) }
+        check(still, "and that iPhone still connects, with no pairing again")
+
+        // Put into the file afterwards: a device with a key of its own, and one whose key this Mac's Keychain doesn't have.
+        let planted = UUID(), plantedKey = SymmetricKey(size: .bits256), copied = UUID()
+        var written = entries()
+        written.append(["id": planted.uuidString, "name": "Not an iPhone", "key": plantedKey.withUnsafeBytes { Data($0) }.base64EncodedString(), "pairedAt": 0])
+        written.append(["id": copied.uuidString, "name": "Copied iPhone", "pairedAt": 0])
+        try? JSONSerialization.data(withJSONObject: written).write(to: url)
+        let later = LinkServer(controller: controller, port: 0, pairingPort: 0, devicesURL: url)
+        let kept = entries()
+        check(later.devices.map(\.name) == ["Old iPhone"] && LinkServer.storedKey(for: planted) == nil && kept.count == 3 && kept.allSatisfy { $0["key"] == nil },
+              "a key put into the file after they moved isn't taken, and leaves the file; the others stay listed: \(later.devices.map(\.name))")
+        if let port = await listening(later) {
+            let intruded = await connects(planted, plantedKey, port: port)
+            let oldOne = await connects(old, oldKey, port: port)
+            check(!intruded && oldOne, "so a device put in the file can't connect, while the iPhone paired before can")
+        } else {
+            check(false, "the link starts again")
+        }
+        // The Keychain's "moved" mark can't be read at launch (locked, or access denied): a key the Keychain holds for a
+        // device in the file says the move happened, so a key put into the file still isn't taken.
+        Keychain.write("", for: later.movedName)
+        let plantedAgain = UUID(), plantedAgainKey = SymmetricKey(size: .bits256)
+        written = entries()
+        written.append(["id": plantedAgain.uuidString, "name": "Not an iPhone either",
+                        "key": plantedAgainKey.withUnsafeBytes { Data($0) }.base64EncodedString(), "pairedAt": 0])
+        try? JSONSerialization.data(withJSONObject: written).write(to: url)
+        let unmarked = LinkServer(controller: controller, port: 0, pairingPort: 0, devicesURL: url)
+        check(unmarked.devices.map(\.name) == ["Old iPhone"] && LinkServer.storedKey(for: plantedAgain) == nil && entries().allSatisfy { $0["key"] == nil },
+              "with the mark unreadable, a key the Keychain holds for a paired device still keeps a key put into the file out: \(unmarked.devices.map(\.name))")
+        if let port = await listening(unmarked) {
+            let intruded = await connects(plantedAgain, plantedAgainKey, port: port)
+            check(!intruded, "and that device can't connect")
+        } else {
+            check(false, "the link starts again")
+        }
+        later.revoke(old)
+        check(LinkServer.storedKey(for: old) == nil && entries().count == 2, "removing a device deletes its key from the Keychain")
+        check(later.devicesToPairAgain.map(\.name) == ["Not an iPhone", "Copied iPhone"],
+              "the ones without a key are listed to pair again or remove: \(later.devicesToPairAgain.map(\.name))")
+        later.revoke(copied)
+        check(entries().count == 1 && later.devicesToPairAgain.map(\.name) == ["Not an iPhone"], "and Remove takes one off the file")
+        unmarked.stop()
+        later.stop()
+        moved.stop()
     }
 
     /// Ticks checklist items in a meeting's notes, a note's digest and a note the way MCP's set_todo_status does, in a
@@ -2277,6 +2867,7 @@ open reports/import.html
                 .environment(navigation)
                 .environment(AppSettings.shared)
                 .modelContainer(Store.shared.container)
+                .defaultAppStorage(throwawayDefaults)
         }
         await render(hub { $0.selection = .home }, size: size, name: "demo-home", directory: directory)
         await render(hub { $0.selection = .binder }, size: size, name: "demo-binder", directory: directory)
@@ -2289,8 +2880,8 @@ open reports/import.html
         // Wide enough for all six columns, and short, as the site shows the board as a strip.
         await render(hub { $0.selection = .binder; $0.pendingBinderTab = .board }, size: NSSize(width: 2080, height: 600), name: "demo-board", directory: directory)
         if let blocked = controller.board.cards(in: harbor.id).first(where: { $0.column == .blocked }) {
-            await render(CardDetailView(card: blocked).environment(controller).modelContainer(Store.shared.container),
-                         size: NSSize(width: 760, height: 560), name: "demo-card", directory: directory)
+            await render(CardDetailView(card: blocked).environment(controller).environment(HubNavigation()).modelContainer(Store.shared.container),
+                         size: NSSize(width: CardLayout.defaultWidth, height: CardLayout.defaultHeight), name: "demo-card", directory: directory)
         }
         // Adding to-dos to the board: the launch's open to-dos without a card, two of them ticked.
         let carded = Set(controller.board.cards(in: harbor.id).compactMap(\.sourceRef))
@@ -2466,6 +3057,12 @@ open reports/import.html
         }
     }
 
+    /// Preferences for what a test run's views remember, such as the Settings part last opened: the app's own store,
+    /// which in a test run is a file in the throwaway folder (AppDefaults), so a run doesn't change them for the real app
+    /// or for other runs.
+    @MainActor
+    static var throwawayDefaults: UserDefaults { AppDefaults.store }
+
     static func ms(since date: Date) -> Int {
         Int(Date().timeIntervalSince(date) * 1000)
     }
@@ -2475,13 +3072,19 @@ open reports/import.html
 private final class LinkEvents: @unchecked Sendable {
     private let lock = NSLock()
     private var collected = Set<String>()
+    private var received = 0
 
     func add(_ message: [String: Any]) {
         let kinds = ((message["params"] as? [String: Any])?["kinds"] as? [String]) ?? []
-        lock.withLock { collected.formUnion(kinds) }
+        lock.withLock {
+            collected.formUnion(kinds)
+            received += 1
+        }
     }
 
     var kinds: Set<String> { lock.withLock { collected } }
+    /// How many notifications arrived.
+    var count: Int { lock.withLock { received } }
 }
 
 /// A note editor with its toolbar, driven by a model the test holds, for the outline check.

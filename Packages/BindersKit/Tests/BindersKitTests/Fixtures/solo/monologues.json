@@ -1,0 +1,979 @@
+{
+ "about": "Thinking out loud on a walk, as the iPhone would write it down: one voice (You), in segments of a few seconds cut at pauses, with Parakeet's punctuation and the ums left in. Written for the bench: no real people's names (Sam is the bench's generic name). Each expected item names the sentences it comes from by a phrase in them (`from`), what a good reading writes (`title`), and the agents that would be right for it (`agents`, the bench library's; `nobody` for none). `talking` is whether it should read as talking to someone. The `calls` are one voice talking to someone the iPhone can't hear. The two long walks (walk-13, walk-14) are two long walks of thinking out loud, written after the critics for the bench (no real people's names; Sam is the bench's generic name), in the schema of ../monologues.json: segments as the iPhone would write them down, one voice (You), Parakeet's punctuation and the ums left in. Each expected item names its sentences by a phrase in them (`from`), what a good reading writes (`title`, never an agent's name), the agents that would be right (`agents`, the bench library's; `nobody` for none), `named` when a name the user said decides, `mentioned` when an agent is named only tentatively (it restricts, never decides), and `handed`: whether Auto's rule should hand it over with the bench's agents set up as part 12.2's self-test has them (Claude Code, Codex, Grok Bot, Inkwell take cards; Kestrel may act; Pennant checks the board). `moments` are sentences that went as moments of their own during the capture, left out of the reading. `negatives` must give no item: musing, things taken back or put off, other people's products and tasks, remarks.",
+ "agents": [
+  "Claude Code · app",
+  "Codex · site",
+  "Grok Bot",
+  "Inkwell",
+  "Pennant",
+  "Kestrel"
+ ],
+ "monologues": [
+  {
+   "id": "walk-01",
+   "about": "the founder's two examples, and a to-do of his own",
+   "segments": [
+    "Okay, so, walking back from the shop. The login on the site times out way too fast, I lost a draft twice today.",
+    "That's really annoying. We should add a weekly digest of what the agents did, something I can read on Sunday.",
+    "Hmm. The light is nice today. I should renew the domain before it lapses, that's next month I think.",
+    "Anyway. Lots to think about with the pricing, but not now."
+   ],
+   "items": [
+    {
+     "kind": "fix",
+     "from": [
+      "times out way too fast"
+     ],
+     "title": "Fix the site's login timing out too fast",
+     "agents": [
+      "Codex · site",
+      "Claude Code · app"
+     ]
+    },
+    {
+     "kind": "idea",
+     "from": [
+      "weekly digest"
+     ],
+     "title": "A weekly digest of what the agents did",
+     "agents": [
+      "Claude Code · app",
+      "nobody"
+     ]
+    },
+    {
+     "kind": "todo",
+     "from": [
+      "renew the domain"
+     ],
+     "title": "Renew the domain before it lapses",
+     "agents": [
+      "nobody",
+      "Pennant"
+     ]
+    }
+   ],
+   "capture": true
+  },
+  {
+   "id": "walk-02",
+   "about": "musing that's none of these: should yield nothing",
+   "segments": [
+    "It's strange how quiet it is on a Sunday.",
+    "I keep thinking about whether people actually read release notes. Probably not.",
+    "The river is really high after all that rain.",
+    "I wonder what the week will look like. Honestly the last launch went better than I expected.",
+    "Anyway."
+   ],
+   "items": [],
+   "capture": true
+  },
+  {
+   "id": "walk-03",
+   "about": "agents by name, one only mentioned",
+   "segments": [
+    "Right. I should get Claude Code to look at the sync bug when the Mac is asleep.",
+    "Grok Bot could compare what the other notes apps charge for teams.",
+    "Codex did a really nice job on the pricing table, by the way.",
+    "Although the pricing table still looks cramped on the phone.",
+    "And I want Inkwell to draft the intro for the October newsletter."
+   ],
+   "items": [
+    {
+     "kind": "todo",
+     "from": [
+      "sync bug"
+     ],
+     "title": "Look at the sync bug when the Mac is asleep",
+     "agents": [
+      "Claude Code · app"
+     ],
+     "named": "Claude Code · app"
+    },
+    {
+     "kind": "todo",
+     "from": [
+      "other notes apps charge"
+     ],
+     "title": "Compare what other notes apps charge for teams",
+     "agents": [
+      "Grok Bot"
+     ],
+     "named": "Grok Bot"
+    },
+    {
+     "kind": "fix",
+     "from": [
+      "looks cramped on the phone"
+     ],
+     "title": "Fix the pricing table looking cramped on phones",
+     "agents": [
+      "Codex · site"
+     ]
+    },
+    {
+     "kind": "todo",
+     "from": [
+      "October newsletter"
+     ],
+     "title": "Draft the intro for the October newsletter",
+     "agents": [
+      "Inkwell"
+     ],
+     "named": "Inkwell"
+    }
+   ],
+   "mentions": [
+    "Codex · site"
+   ],
+   "capture": true
+  },
+  {
+   "id": "walk-04",
+   "about": "an idea taken back",
+   "segments": [
+    "So, maybe we should add a dark mode to the widget.",
+    "Actually no, forget it, that's a terrible idea, nobody wants that.",
+    "The export should include the dates though, that one's real.",
+    "And I should call the dentist this week."
+   ],
+   "items": [
+    {
+     "kind": "fix",
+     "from": [
+      "export should include the dates"
+     ],
+     "title": "Include the dates in the export",
+     "agents": [
+      "Claude Code · app"
+     ]
+    },
+    {
+     "kind": "todo",
+     "from": [
+      "call the dentist"
+     ],
+     "title": "Call the dentist this week",
+     "agents": [
+      "nobody",
+      "Pennant"
+     ]
+    }
+   ],
+   "capture": true
+  },
+  {
+   "id": "walk-05",
+   "about": "a long walk with eight things, past the per-capture cap of hand-overs at once",
+   "segments": [
+    "Okay, list time. The search is way too slow on big binders, that needs looking at.",
+    "There's a typo on the pricing page too, in the second paragraph.",
+    "What if the board showed who's busiest, like a little bar for each agent.",
+    "Um, the coffee here is too sweet. Anyway.",
+    "We could record a short film for the home page.",
+    "I should write the release notes for the beta. And I need to email the accountant the receipts.",
+    "The onboarding is confusing in the second step, people get lost there.",
+    "Oh, and I should book the car service for next week."
+   ],
+   "items": [
+    {
+     "kind": "fix",
+     "from": [
+      "way too slow on big binders"
+     ],
+     "title": "Speed up search on big binders",
+     "agents": [
+      "Claude Code · app"
+     ]
+    },
+    {
+     "kind": "fix",
+     "from": [
+      "typo on the pricing page"
+     ],
+     "title": "Fix the typo on the pricing page",
+     "agents": [
+      "Codex · site"
+     ]
+    },
+    {
+     "kind": "idea",
+     "from": [
+      "who's busiest"
+     ],
+     "title": "Show who's busiest on the board",
+     "agents": [
+      "Claude Code · app",
+      "nobody"
+     ]
+    },
+    {
+     "kind": "idea",
+     "from": [
+      "short film"
+     ],
+     "title": "A short film for the home page",
+     "agents": [
+      "Inkwell",
+      "Codex · site",
+      "nobody"
+     ]
+    },
+    {
+     "kind": "todo",
+     "from": [
+      "release notes for the beta"
+     ],
+     "title": "Write the release notes for the beta",
+     "agents": [
+      "Inkwell"
+     ]
+    },
+    {
+     "kind": "todo",
+     "from": [
+      "email the accountant"
+     ],
+     "title": "Email the accountant the receipts",
+     "agents": [
+      "nobody",
+      "Kestrel"
+     ]
+    },
+    {
+     "kind": "fix",
+     "from": [
+      "onboarding is confusing"
+     ],
+     "title": "Fix the confusing second step of the onboarding",
+     "agents": [
+      "Claude Code · app"
+     ]
+    },
+    {
+     "kind": "todo",
+     "from": [
+      "car service"
+     ],
+     "title": "Book the car service for next week",
+     "agents": [
+      "nobody",
+      "Pennant"
+     ]
+    }
+   ],
+   "capture": true
+  },
+  {
+   "id": "walk-06",
+   "about": "other people's tasks, and one of his own",
+   "segments": [
+    "Sam should send the invoice before Friday.",
+    "They really need to fix the road by the station, it's a mess.",
+    "I'll ask Sam about the venue when I see him.",
+    "The kids loved the park this morning."
+   ],
+   "items": [
+    {
+     "kind": "todo",
+     "from": [
+      "ask Sam about the venue"
+     ],
+     "title": "Ask Sam about the venue",
+     "agents": [
+      "nobody"
+     ]
+    }
+   ],
+   "capture": false
+  },
+  {
+   "id": "walk-07",
+   "about": "a question and a note, which aren't for an agent, and a to-do",
+   "segments": [
+    "What was our booth number again, I can never remember.",
+    "The gate code at the venue is 4512, don't forget that.",
+    "I should print the badges for the booth tomorrow."
+   ],
+   "items": [
+    {
+     "kind": "todo",
+     "from": [
+      "print the badges"
+     ],
+     "title": "Print the badges for the booth",
+     "agents": [
+      "nobody",
+      "Pennant"
+     ]
+    }
+   ],
+   "capture": false
+  },
+  {
+   "id": "walk-08",
+   "about": "fragmentary, with a fix in it",
+   "segments": [
+    "So the, um, the thing with the, uh, the upload.",
+    "It just, it hangs, like, when the file is big. Yeah.",
+    "Which is bad. Hmm."
+   ],
+   "items": [
+    {
+     "kind": "fix",
+     "from": [
+      "the upload",
+      "it hangs"
+     ],
+     "title": "Fix the upload hanging on big files",
+     "agents": [
+      "Claude Code · app"
+     ]
+    }
+   ],
+   "capture": false
+  },
+  {
+   "id": "walk-09",
+   "about": "a “Binders, …” inside, which goes as its own moment",
+   "segments": [
+    "Okay. Binders, add a to-do to book the car service.",
+    "Right, and the sidebar on the board is way too cluttered, I should clean that up."
+   ],
+   "items": [
+    {
+     "kind": "fix",
+     "from": [
+      "sidebar on the board"
+     ],
+     "title": "Clean up the board's cluttered sidebar",
+     "agents": [
+      "Claude Code · app"
+     ]
+    }
+   ],
+   "moments": [
+    "add a to-do to book the car service"
+   ],
+   "capture": false
+  },
+  {
+   "id": "walk-10",
+   "about": "something said to Siri, left out",
+   "segments": [
+    "Hey Siri, set a timer for ten minutes.",
+    "Okay. It would be nice to have a snooze on cards, like, snooze until Monday."
+   ],
+   "items": [
+    {
+     "kind": "idea",
+     "from": [
+      "snooze on cards"
+     ],
+     "title": "Snooze a card until a day you pick",
+     "agents": [
+      "Claude Code · app",
+      "nobody"
+     ]
+    }
+   ],
+   "capture": false
+  },
+  {
+   "id": "walk-11",
+   "about": "“you” said to no one: must not read as talking to someone",
+   "segments": [
+    "You know what, the login thing is annoying.",
+    "You'd think it would remember me after a week. You know?",
+    "Anyway, we should make the session last longer."
+   ],
+   "items": [
+    {
+     "kind": "fix",
+     "from": [
+      "session last longer"
+     ],
+     "title": "Make the login session last longer",
+     "agents": [
+      "Codex · site",
+      "Claude Code · app"
+     ]
+    }
+   ],
+   "capture": false
+  },
+  {
+   "id": "walk-12",
+   "about": "done and decided: nothing to do",
+   "segments": [
+    "I already sent the deck to Sam this morning, so that's done.",
+    "We decided not to do the referral code.",
+    "The new icon looks good."
+   ],
+   "items": [],
+   "capture": false
+  },
+  {
+   "id": "walk-13",
+   "minutes": 10,
+   "about": "a ten-minute walk to the harbour: a reply owed, an agent named, one named only tentatively, a complaint about someone else's app, an idea taken back, a topic come back to",
+   "segments": [
+    "Okay. Walking down to the harbour now. So, a few things from this morning, while I still remember them.",
+    "It's cold for October. Nice, though, the light on the water.",
+    "Right. The board on the iPhone, when it comes back from the background, it takes like ten seconds before it shows anything.",
+    "That's way too slow. People will think it's broken, honestly. I thought it was broken the first time.",
+    "I wonder if it's loading everything again instead of just what changed. Probably.",
+    "Hmm. And the onboarding, the third screen, the button is half off the screen on the small iPhones.",
+    "I noticed that on the old phone this morning. It's cut off at the bottom, you can't even tap it.",
+    "Which is not great for the first thing people see.",
+    "Okay. What else. Oh, Sam asked about the booth for the fair, and I still haven't answered him.",
+    "I should get back to him today, before he books something else without me.",
+    "The wind's picking up. Should have brought the other jacket, really.",
+    "Okay, so, pricing. I keep going back and forth on the team plan.",
+    "Maybe it's per seat. Or maybe it's one flat price for a small team. I don't know yet, I'll think about it more.",
+    "Per seat is fairer. Flat is simpler to explain. Both have a point.",
+    "We could do a referral thing, like a month free if you bring a friend. No, actually, that's a bad idea, it makes it feel cheap. Forget that.",
+    "The ferry app keeps crashing when I try to buy a ticket, it's so annoying. Every single time.",
+    "Anyway. The release notes for the beta, I should write those this week, people keep asking what changed.",
+    "Inkwell could draft them from the changelog, actually. I might do that, I don't know.",
+    "And I need to email the accountant the receipts from September, that's overdue now.",
+    "Hmm. What was the other thing. There was another thing, I had it a minute ago.",
+    "Oh yes. Search on the Mac doesn't find anything in old captures. I searched for the venue yesterday and got nothing at all.",
+    "I should get Claude Code to look at that, it's probably the index.",
+    "Come on, light. This crossing takes forever.",
+    "Here's a thought: a little weekly email of what the agents did, with the cards they finished.",
+    "Something I could read on Sunday morning with a coffee. That would be nice.",
+    "People would like that too, I think. It shows the thing is working while you're not looking.",
+    "Seagulls everywhere today. They're loud.",
+    "Back to the onboarding. The third screen also still has the old logo, I'm pretty sure.",
+    "Yeah, it does. The purple one, from before.",
+    "Codex did a really nice job on the footer links, by the way. That's much better now.",
+    "I keep thinking about what to show at the fair. The board, obviously, we decided that already.",
+    "Sam's printing the banner, he said he would.",
+    "Okay. I think that's most of it. Nearly at the harbour.",
+    "Oh, and the dentist. I need to move Thursday's appointment, I can't make it then.",
+    "Right. Okay. Coffee."
+   ],
+   "items": [
+    {
+     "kind": "fix",
+     "from": [
+      "takes like ten seconds",
+      "way too slow"
+     ],
+     "title": "Fix the board taking ten seconds to show after the iPhone comes back",
+     "agents": [
+      "Claude Code · app"
+     ],
+     "handed": true
+    },
+    {
+     "kind": "fix",
+     "from": [
+      "half off the screen",
+      "cut off at the bottom"
+     ],
+     "title": "Fix the onboarding's third-screen button cut off on small iPhones",
+     "agents": [
+      "Claude Code · app"
+     ],
+     "handed": true
+    },
+    {
+     "kind": "todo",
+     "from": [
+      "haven't answered him",
+      "get back to him today"
+     ],
+     "title": "Reply to Sam about the booth for the fair",
+     "agents": [
+      "nobody",
+      "Kestrel",
+      "Pennant"
+     ],
+     "handed": false
+    },
+    {
+     "kind": "todo",
+     "from": [
+      "release notes for the beta",
+      "Inkwell could draft them"
+     ],
+     "title": "Write the release notes for the beta",
+     "agents": [
+      "Inkwell",
+      "nobody"
+     ],
+     "mentioned": "Inkwell",
+     "handed": false
+    },
+    {
+     "kind": "todo",
+     "from": [
+      "email the accountant"
+     ],
+     "title": "Email the accountant the receipts from September",
+     "agents": [
+      "nobody",
+      "Kestrel",
+      "Pennant"
+     ],
+     "handed": false
+    },
+    {
+     "kind": "fix",
+     "from": [
+      "anything in old captures",
+      "get Claude Code to look at that"
+     ],
+     "title": "Fix search not finding anything in old captures",
+     "agents": [
+      "Claude Code · app"
+     ],
+     "named": "Claude Code · app",
+     "handed": true
+    },
+    {
+     "kind": "idea",
+     "from": [
+      "weekly email of what the agents did",
+      "Sunday morning with a coffee"
+     ],
+     "title": "A weekly email of what the agents finished",
+     "agents": [
+      "Claude Code · app",
+      "nobody"
+     ],
+     "handed": true
+    },
+    {
+     "kind": "fix",
+     "from": [
+      "still has the old logo",
+      "The purple one"
+     ],
+     "title": "Replace the old logo on the onboarding's third screen",
+     "agents": [
+      "Claude Code · app"
+     ],
+     "handed": true
+    },
+    {
+     "kind": "todo",
+     "from": [
+      "move Thursday's appointment"
+     ],
+     "title": "Move Thursday's dentist appointment",
+     "agents": [
+      "Pennant",
+      "nobody"
+     ],
+     "handed": false
+    }
+   ],
+   "moments": [],
+   "mentions": [
+    "Codex · site"
+   ],
+   "negatives": [
+    "back and forth on the team plan",
+    "one flat price",
+    "referral thing",
+    "Forget that",
+    "ferry app keeps crashing",
+    "other jacket",
+    "This crossing takes forever",
+    "Seagulls",
+    "nice job on the footer links",
+    "we decided that already",
+    "printing the banner"
+   ],
+   "capture": true
+  },
+  {
+   "id": "walk-14",
+   "minutes": 20,
+   "about": "a twenty-minute walk by the river: sixteen things, two moments said on their own inside it, \"Hey Siri\", other people's products, something taken back, something put off, a topic come back to, three names said and one said tentatively, and the musing between them that a long walk has",
+   "segments": [
+    "Right, long walk today. Let's see what's on my mind.",
+    "Lovely morning. The path by the river is still muddy from all the rain.",
+    "I keep forgetting how nice it is out here in the mornings. Hardly anyone about.",
+    "The new shoes are good. Took a week to get used to them.",
+    "So, the export. The export from a binder doesn't include the dates on the to-dos, which is kind of the whole point of it.",
+    "I exported Website yesterday and none of the dates were in the file.",
+    "That needs fixing, soon.",
+    "Hmm. Somebody's walking three dogs at once over there. Impressive.",
+    "Funny, the board started as a list on a napkin. Now look at it.",
+    "There's that man with the kite again. Every Sunday.",
+    "It's funny, I think better when I'm walking. Something about not looking at a screen.",
+    "Okay, what else. The widget in dark mode, the text is way too dark to read, it's grey on almost black.",
+    "I could barely see it this morning in the kitchen.",
+    "The last two weeks went fast. The beta, the fair coming up, everything at once.",
+    "Hmm. Lost my thread. Where was I going with that.",
+    "It's getting warmer now the sun's up. Jacket off soon.",
+    "I owe the landlord an answer about renewing the lease. I said I'd tell him by the end of the month.",
+    "I should do that this week, it's already the twenty-fourth.",
+    "Ugh, and the airline's website logged me out twice while I was trying to change my seat. Unbelievable.",
+    "Not my problem, though. Moving on.",
+    "I liked the talk at the meetup last week. The one about small tools.",
+    "That was a good point she made, that people trust things they can see working.",
+    "Idea for the board: what if cards could snooze, like snooze until Monday, and then come back on their own.",
+    "That would be really handy for things I can't do yet.",
+    "So I don't have to look at them every single day.",
+    "Hey Siri, set a timer for twenty minutes.",
+    "Okay, the wind's dropped. Much better.",
+    "I wonder how many people actually read the changelog. Probably very few.",
+    "Okay. Where was I. The pricing page, there's a typo in the second paragraph, it says teh instead of the.",
+    "Someone pointed that out last week and it's still there.",
+    "Codex could fix that in a second, honestly.",
+    "The bank app is so slow these days. It takes forever to open.",
+    "Still, it's good to have it there.",
+    "The fair's going to be busy. Lots of people walking past, not stopping.",
+    "Anyway.",
+    "I need to book the car service for next week, it's been making that noise again.",
+    "Like a rattle when it's cold. Probably nothing, but still.",
+    "Two weeks is nothing, really. It'll come round fast.",
+    "That tree came down in the storm, look. Right across the path, they've cut it up.",
+    "I like the new icon, actually. It took a while, but it's right now.",
+    "Mm. Smells like rain, though.",
+    "I had a good chat with Sam yesterday. He's keen on the fair.",
+    "Okay, the newsletter. I want Inkwell to draft the October one, from the changelog and the blog posts.",
+    "And it should mention the new widget, lots of people asked about it.",
+    "Hmm. What's that bird. A heron, I think. Standing very still.",
+    "He always is, to be fair.",
+    "Okay, quiet bit. Just walking.",
+    "We should drop the free plan. Hmm. No. No, keep it, that's how people find us. Keep it.",
+    "There's a bakery smell from somewhere. That's dangerous.",
+    "I think the beta's going well, mostly. People seem to get it.",
+    "The upload, um, the thing with the upload. It just hangs, like, when the file is big. Over a hundred megs or so.",
+    "I saw it twice with the screen recordings.",
+    "So that needs looking at.",
+    "A few of them use it every day now, which is more than I expected.",
+    "Binders, remind me to call the bank tomorrow morning.",
+    "The numbers are small, but that's fine for now.",
+    "Okay. And I want Grok Bot to compare what the other notes apps charge for teams, for the pricing page.",
+    "Just the main five or six, and what you get for it.",
+    "That would help with the team plan decision.",
+    "The team plan, still not sure. Per seat feels fair, but it's more to explain.",
+    "I'll decide that next week, not now.",
+    "Hmm. A dog just ran off with someone's glove. Brilliant.",
+    "Ducks. Look at that, a whole line of them crossing.",
+    "The river's really high. The bench by the water is half under.",
+    "Right, where was I. The fair, the pricing, the export.",
+    "The search is fast now, by the way. Much better since the update.",
+    "It's a lot, but it's the good kind of a lot.",
+    "Oh. The share sheet on the iPad doesn't show Binders at all. It shows up on the iPhone, but not on the iPad.",
+    "I tried it with a photo and with a link, nothing.",
+    "That's a bug for sure.",
+    "My phone's at sixty percent. Fine.",
+    "And I should print the badges for the booth before Friday.",
+    "Sam's bringing the banner, I think. He said he would.",
+    "Last time I walked this far it rained the whole way.",
+    "I need to renew the domain, it lapses next month.",
+    "Okay. Hmm. Quiet stretch here.",
+    "The boats are out today. Sailing club, probably.",
+    "People keep saying the board is the best part. Which is nice to hear.",
+    "I like that the board shows who's on what. That part works.",
+    "What if the home page had a short film, like thirty seconds, showing a walk like this one turning into cards.",
+    "That could be really good, actually. Show, don't tell.",
+    "I'd need someone to film it, though. Or I just do it on the phone.",
+    "Hmm. Okay.",
+    "The onboarding, the second step, people get lost there. I watched two people try it and they both stopped.",
+    "They didn't see the button to go on, it's too low down.",
+    "There's the bridge. Halfway.",
+    "Nearly at the café. No, keep going, a bit further.",
+    "It's quieter on this side of the river. Fewer bikes.",
+    "It's nice not having anything in my ears for once.",
+    "Back to the export. It should also put the binder's name at the top of the file.",
+    "Otherwise you can't tell which binder it came from when you open it later.",
+    "Funny how the simplest things take the longest. That should have been a day's work.",
+    "Okay. Thinking.",
+    "The weather's turning, I think. Those clouds.",
+    "The pricing page itself looks fine otherwise, I think. Clean.",
+    "Oh, I should ask Codex what it changed in the sync code last week, the release notes need it.",
+    "Somebody waved at me. No idea who that was.",
+    "Right. Thinking about the fair again. Two weeks.",
+    "The booth is small, so maybe one screen and the phone. That's enough.",
+    "I wonder what Sam thinks about the team plan. I'll hear soon enough.",
+    "Ha. Probably from the gym.",
+    "The coffee place on the corner does a good flat white. Might stop there on the way back.",
+    "The sun's properly out now.",
+    "Hmm, the calendar on the Mac, the week view cuts off the last day, Sunday's just not there.",
+    "That's been like that since the last update, I think.",
+    "Anyway, no rush on any of this. One at a time.",
+    "My legs are tired. Long way still.",
+    "The swans are back. Two of them.",
+    "The light is changing. Everything goes orange at this hour.",
+    "Okay, nearly done. Heading back now.",
+    "Right. Nearly home now. That was a good walk.",
+    "Lots to do. Okay."
+   ],
+   "items": [
+    {
+     "kind": "fix",
+     "from": [
+      "doesn't include the dates",
+      "none of the dates were in the file"
+     ],
+     "title": "Make the export include the dates on the to-dos",
+     "agents": [
+      "Claude Code · app"
+     ],
+     "handed": true
+    },
+    {
+     "kind": "fix",
+     "from": [
+      "way too dark to read",
+      "barely see it"
+     ],
+     "title": "Fix the widget's text being too dark to read in dark mode",
+     "agents": [
+      "Claude Code · app"
+     ],
+     "handed": true
+    },
+    {
+     "kind": "todo",
+     "from": [
+      "owe the landlord an answer",
+      "do that this week"
+     ],
+     "title": "Answer the landlord about renewing the lease",
+     "agents": [
+      "nobody",
+      "Kestrel",
+      "Pennant"
+     ],
+     "handed": false
+    },
+    {
+     "kind": "idea",
+     "from": [
+      "what if cards could snooze",
+      "really handy for things"
+     ],
+     "title": "Snooze cards until a day you choose",
+     "agents": [
+      "Claude Code · app"
+     ],
+     "handed": true
+    },
+    {
+     "kind": "fix",
+     "from": [
+      "teh instead of the",
+      "it's still there",
+      "Codex could fix that"
+     ],
+     "title": "Fix the typo in the pricing page's second paragraph",
+     "agents": [
+      "Codex · site"
+     ],
+     "mentioned": "Codex · site",
+     "handed": false
+    },
+    {
+     "kind": "todo",
+     "from": [
+      "book the car service"
+     ],
+     "title": "Book the car service for next week",
+     "agents": [
+      "Pennant",
+      "nobody"
+     ],
+     "handed": false
+    },
+    {
+     "kind": "todo",
+     "from": [
+      "draft the October one",
+      "mention the new widget"
+     ],
+     "title": "Draft the October newsletter from the changelog and the blog posts",
+     "agents": [
+      "Inkwell"
+     ],
+     "named": "Inkwell",
+     "handed": true
+    },
+    {
+     "kind": "fix",
+     "from": [
+      "the thing with the upload",
+      "It just hangs",
+      "with the screen recordings"
+     ],
+     "title": "Fix the upload hanging on big files",
+     "agents": [
+      "Claude Code · app"
+     ],
+     "handed": true
+    },
+    {
+     "kind": "todo",
+     "from": [
+      "compare what the other notes apps charge",
+      "main five or six"
+     ],
+     "title": "Compare what the other notes apps charge for teams",
+     "agents": [
+      "Grok Bot"
+     ],
+     "named": "Grok Bot",
+     "handed": true
+    },
+    {
+     "kind": "fix",
+     "from": [
+      "share sheet on the iPad",
+      "with a photo and with a link"
+     ],
+     "title": "Make Binders show in the iPad's share sheet",
+     "agents": [
+      "Claude Code · app"
+     ],
+     "handed": true
+    },
+    {
+     "kind": "todo",
+     "from": [
+      "print the badges"
+     ],
+     "title": "Print the badges for the booth before Friday",
+     "agents": [
+      "nobody"
+     ],
+     "handed": false
+    },
+    {
+     "kind": "idea",
+     "from": [
+      "short film",
+      "Show, don't tell"
+     ],
+     "title": "A short film on the home page of a walk turning into cards",
+     "agents": [
+      "Codex · site",
+      "Inkwell",
+      "nobody"
+     ],
+     "handed": true
+    },
+    {
+     "kind": "fix",
+     "from": [
+      "second step, people get lost",
+      "button to go on"
+     ],
+     "title": "Make the onboarding's second step clearer",
+     "agents": [
+      "Claude Code · app"
+     ],
+     "handed": true
+    },
+    {
+     "kind": "fix",
+     "from": [
+      "binder's name at the top",
+      "which binder it came from"
+     ],
+     "title": "Put the binder's name at the top of the export",
+     "agents": [
+      "Claude Code · app"
+     ],
+     "handed": true
+    },
+    {
+     "kind": "todo",
+     "from": [
+      "ask Codex what it changed"
+     ],
+     "title": "Write up what changed in the sync code last week",
+     "agents": [
+      "Codex · site"
+     ],
+     "named": "Codex · site",
+     "agent_field": "Codex",
+     "handed": true
+    },
+    {
+     "kind": "fix",
+     "from": [
+      "week view cuts off the last day",
+      "since the last update, I think"
+     ],
+     "title": "Fix the Mac calendar's week view cutting off Sunday",
+     "agents": [
+      "Claude Code · app"
+     ],
+     "handed": true
+    }
+   ],
+   "moments": [
+    "Binders, remind me to call the bank tomorrow morning.",
+    "I need to renew the domain, it lapses next month."
+   ],
+   "mentions": [],
+   "negatives": [
+    "three dogs",
+    "think better when I'm walking",
+    "airline's website",
+    "Not my problem",
+    "Hey Siri",
+    "bank app is so slow",
+    "new icon",
+    "heron",
+    "drop the free plan",
+    "keep it, that's how people find us",
+    "still not sure",
+    "decide that next week",
+    "Ducks",
+    "river's really high",
+    "search is fast now",
+    "bringing the banner",
+    "best part",
+    "bridge",
+    "Fewer bikes",
+    "simplest things take the longest",
+    "Those clouds",
+    "Two weeks",
+    "one screen and the phone",
+    "what Sam thinks",
+    "flat white",
+    "legs are tired",
+    "goes orange"
+   ],
+   "capture": true
+  }
+ ],
+ "calls": [
+  {
+   "id": "call-01",
+   "about": "his side of a call taken on a watch",
+   "segments": [
+    "Hey, how are you? Yeah, I'm on a walk.",
+    "Did you get the deck? Okay, can you send me the numbers by Friday?",
+    "Great. Talk to you later, bye."
+   ]
+  },
+  {
+   "id": "call-02",
+   "about": "showing someone the board, who doesn't answer out loud",
+   "segments": [
+    "So you open the board here. Do you see the cards?",
+    "You drag one to Ready, like this. Does that make sense?",
+    "Cool. And then the agent picks it up."
+   ]
+  },
+  {
+   "id": "call-03",
+   "about": "a voice message to someone, said out loud",
+   "segments": [
+    "Hi, it's me. Just wanted to say the venue is booked for Thursday.",
+    "Let me know if that works. Bye."
+   ]
+  }
+ ]
+}

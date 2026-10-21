@@ -15,6 +15,14 @@ final class NoteTemplateTests: XCTestCase {
         XCTAssertFalse(filled.contains("{{"))
     }
 
+    func testTodayIsTheLocalDateLateInTheEvening() {
+        // West of UTC, 11:30 PM is already tomorrow in UTC.
+        var components = DateComponents(year: 2026, month: 9, day: 28, hour: 23, minute: 30)
+        components.timeZone = .current
+        let date = Calendar.current.date(from: components)!
+        XCTAssertEqual(NoteTemplate(name: "Test", body: "[[{{today}}]]").filled(date: date, binder: "General"), "[[2026-09-28]]")
+    }
+
     func testBuiltInsHaveUniqueNamesAndStartWithATitle() {
         let names = NoteTemplate.builtIn.map(\.name)
         XCTAssertEqual(Set(names).count, names.count)

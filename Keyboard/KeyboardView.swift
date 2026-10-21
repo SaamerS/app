@@ -2,23 +2,26 @@ import BindersKit
 import SwiftUI
 import UIKit
 
-/// A typing keyboard with a mic along the top. While you dictate, the keys make way for what's heard and a stop key.
+/// A typing keyboard with a mic along the top. While you dictate, the keys make way for what's heard and a stop key. The
+/// keys look like the system's; what's Binders' own (the strip, the mic, dictating) wears the palette.
 struct KeyboardView: View {
     let model: KeyboardModel
 
     var body: some View {
-        if model.isDictating {
-            DictationPanel(model: model)
-        } else {
-            VStack(spacing: 0) {
-                Strip(model: model)
-                TypingKeys(model: model)
+        Group {
+            if model.isDictating {
+                DictationPanel(model: model)
+            } else {
+                VStack(spacing: 0) {
+                    Strip(model: model)
+                    TypingKeys(model: model)
+                }
             }
         }
+        // Undo and Cancel in the brand's colour rather than iOS blue.
+        .tint(Palette.accentText)
     }
 }
-
-private let accent = Color(red: 0.376, green: 0.298, blue: 0.957)
 
 // MARK: - The strip above the keys
 
@@ -35,11 +38,16 @@ private struct Strip: View {
             if model.note == nil, model.state.phase != .failed, !model.suggestions.isEmpty {
                 Suggestions(model: model)
             } else {
-                Text(message)
-                    .font(.caption)
-                    .foregroundStyle(model.state.phase == .failed ? .orange : .secondary)
-                    .lineLimit(2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                Group {
+                    if isProblem {
+                        Label(message, systemImage: "exclamationmark.circle").foregroundStyle(Palette.ink)
+                    } else {
+                        Text(message).foregroundStyle(Palette.muted)
+                    }
+                }
+                .font(.caption)
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             Button {
                 UIDevice.current.playInputClick()
@@ -49,7 +57,7 @@ private struct Strip: View {
                     .font(.system(size: 17, weight: .semibold))
                     .foregroundStyle(.white)
                     .frame(width: 58, height: 34)
-                    .background(Capsule().fill(accent))
+                    .background(Capsule().fill(Palette.accent))
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Dictate")
@@ -58,6 +66,9 @@ private struct Strip: View {
         .padding(.horizontal, 10)
         .frame(height: 46)
     }
+
+    /// What went wrong with the last dictation, as the app said it: a problem, never orange or red.
+    private var isProblem: Bool { model.note == nil && model.state.phase == .failed }
 
     private var message: String {
         if let note = model.note { return note }
@@ -106,8 +117,8 @@ private struct DictationPanel: View {
     var body: some View {
         VStack(spacing: 8) {
             Text(status)
-                .font(.body)
-                .foregroundStyle(isWords ? .primary : .secondary)
+                .font(isWords ? Typeface.quote() : .body)
+                .foregroundStyle(isWords ? Palette.ink : Palette.muted)
                 .multilineTextAlignment(.center)
                 .lineLimit(4)
                 .truncationMode(.head)
@@ -134,31 +145,38 @@ private struct DictationPanel: View {
     private var isWords: Bool { model.state.phase == .listening && !model.state.text.isEmpty }
 
     private var status: String {
-        if model.starting { return "Starting…" }
+        if model.starting { return "Starting the microphone…" }
         switch model.state.phase {
         case .listening: return model.state.text.isEmpty ? "Listening…" : model.state.text
-        case .cleaning: return "Cleaning up…"
+        case .cleaning: return "Cleaning up what you said…"
         default: return ""
         }
     }
 }
 
-/// The big round key while dictating: stop, or wait.
+/// The big round key while dictating: stop, or wait. Red only while the microphone is live, the brand's colour while it
+/// starts or cleans up. Its ring moves only with your voice: it grows with how loud you are, or under Reduce Motion
+/// brightens instead.
 private struct StopKey: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let phase: KeyboardBridge.Phase
     let level: Double
     let starting: Bool
     let action: () -> Void
 
+    private var live: Bool { phase == .listening && !starting }
+    private var ring: CGFloat { reduceMotion ? 96 : 72 + 24 * level }
+
     var body: some View {
         Button(action: action) {
             ZStack {
                 Circle()
-                    .fill(accent.opacity(0.22))
-                    .frame(width: 72 + 24 * level, height: 72 + 24 * level)
+                    .fill(Palette.live.opacity(live ? (reduceMotion ? 0.1 + 0.3 * level : 0.22) : 0))
+                    .frame(width: ring, height: ring)
                     .animation(.easeOut(duration: 0.1), value: level)
-                Circle().fill(accent).frame(width: 72, height: 72)
-                if phase == .listening, !starting {
+                Circle().fill(live ? Palette.live : Palette.accent).frame(width: 72, height: 72)
+                    .animation(.easeInOut(duration: 0.2), value: live)
+                if live {
                     RoundedRectangle(cornerRadius: 5).fill(.white).frame(width: 22, height: 22)
                 } else {
                     ProgressView().tint(.white)

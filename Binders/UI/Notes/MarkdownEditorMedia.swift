@@ -131,7 +131,7 @@ extension MarkdownTextView {
         if let url, url.isFileURL {
             menu.addItem(EmbedMenuItem("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) })
         }
-        if !isVideo, let url {
+        if !isVideo, let url, url.isFileURL {
             menu.addItem(EmbedMenuItem("Copy Image") {
                 guard let image = NSImage(contentsOf: url) else { return }
                 NSPasteboard.general.clearContents()
@@ -356,12 +356,16 @@ extension MarkdownLayoutManager {
             guard drawn.insert(paragraph.location).inserted, let frame = embedFrame(atParagraph: paragraph.location) else { return }
             let rect = frame.offsetBy(dx: origin.x, dy: origin.y)
             let selected = focused && selection.map { NSIntersectionRange($0, paragraph).length > 0 || NSLocationInRange($0.location, paragraph) } == true
-            MainActor.assumeIsolated { Self.draw(box, in: rect, selected: selected) }
+            MainActor.assumeIsolated {
+                // The ring round a selected picture: the accent, or the binder's colour on its pages.
+                let ring = (firstTextView as? MarkdownTextView)?.styler.accent ?? BindersTheme.NS.accent
+                Self.draw(box, in: rect, selected: selected, ring: ring)
+            }
         }
     }
 
     @MainActor
-    private static func draw(_ box: EmbedBox, in rect: NSRect, selected: Bool) {
+    private static func draw(_ box: EmbedBox, in rect: NSRect, selected: Bool, ring ringColor: NSColor) {
         let shape = NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8)
         let state = Attachments.url(for: box.source).map { AttachmentPreviews.shared.state(of: $0) } ?? .missing
         switch state {
@@ -382,12 +386,12 @@ extension MarkdownLayoutManager {
         case .missing:
             NSColor.labelColor.withAlphaComponent(0.05).setFill()
             shape.fill()
-            drawSymbol("exclamationmark.triangle", in: rect, label: "Can't find \((box.source as NSString).lastPathComponent)")
+            drawSymbol(BindersTheme.problemSymbol, in: rect, label: "Can't find \((box.source as NSString).lastPathComponent)")
         }
         if selected {
             let ring = NSBezierPath(roundedRect: rect.insetBy(dx: -2, dy: -2), xRadius: 10, yRadius: 10)
             ring.lineWidth = 3
-            NSColor.controlAccentColor.setStroke()
+            ringColor.setStroke()
             ring.stroke()
         }
     }

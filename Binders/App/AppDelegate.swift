@@ -6,6 +6,9 @@ import BindersKit
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var controller: DictationController?
     private var statusItem: StatusItemController?
+    /// Links and files that came before launching finished, such as the binders://apply of an agent's write that launched
+    /// Binders: opened once it's ready.
+    private var waiting: [URL] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Two copies would both answer fn, and an older build would migrate the database back to its own schema.
@@ -18,10 +21,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             existing.activate()
             exit(0)
         }
-        NSApp.mainMenu = MainMenu.build()
+        MainMenu.install()
+        // Once: preferences an earlier test build saved under Auto mode's old name, under today's.
+        EarlierSpellings.moveDefaults(in: AppDefaults.store)
+        // Tidying the library waits until Binders is open and settled, off launch's path.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { MainActor.assumeIsolated { LaunchHousekeeping.run() } }
         let controller = DictationController()
         self.controller = controller
+        // A save you ask for while the library is out says why, instead of seeming to work.
+        Store.shared.onRefused = { [weak controller] in
+            controller?.flowBar.toast(Store.unavailableMessage, symbol: "exclamationmark.triangle", duration: 7)
+        }
         HubWindowController.shared.controller = controller
+        CardWindows.shared.controller = controller
         statusItem = StatusItemController(controller: controller)
         MacNotifications.shared.controller = controller
         MacNotifications.shared.install()
@@ -29,11 +41,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if controller.settings.phoneLink { controller.link.start() }
         controller.board.start()
 
-        if !AppSettings.shared.hasCompletedSetup || !Permissions.accessibility || Permissions.microphone != .authorized {
+        // The library didn't open: the window comes up with its banner, so it's seen before anything seems to be saved.
+        if !AppSettings.shared.hasCompletedSetup || !Permissions.accessibility || Permissions.microphone != .authorized || Store.shared.isFallback {
             HubWindowController.shared.show(section: .home)
         }
         // Notes left open in their own windows, or folded into bubbles.
         NotePopouts.shared.restore()
+        let early = waiting
+        waiting = []
+        if !early.isEmpty { application(NSApp, open: early) }
     }
 
     /// Whether a running Binders is the app proper, from its launch arguments. When they can't be read, it counts.
@@ -54,10 +70,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let controller else { return .terminateNow }
         let recording = controller.meetings.isRecording
         let freeModel = AppSettings.shared.managesModelMemory
-        guard recording || freeModel else { return .terminateNow }
+        // The decision model: a measure stops, and a pass under way finishes (3 s at most) and takes its marker with it,
+        // so a quit, a logout or an update never starts the model failed at the next launch.
+        let decisionModel = DecisionModels.shared.backend != nil
+        guard recording || freeModel || decisionModel else { return .terminateNow }
         Task { @MainActor in
+            async let decided: Void = DecisionModels.shared.prepareForQuit(within: .seconds(3))
             if recording { await controller.meetings.prepareForTermination() }
             if freeModel { await controller.unloadLLM() }
+            await decided
             NSApp.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
@@ -69,7 +90,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
-        guard let controller else { return }
+        guard let controller else { return waiting += urls }
         for url in urls {
             // A Binders file from the iPhone (AirDrop, Files, Mail), or a binders:// link.
             if url.isFileURL, url.pathExtension.lowercased() == BindersTransfer.fileExtension {
@@ -78,6 +99,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 URLCommands.handle(url, controller: controller)
             }
         }
+    }
+}
+
+/// Whole-library tidying: writing past its keep-by, unused attachments, old audio, the history of deleted notes. In the app
+/// it runs a little after launch, once this copy is the one running; self-tests run it first, as they always have.
+@MainActor
+enum LaunchHousekeeping {
+    static func run() {
+        let settings = AppSettings.shared
+        Store.shared.pruneWriting(olderThanDays: settings.captureRetentionDays)
+        Store.shared.cleanupWriting()
+        NoteHistory.forgetDeletedNotes()
+        Attachments.trashUnused()
+        Store.shared.pruneOldAudio(olderThanDays: settings.audioRetentionDays)
     }
 }
 
@@ -109,8 +144,16 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         case .processing: symbol = "ellipsis.circle"
         }
         if let symbol {
-            let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Binders")
-            image?.isTemplate = true
+            var image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Binders")
+            var micLive = controller.meetings.isRecording
+            if case .recording = controller.phase { micLive = true }
+            if micLive {
+                // Red while the microphone is live, and only then.
+                image = image?.withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [BindersTheme.NS.live]))
+                image?.isTemplate = false
+            } else {
+                image?.isTemplate = true
+            }
             item.button?.image = image
         } else {
             item.button?.image = BindersTheme.binderGlyph(capturing: controller.capture.isOn)
@@ -130,8 +173,25 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         return "Hold \(settings.hotkeys.dictation.displayString()) to dictate"
     }
 
+    /// While the library didn't open: the line the menu starts with, which opens what to do. Nil otherwise. It needs you,
+    /// so its glyph, the problem style's, is amber.
+    static func libraryLine(target: AnyObject?) -> NSMenuItem? {
+        guard Store.shared.isFallback else { return nil }
+        let line = NSMenuItem(title: Store.unavailableMessage, action: #selector(StatusItemController.openLibraryHelp), keyEquivalent: "")
+        line.target = target
+        line.image = NSImage(systemSymbolName: BindersTheme.problemSymbol, accessibilityDescription: "Warning")?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [BindersTheme.NS.needsYou]))
+        line.toolTip = "What to do, on binders.io"
+        return line
+    }
+
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
+        // First, before anything that would seem to work.
+        if let line = Self.libraryLine(target: self) {
+            menu.addItem(line)
+            menu.addItem(.separator())
+        }
         let status = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
         status.isEnabled = false
         menu.addItem(status)
@@ -205,6 +265,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func pasteLast() { Task { await controller.pasteLast() } }
     @objc private func toggleAI() { AppSettings.shared.aiFormatting.toggle() }
     @objc private func quit() { NSApp.terminate(nil) }
+    @objc private func openLibraryHelp() { NSWorkspace.shared.open(Store.unavailableHelp) }
 
     @objc private func copyTranscript(_ sender: NSMenuItem) {
         guard let text = sender.representedObject as? String else { return }
@@ -214,6 +275,12 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
 @MainActor
 enum MainMenu {
+    /// The menu bar, with its Window menu as the app's: AppKit then lists the open windows in it, each card by its title.
+    static func install() {
+        NSApp.mainMenu = build()
+        NSApp.windowsMenu = NSApp.mainMenu?.items.first { $0.title == "Window" }?.submenu
+    }
+
     static func build() -> NSMenu {
         let main = NSMenu()
 
@@ -285,6 +352,8 @@ enum MainMenu {
         let windows = NSMenu(title: "Window")
         windows.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         windows.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windows.addItem(.separator())
+        windows.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
         main.addItem(submenu: windows, title: "Window")
         return main
     }

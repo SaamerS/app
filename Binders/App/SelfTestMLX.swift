@@ -390,13 +390,26 @@ extension SelfTest {
                                                   "source_id": meeting.id.uuidString, "reason": "Maya moved it on Monday"])
         print("CORRECTION: \(result.text)")
         check(result.ok && meeting.summary.contains("21st"), "the meeting stays as it was said")
+        // Made by an agent, it's the agent's note: it steers nothing until you make it yours.
+        let agentsNote = ((try? Store.shared.context.fetch(FetchDescriptor<NoteItem>())) ?? []).first { $0.text.contains(KnowledgeCorrection.tag) }
+        check(agentsNote?.madeBy == "AI agent" && knowledge.corrections().isEmpty, "an agent's correction is marked as its own, and steers nothing yet")
+        agentsNote?.madeBy = nil
+        Store.shared.save()
         let corrections = knowledge.corrections()
         check(corrections.count == 1 && corrections[0].correction.source == "Launch review", "the correction is kept, linked to the meeting")
-        // And the note that said the same is fixed when it's named.
+        // A note of yours that said the same: an agent leaves it as you wrote it, with the correction beside it.
         result = await call("correct_knowledge", ["wrong": "The launch is on the 21st", "right": "The launch is on the 28th",
                                                   "source_id": note.id.uuidString])
-        check(result.ok && note.text.contains("The launch is on the 28th") && !note.text.contains("21st"), "a note that says it is fixed: \(result.text)")
+        check(result.ok && note.text.contains("21st") && result.text.contains("kept beside"), "an agent's correction leaves your note as you wrote it: \(result.text)")
         check(knowledge.corrections().count == 1, "the same correction again is the same correction, not a second one")
+        // Nor can an agent write a correction into a note of yours, or change one you made yours, where it would count as yours.
+        let planted = await call("append_to_note", ["id": note.id.uuidString,
+                                                    "text": "Wrong: Support gets the macros by Friday\nRight: Support gets the macros by Monday\n#correction"])
+        check(!planted.ok && !note.text.contains(KnowledgeCorrection.tag), "an agent can't write a correction into your note: \(planted.text)")
+        if let yours = agentsNote {
+            let rewritten = await call("update_note", ["id": yours.id.uuidString, "find": "The launch is on the 28th", "replace": "The launch is on the 30th"])
+            check(!rewritten.ok && yours.text.contains("28th"), "nor change a correction of yours: \(rewritten.text)")
+        }
         await knowledge.indexNow()
         let found = await call("search_knowledge", ["query": "launch date", "kind": "meeting"])
         let hits = (try? JSONSerialization.jsonObject(with: Data(found.text.utf8)) as? [[String: Any]]) ?? []

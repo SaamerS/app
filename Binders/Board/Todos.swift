@@ -38,7 +38,8 @@ enum Todos {
                 guard let meeting = (try? context.fetch(FetchDescriptor<MeetingRecord>(predicate: #Predicate { $0.id == wanted })))?.first,
                       let line = task(in: meeting.summary) else { return nil }
                 return TodoItem(id: id, text: line.text, owner: owner(line, meeting.isTeamCopy ? meeting.teamAuthorName : nil), done: line.done,
-                                due: nil, binderID: meeting.binderID, sourceKind: "meeting", sourceID: meeting.id, sourceTitle: meeting.title)
+                                due: nil, binderID: meeting.binderID, sourceKind: meeting.isConversation ? "capture" : "meeting", sourceID: meeting.id,
+                                sourceTitle: meeting.title)
             case .digest, .note:
                 guard let note = (try? context.fetch(FetchDescriptor<NoteItem>(predicate: #Predicate { $0.id == wanted })))?.first,
                       let line = task(in: reference.place == .digest ? note.digest : note.text) else { return nil }

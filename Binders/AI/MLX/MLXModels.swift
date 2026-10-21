@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import BindersKit
 
 /// Models that run inside Binders with MLX, on Apple silicon, for Macs where Ollama isn't allowed or wanted. They're
 /// downloaded from Hugging Face (or a company mirror of it) into Binders' own folder, or used from a folder IT provides.
@@ -99,19 +100,39 @@ final class MLXModels {
     }
 
     nonisolated static func size(of folder: URL) -> Int64 {
-        let files = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: [.fileSizeKey])
+        let files = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: nil)
         var total: Int64 = 0
         while let file = files?.nextObject() as? URL {
-            total += Int64((try? file.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+            total += fileSize(file) ?? 0
         }
         return total
     }
 
+    /// A file's size with a symlink followed to its file, as a load reads it: FileManager's attributes and a URL's
+    /// fileSize give a link's own few bytes, so a Hugging Face cache snapshot (every file a link) or weights linked from
+    /// another disk would count as nothing. Nil when it isn't there or isn't a file.
+    nonisolated static func fileSize(_ file: URL) -> Int64? {
+        var info = stat()
+        guard stat(file.path, &info) == 0, info.st_mode & S_IFMT == S_IFREG else { return nil }
+        return Int64(info.st_size)
+    }
+
     // MARK: Downloading
 
+    /// Why a name that isn't a Hugging Face model's isn't downloaded (ModelNames.isRepoName).
+    nonisolated static let notAName = "Type the model's Hugging Face name, its owner, a slash and its name, such as mlx-community/Qwen3.5-9B-MLX-4bit."
+
+    /// Why a Tev1 name isn't downloaded, for both menus: the language model's and the decision model's.
+    nonisolated static let tev1Refused = "Binders doesn't download Tev1 0.8B until Together publishes its weights' licence: choose Tev1 0.8B as the decision model, and copy its folder, \(MLXDecisionBackend.tev1FolderName), into Binders' Models folder."
+
     /// Fetches a model's files: its weights, configuration and tokenizer, not its pictures and READMEs. Files already
-    /// fetched in full are kept, so a download that stopped carries on where it was.
+    /// fetched in full are kept, so a download that stopped carries on where it was. Never Tev1 0.8B, under any name
+    /// (ModelNames.isTev1), whichever menu asks: Binders doesn't download it until its weights' licence is published.
     func download(_ id: String) {
+        if let refusal = MLXDownload.refusal(id) {
+            failures[id] = refusal
+            return
+        }
         guard tasks[id] == nil else { return }
         failures[id] = nil
         progress[id] = 0
@@ -149,9 +170,12 @@ enum MLXDownloadError: LocalizedError {
     case notFound(String)
     case refused(Int, String)
     case nothingToFetch(String)
+    /// Tev1 0.8B, or not a model's name: MLXDownload.refusal's line.
+    case name(String)
 
     var errorDescription: String? {
         switch self {
+        case .name(let line): line
         case .notFound(let id): "There's no model called “\(id)” there."
         case .refused(let status, let id): status == 401 || status == 403
             ? "“\(id)” needs a Hugging Face access token, or accepting its licence on huggingface.co."
@@ -182,7 +206,17 @@ struct MLXDownload: Sendable {
         return request
     }
 
+    /// Why this name isn't fetched, or nil: Tev1 0.8B under any name, or anything but a Hugging Face model's name, which
+    /// goes into the address as it is. Held here, in the one fetcher every path uses (the self-test's too), and by
+    /// MLXModels.download before a download starts.
+    static func refusal(_ id: String) -> String? {
+        if ModelNames.isTev1(id) { return MLXModels.tev1Refused }
+        if !ModelNames.isRepoName(id) { return MLXModels.notAName }
+        return nil
+    }
+
     func run() async throws {
+        if let refusal = Self.refusal(id) { throw MLXDownloadError.name(refusal) }
         let base = endpoint.hasSuffix("/") ? String(endpoint.dropLast()) : endpoint
         guard let listURL = URL(string: "\(base)/api/models/\(id)/tree/main?recursive=1") else { throw MLXDownloadError.notFound(id) }
         let (data, response) = try await URLSession.shared.data(for: request(listURL))

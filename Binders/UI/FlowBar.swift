@@ -18,7 +18,12 @@ final class FlowBarModel {
     var toastSymbol = "checkmark"
     /// Set while a meeting is being recorded; the bar then rests as a small recording pill.
     var meetingStartedAt: Date?
+    /// Whether the meeting being recorded hears speech now, asked by the pill's dot, which moves only then.
+    @ObservationIgnored var meetingHearsSpeech: @MainActor () -> Bool = { false }
     var promptText = ""
+    /// The prompt's button and its symbol: "Take notes" for a meeting, "Give to Codex" or "Stop" for a card.
+    var promptButton = FlowBarController.takeNotes
+    var promptSymbol = FlowBarController.meetingSymbol
 
     func push(_ level: Float) {
         guard display == .recording else { return }
@@ -41,7 +46,9 @@ struct FlowBarActions {
 final class FlowBarController {
     static let size = NSSize(width: 520, height: 150)
     private static let meetingSize = NSSize(width: 300, height: 50)
-    private static let promptSize = NSSize(width: 540, height: 56)
+    /// Tall enough for two lines of the prompt's text: a card's start names the agent before the title, and the text may
+    /// wrap rather than be cut.
+    private static let promptSize = NSSize(width: 540, height: 72)
 
     let model = FlowBarModel()
     var onStop: (() -> Void)?
@@ -111,26 +118,41 @@ final class FlowBarController {
         schedule(after: duration) { [weak self] in self?.hide() }
     }
 
-    /// Offers an action (e.g. "Zoom is using your mic — Take notes") without interrupting dictation.
-    func showPrompt(_ text: String, onAccept: @escaping () -> Void) {
-        guard [.hidden, .idle].contains(model.display) else { return }
+    nonisolated static let takeNotes = "Take notes"
+    nonisolated static let meetingSymbol = "person.2.wave.2"
+
+    /// Offers an action (e.g. "Zoom is using your mic — Take notes") without interrupting dictation: only over an idle
+    /// bar, for 20 seconds. `button` and `symbol` name the action ("Give to Codex", "Stop"). False when it wasn't shown.
+    @discardableResult
+    func showPrompt(_ text: String, button: String = FlowBarController.takeNotes, symbol: String = FlowBarController.meetingSymbol,
+                    onAccept: @escaping () -> Void) -> Bool {
+        guard [.hidden, .idle].contains(model.display) else { return false }
         promptAction = onAccept
         model.promptText = text
+        model.promptButton = button
+        model.promptSymbol = symbol
         model.display = .prompt
         panel.ignoresMouseEvents = false
         present(size: Self.promptSize)
         schedule(after: 20) { [weak self] in
             if self?.model.display == .prompt { self?.hide() }
         }
+        return true
     }
 
-    func meetingStarted(at date: Date) {
+    /// For the self-tests: the prompt's button, tapped.
+    func tapPromptButton() { acceptPrompt() }
+
+    /// The bar rests as a recording pill. `hearsSpeech` says whether the meeting hears speech now, for its dot.
+    func meetingStarted(at date: Date, hearsSpeech: @escaping @MainActor () -> Bool = { false }) {
         model.meetingStartedAt = date
+        model.meetingHearsSpeech = hearsSpeech
         if [.hidden, .idle, .prompt].contains(model.display) { hide() }
     }
 
     func meetingEnded() {
         model.meetingStartedAt = nil
+        model.meetingHearsSpeech = { false }
         if model.display == .meeting { hide() }
     }
 
@@ -180,9 +202,16 @@ final class FlowBarController {
 struct FlowBarView: View {
     let model: FlowBarModel
     let actions: FlowBarActions
+    @ReducedMotion private var reduceMotion
 
+    /// Command Mode in the accent's words, dictation in ink. The bar is dark over any app, so these are the dark values.
     private var tint: Color {
-        model.mode == .command ? Color(red: 0.74, green: 0.56, blue: 1.0) : .white
+        model.mode == .command ? BindersTheme.accentText : BindersTheme.ink
+    }
+
+    /// Failures all wear the problem style's glyph, whichever one the caller named.
+    private var toastSymbol: String {
+        model.toastSymbol == "exclamationmark.triangle" ? BindersTheme.problemSymbol : model.toastSymbol
     }
 
     var body: some View {
@@ -204,7 +233,8 @@ struct FlowBarView: View {
         }
         .padding(.bottom, 6)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-        .animation(.spring(duration: 0.22), value: model.display)
+        // A short spring between states; a crossfade under Reduce Motion.
+        .animation(BindersTheme.motion(.spring(duration: 0.22), reduced: reduceMotion), value: model.display)
         .environment(\.colorScheme, .dark)
     }
 
@@ -228,7 +258,8 @@ struct FlowBarView: View {
                 if model.mode == .command {
                     Text("Command").font(.system(size: 11, weight: .semibold)).foregroundStyle(tint)
                 }
-                WaveformView(levels: model.levels, tint: tint)
+                // Red: the microphone is live while the bars move.
+                WaveformView(levels: model.levels, tint: BindersTheme.live)
                 if model.handsFree { circleButton("stop.fill", prominent: true, action: actions.stop) }
             }
             .padding(.horizontal, model.handsFree ? 6 : 14)
@@ -246,7 +277,9 @@ struct FlowBarView: View {
             .background(capsuleBackground)
         case .toast:
             HStack(spacing: 8) {
-                Image(systemName: model.toastSymbol).font(.system(size: 12, weight: .semibold))
+                // An agent's doing wears its sparkle in lavender, here as everywhere.
+                Image(systemName: toastSymbol).font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(toastSymbol == BindersTheme.agentSymbol ? BindersTheme.agent : .white)
                 Text(model.toastText).font(.system(size: 12, weight: .medium)).lineLimit(2)
             }
             .foregroundStyle(.white)
@@ -256,7 +289,7 @@ struct FlowBarView: View {
             .frame(maxWidth: 500)
         case .meeting:
             HStack(spacing: 10) {
-                PulsingDot()
+                RecordingDot(hearing: model.meetingHearsSpeech)
                 if let start = model.meetingStartedAt {
                     TimelineView(.periodic(from: .now, by: 1)) { context in
                         Text(TranscriptFormatter.timestamp(context.date.timeIntervalSince(start)))
@@ -281,10 +314,12 @@ struct FlowBarView: View {
             .background(capsuleBackground)
         case .prompt:
             HStack(spacing: 10) {
-                Image(systemName: "person.2.wave.2").font(.system(size: 12, weight: .semibold)).foregroundStyle(.white)
-                Text(model.promptText).font(.system(size: 12, weight: .medium)).foregroundStyle(.white).lineLimit(1)
+                Image(systemName: model.promptSymbol).font(.system(size: 12, weight: .semibold)).foregroundStyle(.white)
+                // Two lines at most, as the toast: a start's line or a Give to's question isn't cut at one.
+                Text(model.promptText).font(.system(size: 12, weight: .medium)).foregroundStyle(.white).lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
                 Button(action: actions.acceptPrompt) {
-                    Text("Take notes")
+                    Text(model.promptButton)
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.black)
                         .padding(.horizontal, 10)
@@ -296,7 +331,8 @@ struct FlowBarView: View {
             }
             .padding(.leading, 14)
             .padding(.trailing, 6)
-            .frame(height: 38)
+            .padding(.vertical, 6)
+            .frame(minHeight: 38)
             .background(capsuleBackground)
         }
     }
@@ -320,41 +356,69 @@ struct FlowBarView: View {
     }
 }
 
+/// The dictation's level, the listening glyph: red bars that move only while speech is heard, flat and still below the
+/// level the app counts as silence. Under Reduce Motion the bars hold one still shape and fade up while speech is heard.
 struct WaveformView: View {
     let levels: [Float]
     let tint: Color
+    @ReducedMotion private var reduceMotion
+
+    /// What the app counts as silence (`AudioMath.isSilent`): quieter than this, a bar lies flat.
+    static let speechFloorDB: Float = -52
 
     var body: some View {
+        let hearing = Self.hearsSpeech(levels)
         HStack(spacing: 2.5) {
             ForEach(levels.indices, id: \.self) { index in
-                Capsule().fill(tint).frame(width: 3, height: height(levels[index]))
+                Capsule().fill(tint).frame(width: 3, height: reduceMotion ? Self.stillHeight(index) : Self.height(levels[index]))
             }
         }
         .frame(height: 26)
-        .animation(.linear(duration: 0.08), value: levels)
+        .animation(reduceMotion ? nil : .linear(duration: 0.08), value: levels)
+        .opacity(reduceMotion && !hearing ? 0.4 : 1)
+        .animation(.easeInOut(duration: 0.25), value: hearing)
     }
 
-    private func height(_ level: Float) -> CGFloat {
-        let db = 20 * log10(max(level, 1e-5))
+    /// A bar's height for a level: flat below the speech floor, up to full height at -15 dB.
+    static func height(_ level: Float) -> CGFloat {
+        let db = AudioMath.decibels(level)
+        guard db > speechFloorDB else { return 3 }
         let normalized = min(max((db + 55) / 40, 0), 1)
         return 3 + CGFloat(normalized) * 21
     }
+
+    /// Speech in the last few hundred milliseconds of levels (about 20 chunks), so a pause between words isn't silence.
+    static func hearsSpeech(_ levels: [Float]) -> Bool {
+        levels.suffix(20).contains { AudioMath.decibels($0) > speechFloorDB }
+    }
+
+    /// Under Reduce Motion: a still, gentle wave that doesn't follow the level.
+    static func stillHeight(_ index: Int) -> CGFloat {
+        6 + 8 * CGFloat(abs(sin(Double(index) * 0.55)))
+    }
 }
 
+/// Three dots while the words are written down: a wave across them, or three still dots under Reduce Motion.
 struct ProcessingDots: View {
     let tint: Color
+    @ReducedMotion private var reduceMotion
 
     var body: some View {
-        TimelineView(.animation) { timeline in
+        TimelineView(.animation(minimumInterval: nil, paused: reduceMotion)) { timeline in
             let t = timeline.date.timeIntervalSinceReferenceDate
             HStack(spacing: 5) {
                 ForEach(0..<3, id: \.self) { index in
                     Circle()
                         .fill(tint)
                         .frame(width: 6, height: 6)
-                        .opacity(0.3 + 0.7 * max(0, sin(t * 5 - Double(index) * 0.9)))
+                        .opacity(Self.opacity(index: index, at: t, reduceMotion: reduceMotion))
                 }
             }
         }
+    }
+
+    /// A dot's opacity at a moment: the wave, or still under Reduce Motion.
+    static func opacity(index: Int, at time: TimeInterval, reduceMotion: Bool) -> Double {
+        reduceMotion ? 0.75 : 0.3 + 0.7 * max(0, sin(time * 5 - Double(index) * 0.9))
     }
 }

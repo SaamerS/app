@@ -343,6 +343,17 @@ public struct MeetingTemplate: Identifiable, Hashable, Sendable {
         ## People mentioned
         """)
 
+    /// A capture in which only you spoke, read for what you said first (lane Y2): the conversation's sections without
+    /// Promises, whose to-dos the reading made. Not in `all`, and never looked up by id: only
+    /// ConversationPrompts.summarySystemPrompt(solo:) reads it, and the record stays a conversation.
+    public static let thinkingAloud = MeetingTemplate(id: "thinking-aloud", name: "Thinking out loud", sections: """
+        ## Summary
+        One to three sentences on what they were thinking about.
+        ## Decisions
+        ## Ideas
+        ## People mentioned
+        """)
+
     public static let all: [MeetingTemplate] = [.general, .oneOnOne, .standup, .sales, .interview, .lecture]
 
     public static func template(id: String) -> MeetingTemplate {

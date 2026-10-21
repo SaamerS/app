@@ -38,6 +38,9 @@ final class DictationController {
     @ObservationIgnored private var processingID: UUID?
     @ObservationIgnored private var editObserver: EditObserver?
     @ObservationIgnored private var lastWarmUp = Date.distantPast
+    /// For the self-tests: what would be pasted is handed here instead, so a test never types into the app in front or
+    /// touches the clipboard.
+    @ObservationIgnored var pasteStandIn: ((String) -> Void)?
     @ObservationIgnored private(set) lazy var meetings = MeetingService(speech: speech, flowBar: flowBar)
     /// Conversations the iPhone heard during the day, written up as they arrive.
     @ObservationIgnored private(set) lazy var conversations: ConversationService = {
@@ -46,6 +49,10 @@ final class DictationController {
         meetings.conversations = conversations
         return conversations
     }()
+    /// What you said to yourself near your iPhone, acted on or offered.
+    @ObservationIgnored private(set) lazy var moments = MomentService(controller: self)
+    /// Where new cards and to-dos go, and the agent whose work each is.
+    @ObservationIgnored private(set) lazy var router = CardRouter(controller: self)
     /// All-day capture on this Mac: conversations heard through the day.
     @ObservationIgnored private(set) lazy var allDay = AllDayCaptureService(controller: self)
     @ObservationIgnored private(set) lazy var knowledge = KnowledgeService()
@@ -56,8 +63,12 @@ final class DictationController {
     @ObservationIgnored private(set) lazy var board: BoardService = {
         let board = BoardService()
         board.commitments = commitments
+        board.dispatcher = agents
+        agents.board = board
         return board
     }()
+    /// Wakes the agents cards are meant for (Settings → Agents).
+    @ObservationIgnored private(set) lazy var agents = AgentDispatcher(registry: .shared)
     /// Binders as a server for paired phones; started by the app when the setting is on.
     @ObservationIgnored private(set) lazy var link = LinkServer(controller: self)
 
@@ -72,15 +83,18 @@ final class DictationController {
 
     func start() {
         hotkeys.start()
+        // The decision model's identity and bands, worked out in the background a little after launch.
+        DecisionModels.shared.checkSoon()
         speech.activate(settings.speechModel, download: true)
         flowBar.idleVisible = settings.showFlowBarWhenIdle
         if !settings.managesModelMemory { warmUpLLM(force: true) }
-        Store.shared.pruneOldAudio(olderThanDays: settings.audioRetentionDays)
+        // Old audio goes with the rest of launch's tidying, a little after (LaunchHousekeeping), then every 6 hours.
         Timer.scheduledTimer(withTimeInterval: 6 * 3_600, repeats: true) { _ in
             MainActor.assumeIsolated {
                 Store.shared.pruneOldAudio(olderThanDays: AppSettings.shared.audioRetentionDays)
                 Store.shared.pruneWriting(olderThanDays: AppSettings.shared.captureRetentionDays)
                 Store.shared.purgeTrivialConversations()
+                AgentDispatcher.pruneLogs()
             }
         }
         meetings.startMonitoring()
@@ -88,6 +102,7 @@ final class DictationController {
         allDay.start()
         capture.afterCommit = { [weak self] record in self?.commitments.enqueue(record) }
         AutomationService.shared.notify = { [weak self] text, symbol in self?.flowBar.toast(text, symbol: symbol, duration: 5) }
+        agents.notify = { [weak self] text, symbol in self?.flowBar.toast(text, symbol: symbol, duration: 5) }
         knowledge.isAppBusy = { [weak self] in
             guard let self else { return false }
             return self.phase != .idle || !self.meetings.busyMeetingIDs.isEmpty
@@ -135,6 +150,8 @@ final class DictationController {
             return
         }
         let mode: SessionMode = requestedMode == .command && !settings.commandModeEnabled ? .dictation : requestedMode
+        // You're about to speak: an answer still being read aloud stops, so the microphone doesn't hear it.
+        AnswerSpeaker.shared.stop()
 
         switch Permissions.microphone {
         case .authorized:
@@ -223,11 +240,13 @@ final class DictationController {
         }
     }
 
-    /// Esc while transcribing or formatting: drop the result instead of pasting it later.
+    /// Esc while transcribing or formatting: drop the result instead of pasting it later. An answer being written stops,
+    /// and its panel closes.
     private func cancelProcessing() {
         guard case .processing = phase, processingID != nil else { return }
         processingID = nil
         phase = .idle
+        if AnswerPanelController.shared.isAnswering { AnswerPanelController.shared.close() }
         if settings.playSounds { Sounds.cancel() }
         flowBar.toast("Cancelled", symbol: "xmark")
     }
@@ -240,7 +259,18 @@ final class DictationController {
         let samples = recorder.stop()
         meetings.setDictationActive(false)
         SystemAudio.restoreOutput()
+        await process(samples, mode: current.mode, snapshot: current.snapshot)
+    }
 
+    /// For the self-tests: a recording that has just ended, as when the dictation key is let go, with nothing focused to
+    /// paste into (`pasteStandIn` takes what would be pasted).
+    func heard(_ samples: [Float], mode: SessionMode) async {
+        await process(samples, mode: mode, snapshot: Task { FocusSnapshot(context: AppContext()) })
+    }
+
+    /// A recording that has just ended: transcribed, then pasted or acted on, and kept in History with its audio. While
+    /// the library didn't open, what you said still goes where you asked, and nothing is kept: no History, no recording.
+    private func process(_ samples: [Float], mode: SessionMode, snapshot pending: Task<FocusSnapshot, Never>) async {
         let duration = Double(samples.count) / AudioRecorder.sampleRate
         guard duration >= 0.3 else {
             phase = .idle
@@ -250,8 +280,8 @@ final class DictationController {
         if settings.playSounds { Sounds.stop() }
         let id = UUID()
         processingID = id
-        phase = .processing(current.mode)
-        flowBar.showProcessing(mode: current.mode)
+        phase = .processing(mode)
+        flowBar.showProcessing(mode: mode)
         defer {
             if processingID == id {
                 processingID = nil
@@ -264,24 +294,27 @@ final class DictationController {
             return
         }
 
-        let snapshot = await current.snapshot.value
+        let snapshot = await pending.value
         let vocabulary = Store.shared.vocabulary()
         let audio = settings.whisperBoost ? AudioMath.normalize(samples) : samples
         let modelUsable = speech.state == .ready || speech.state == .loading
         let audioFileName = settings.saveAudio || !modelUsable ? saveAudio(samples) : nil
 
         guard modelUsable else {
-            // Don't hold a dictation until a download finishes; it would paste minutes later somewhere else.
+            // Don't hold a dictation until a download finishes; it would paste minutes later somewhere else. Its recording
+            // waits in History to be transcribed then, unless the library didn't open, when nothing can keep it.
+            let kept = Store.shared.canSave ? "Recording saved to History."
+                : "The recording wasn't kept: Binders couldn't open its library. Quit and reopen Binders."
             let message: String
             if case .downloading(let fraction) = speech.state {
-                message = "Speech model is still downloading (\(Int(fraction * 100))%). Recording saved to History."
+                message = "Speech model is still downloading (\(Int(fraction * 100))%). \(kept)"
             } else {
-                message = "Speech model isn't ready. Recording saved to History."
+                message = "Speech model isn't ready. \(kept)"
                 speech.activate(settings.speechModel, download: true)
             }
             Sounds.error()
-            flowBar.toast(message, symbol: "arrow.down.circle", duration: 4)
-            recordHistory(mode: current.mode, raw: "", final: "", snapshot: snapshot, duration: duration, asrMillis: 0, llmMillis: 0,
+            flowBar.toast(message, symbol: "arrow.down.circle", duration: Store.shared.canSave ? 4 : 7)
+            recordHistory(mode: mode, raw: "", final: "", snapshot: snapshot, duration: duration, asrMillis: 0, llmMillis: 0,
                           usedLLM: false, fallback: nil, audioFileName: audioFileName, status: "failed", error: message)
             return
         }
@@ -295,7 +328,7 @@ final class DictationController {
             guard processingID == id else { return }
             Sounds.error()
             flowBar.toast("Transcription failed: \(error.localizedDescription)", symbol: "exclamationmark.triangle")
-            recordHistory(mode: current.mode, raw: "", final: "", snapshot: snapshot, duration: duration, asrMillis: 0, llmMillis: 0,
+            recordHistory(mode: mode, raw: "", final: "", snapshot: snapshot, duration: duration, asrMillis: 0, llmMillis: 0,
                           usedLLM: false, fallback: nil, audioFileName: audioFileName, status: "failed", error: error.localizedDescription)
             return
         }
@@ -307,7 +340,7 @@ final class DictationController {
             return
         }
 
-        switch current.mode {
+        switch mode {
         case .dictation:
             await deliverDictation(raw: raw, snapshot: snapshot, vocabulary: vocabulary, duration: duration,
                                    asrMillis: asrMillis, audioFileName: audioFileName, processing: id)
@@ -321,7 +354,8 @@ final class DictationController {
                                   asrMillis: Int, audioFileName: String?, processing id: UUID) async {
         // "Add to-do…" and "add it to my calendar" said as plain dictation are meant for Binders, not the document.
         if let phrase = VoiceCommands.parseTodo(raw, explicitOnly: true) {
-            addTodo(phrase, instruction: raw, snapshot: snapshot, duration: duration, asrMillis: asrMillis, audioFileName: audioFileName)
+            await addTodo(phrase, instruction: raw, snapshot: snapshot, duration: duration, asrMillis: asrMillis, audioFileName: audioFileName,
+                          processing: id)
             return
         }
         if let request = VoiceCommands.parseCalendarAdd(raw, explicitOnly: true) {
@@ -344,10 +378,14 @@ final class DictationController {
                 binder: Store.shared.binder(settings.currentBinderID)?.name ?? ""))
             if let reason = result.fallbackReason, settings.aiFormatting {
                 Log.llm.error("Formatting fallback: \(reason)")
-                flowBar.toast("Pasted without AI formatting", symbol: "exclamationmark.bubble")
+                if Store.shared.canSave {
+                    flowBar.toast("Pasted without AI formatting", symbol: "exclamationmark.bubble")
+                } else {
+                    flowBar.toast(Store.notKeptUnformattedMessage, symbol: BindersTheme.problemSymbol, duration: 5)
+                }
                 lastError = reason
             } else {
-                flowBar.hide()
+                donePasting()
                 lastError = nil
             }
         }
@@ -384,12 +422,32 @@ final class DictationController {
 
         // "Add to-do call Sam tomorrow" and "add it to my calendar" act on their own; the model rewrites nothing.
         if let phrase = VoiceCommands.parseTodo(instruction) {
-            addTodo(phrase, instruction: instruction, snapshot: snapshot, duration: duration, asrMillis: asrMillis, audioFileName: audioFileName)
+            await addTodo(phrase, instruction: instruction, snapshot: snapshot, duration: duration, asrMillis: asrMillis, audioFileName: audioFileName,
+                          processing: id)
             return
         }
         if let request = VoiceCommands.parseCalendarAdd(instruction) {
             await addToCalendar(request, instruction: instruction, snapshot: snapshot, duration: duration, asrMillis: asrMillis,
                                 audioFileName: audioFileName, processing: id)
+            return
+        }
+
+        // "What's happening with my work streams?": the boards' digest, from the boards alone, with no model.
+        if snapshot.context.selectedText == nil,
+           MomentRules.read(instruction, binders: Store.shared.binders().map(\.name), agents: AgentRegistry.shared.agents.map(\.name), heard: Date()).kind == .status {
+            let reading = MomentRules.read(instruction, binders: Store.shared.binders().map(\.name), agents: AgentRegistry.shared.agents.map(\.name), heard: Date())
+            let binder = reading.binder.flatMap { name in Store.shared.binders().first { $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame } }
+            var cards = WorkStreams.cards(in: binder?.id)
+            if let agent = reading.agent { cards = WorkStreams.involving(agent, in: cards) }
+            let digest = WorkStreams.digest(cards)
+            // While the library didn't open, the boards are in it: say so, rather than that nothing's happening.
+            let summary = Store.shared.canSave ? digest.summary : Store.unanswerableMessage
+            AnswerPanelController.shared.show(question: instruction, answer: KnowledgeService.Answer(question: instruction, text: summary, sources: []))
+            // Asked out loud, it's said back (Read answers aloud).
+            AnswerSpeaker.shared.speak(summary)
+            flowBar.hide()
+            recordHistory(mode: .command, raw: instruction, final: digest.headline, snapshot: snapshot, duration: duration, asrMillis: asrMillis,
+                          llmMillis: 0, usedLLM: false, fallback: nil, audioFileName: audioFileName, status: "answered")
             return
         }
 
@@ -401,14 +459,10 @@ final class DictationController {
             lookup = instruction
         }
         if snapshot.context.selectedText == nil, VoiceCommands.parseWebSearch(instruction) == nil, let lookup {
-            AnswerPanelController.shared.show(question: instruction, answer: nil)
             flowBar.hide()
-            let answer = await knowledge.ask(instruction, searchQuery: lookup == instruction ? nil : lookup)
-            guard processingID == id else {
-                AnswerPanelController.shared.close()
-                return
-            }
-            AnswerPanelController.shared.show(question: instruction, answer: answer)
+            // The panel shows the passages found at once, then the answer as it's written. Closing it, or Esc, stops it.
+            let answer = await AnswerPanelController.shared.ask(instruction, searchQuery: lookup == instruction ? nil : lookup, knowledge: knowledge)
+            guard processingID == id, let answer else { return }
             // Stored as "answered" so answers aren't re-indexed as knowledge or pasted by "paste last".
             recordHistory(mode: .command, raw: instruction, final: answer.text, snapshot: snapshot, duration: duration, asrMillis: asrMillis,
                           llmMillis: 0, usedLLM: true, fallback: nil, audioFileName: audioFileName, status: "answered")
@@ -435,7 +489,7 @@ final class DictationController {
             flowBar.toast("Searching…", symbol: "magnifyingglass")
         case .replaceSelection(let text), .insert(let text):
             final = text
-            if await insert(text, into: snapshot, pressEnter: false) { flowBar.hide() }
+            if await insert(text, into: snapshot, pressEnter: false) { donePasting() }
         case .failed(let message):
             Sounds.error()
             flowBar.toast(message, symbol: "exclamationmark.triangle")
@@ -447,10 +501,18 @@ final class DictationController {
                       status: failure == nil ? "inserted" : "failed", error: failure)
     }
 
-    /// "Add to-do call Sam tomorrow": onto the board, recorded like an answered question so it is never pasted or indexed.
-    private func addTodo(_ phrase: String, instruction: String, snapshot: FocusSnapshot, duration: Double, asrMillis: Int, audioFileName: String?) {
-        let line = commitments.addSpoken(phrase).line
-        flowBar.hide()
+    /// "Add to-do call Sam tomorrow": into the binder you named, else the one the router picks, else the open one, with
+    /// the agent whose work it is offered in the flow bar (CardRouter). Recorded like an answered question so it is never
+    /// pasted or indexed. The flow bar keeps its processing look while the router decides (4 seconds at most), and Esc
+    /// meanwhile adds nothing.
+    private func addTodo(_ phrase: String, instruction: String, snapshot: FocusSnapshot, duration: Double, asrMillis: Int, audioFileName: String?,
+                         processing id: UUID) async {
+        // Not while the library didn't open: the flow bar says so instead.
+        guard Store.shared.allowsSave() else { return }
+        let plan = await router.decideCommandTodo(phrase)
+        guard processingID == id, Store.shared.allowsSave() else { return }
+        if flowBar.model.display == .processing { flowBar.hide() }
+        let line = router.addCommandTodo(plan)
         recordHistory(mode: .command, raw: instruction, final: line, snapshot: snapshot, duration: duration, asrMillis: asrMillis,
                       llmMillis: 0, usedLLM: false, fallback: nil, audioFileName: audioFileName, status: "answered")
     }
@@ -481,6 +543,22 @@ final class DictationController {
     /// binders://dictate and binders://command: start hands-free, or finish what is running.
     func toggleSession(_ mode: SessionMode) {
         if case .idle = phase { handle(.start(mode, handsFree: true)) } else { handle(.stop) }
+    }
+
+    /// For the self-tests: what Command Mode does with words it has just heard, with nothing selected, as after a
+    /// recording (Esc cancels it the same way).
+    func command(heard instruction: String) async {
+        let id = UUID()
+        processingID = id
+        phase = .processing(.command)
+        defer {
+            if processingID == id {
+                processingID = nil
+                phase = .idle
+            }
+        }
+        await deliverCommand(instruction: instruction, snapshot: FocusSnapshot(context: AppContext()), vocabulary: [], duration: 1,
+                             asrMillis: 0, audioFileName: nil, processing: id)
     }
 
     private func resolveCalendarEvent(_ request: VoiceCommands.CalendarRequest, selectedText: String?) async -> (line: String, added: Bool, usedLLM: Bool) {
@@ -526,9 +604,18 @@ final class DictationController {
     /// Pastes into the app that was focused when the session started. If the user moved to another app
     /// while we were processing, copies instead so the text never lands somewhere unexpected.
     private func insert(_ text: String, into snapshot: FocusSnapshot, pressEnter: Bool) async -> Bool {
+        if let pasteStandIn {
+            pasteStandIn(text)
+            return true
+        }
         if let pid = snapshot.pid, NSWorkspace.shared.frontmostApplication?.processIdentifier != pid {
             if !text.isEmpty { TextInserter.copyToClipboard(text) }
-            flowBar.toast("You switched apps — copied to clipboard instead", symbol: "doc.on.clipboard", duration: 3)
+            if Store.shared.canSave {
+                flowBar.toast("You switched apps — copied to clipboard instead", symbol: "doc.on.clipboard", duration: 3)
+            } else {
+                // Nothing is kept while the library didn't open: the bar says so here too (`donePasting`).
+                flowBar.toast(Store.notKeptCopiedMessage, symbol: BindersTheme.problemSymbol, duration: 5)
+            }
             return false
         }
         if !text.isEmpty {
@@ -544,6 +631,11 @@ final class DictationController {
     // MARK: - Features
 
     func pasteLast() async {
+        // While the library didn't open, no dictation is kept: say why there's nothing.
+        guard Store.shared.canSave else {
+            flowBar.toast(Store.nothingToPasteMessage, symbol: BindersTheme.problemSymbol, duration: 7)
+            return
+        }
         guard let last = Store.shared.lastTranscript(), !last.finalText.isEmpty else {
             flowBar.toast("Nothing to paste yet", symbol: "doc.on.clipboard")
             return
@@ -601,10 +693,14 @@ final class DictationController {
         }
     }
 
+    /// The iPhone heard someone start talking (binders/warm): the model loads now, so writing the capture up doesn't wait
+    /// for it.
+    func warmForPhone() { warmUpLLM(force: false, forWriteUp: true) }
+
     /// Loading starts the moment a dictation begins, so the model is back before the transcript needs it even
     /// after its memory was freed. When it is already loaded the call is instant, so a minute's throttle is enough.
-    private func warmUpLLM(force: Bool) {
-        guard settings.aiFormatting || settings.commandModeEnabled,
+    private func warmUpLLM(force: Bool, forWriteUp: Bool = false) {
+        guard forWriteUp || settings.aiFormatting || settings.commandModeEnabled,
               force || Date().timeIntervalSince(lastWarmUp) > 60,
               let client = settings.makeLLMClient() else { return }
         lastWarmUp = Date()
@@ -618,7 +714,10 @@ final class DictationController {
         await client.unload()
     }
 
+    /// Never while the library didn't open: with no History to hold it, the recording would be left with nothing to find
+    /// it by or delete it with.
     private func saveAudio(_ samples: [Float]) -> String? {
+        guard Store.shared.canSave else { return nil }
         let name = "\(UUID().uuidString).wav"
         let url = AppPaths.audio.appendingPathComponent(name)
         Task.detached(priority: .utility) {
@@ -627,9 +726,21 @@ final class DictationController {
         return name
     }
 
+    /// After a paste that needs no word: the bar goes. While the library didn't open, it says History won't have it.
+    private func donePasting() {
+        if Store.shared.canSave {
+            flowBar.hide()
+        } else {
+            flowBar.toast(Store.notKeptMessage, symbol: BindersTheme.problemSymbol, duration: 5)
+        }
+    }
+
+    /// Never while the library didn't open: a dictation or a result kept then would show in History until quit, and be gone
+    /// after. What you said was still pasted or acted on, and the bar says it isn't kept (`donePasting`).
     private func recordHistory(mode: SessionMode, raw: String, final: String, snapshot: FocusSnapshot, duration: Double, asrMillis: Int,
                                llmMillis: Int, usedLLM: Bool, fallback: String?, audioFileName: String?, status: String,
                                category: StyleCategory? = nil, error: String? = nil) {
+        guard Store.shared.canSave else { return }
         let record = TranscriptRecord(mode: mode.rawValue, rawText: raw, finalText: final, appName: snapshot.context.appName,
                                       bundleID: snapshot.context.bundleID, category: category?.rawValue, duration: duration,
                                       asrMillis: asrMillis, llmMillis: llmMillis, engine: settings.speechModel.rawValue,

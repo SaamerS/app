@@ -24,6 +24,13 @@ final class PairingTests: XCTestCase {
         let onItsOwn = app.staticTexts.containing(NSPredicate(format: "label CONTAINS 'once you pair a Mac'")).firstMatch
         XCTAssertTrue(onItsOwn.waitForExistence(timeout: 5), "Capture still talks about a Mac that isn't paired")
         attach("capture without a Mac")
+        // A capture written down without a Mac opens, as on a paired iPhone.
+        let row = app.buttons.matching(identifier: "conversationRow").firstMatch
+        if row.waitForExistence(timeout: 3) {
+            row.tap()
+            XCTAssertTrue(app.buttons["conversationMenu"].waitForExistence(timeout: 10), "A capture didn't open without a Mac")
+            app.navigationBars.buttons.element(boundBy: 0).tap()
+        }
         app.navigationBars.buttons.element(boundBy: 0).tap()
 
         let keyboard = app.buttons["aloneKeyboard"]

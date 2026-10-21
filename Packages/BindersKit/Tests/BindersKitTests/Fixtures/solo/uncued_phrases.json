@@ -1,0 +1,325 @@
+{
+ "about": "Y2's new group for the gate's bench (MomentBench.Group.uncued, said in Calibrate while the mode is Auto), and the walk's hard negatives it's measured against. Written for the bench: no real people's names. None has a cue (gate_bench.py checks). `want` is what Auto's gate should do with it said on its own in your voice: keep as fix, todo or idea, or let go.",
+ "phrases": [
+  {
+   "id": "uncued-01",
+   "text": "The site's login times out too fast.",
+   "want": "fix"
+  },
+  {
+   "id": "uncued-02",
+   "text": "The export doesn't include the dates.",
+   "want": "fix"
+  },
+  {
+   "id": "uncued-03",
+   "text": "The search is way too slow on big binders.",
+   "want": "fix"
+  },
+  {
+   "id": "uncued-04",
+   "text": "There's a typo on the pricing page.",
+   "want": "fix"
+  },
+  {
+   "id": "uncued-05",
+   "text": "The dark mode toggle keeps resetting.",
+   "want": "fix"
+  },
+  {
+   "id": "uncued-06",
+   "text": "The share button is hidden on the iPhone.",
+   "want": "fix"
+  },
+  {
+   "id": "uncued-07",
+   "text": "The sync is really flaky when the Mac is asleep.",
+   "want": "fix"
+  },
+  {
+   "id": "uncued-08",
+   "text": "The onboarding is confusing.",
+   "want": "fix"
+  },
+  {
+   "id": "uncued-09",
+   "text": "The widget shows the wrong count.",
+   "want": "fix"
+  },
+  {
+   "id": "uncued-10",
+   "text": "The app crashes when I rotate the phone.",
+   "want": "fix"
+  },
+  {
+   "id": "uncued-11",
+   "text": "The upload hangs when the file is big.",
+   "want": "fix"
+  },
+  {
+   "id": "uncued-12",
+   "text": "I just noticed the footer links are broken.",
+   "want": "fix"
+  },
+  {
+   "id": "uncued-13",
+   "text": "The newsletter template looks cramped on a phone.",
+   "want": "fix"
+  },
+  {
+   "id": "uncued-14",
+   "text": "The board should remember which column I was in.",
+   "want": "fix"
+  },
+  {
+   "id": "uncued-15",
+   "text": "I should email the accountant about the receipts.",
+   "want": "todo"
+  },
+  {
+   "id": "uncued-16",
+   "text": "I should probably renew the domain this week.",
+   "want": "todo"
+  },
+  {
+   "id": "uncued-17",
+   "text": "I must call the bank about the card.",
+   "want": "todo"
+  },
+  {
+   "id": "uncued-18",
+   "text": "I'd better book the flights tonight.",
+   "want": "todo"
+  },
+  {
+   "id": "uncued-19",
+   "text": "To-do: order more printer ink.",
+   "want": "todo"
+  },
+  {
+   "id": "uncued-20",
+   "text": "I want to rewrite the README before the launch.",
+   "want": "todo"
+  },
+  {
+   "id": "uncued-21",
+   "text": "Must send the invoice to the printer.",
+   "want": "todo"
+  },
+  {
+   "id": "uncued-22",
+   "text": "We should fix the login timeout before the launch.",
+   "want": "todo"
+  },
+  {
+   "id": "uncued-23",
+   "text": "What if the board showed who's busiest?",
+   "want": "idea"
+  },
+  {
+   "id": "uncued-24",
+   "text": "We could add a weekly digest of what the agents did.",
+   "want": "idea"
+  },
+  {
+   "id": "uncued-25",
+   "text": "We should add a weekly digest.",
+   "want": "idea"
+  },
+  {
+   "id": "uncued-26",
+   "text": "It would be nice to have a snooze on cards.",
+   "want": "idea"
+  },
+  {
+   "id": "uncued-27",
+   "text": "Maybe we should offer a yearly plan.",
+   "want": "idea"
+  },
+  {
+   "id": "uncued-28",
+   "text": "Feature idea: let me drag cards between binders.",
+   "want": "idea"
+  },
+  {
+   "id": "uncued-29",
+   "text": "How about adding a quiz at the booth.",
+   "want": "idea"
+  },
+  {
+   "id": "uncued-30",
+   "text": "Wouldn't it be cool if the widget showed the next card?",
+   "want": "idea"
+  }
+ ],
+ "negatives": [
+  {
+   "id": "walk-01",
+   "text": "This hill is steeper than I remembered."
+  },
+  {
+   "id": "walk-02",
+   "text": "The bakery on the corner is closed again."
+  },
+  {
+   "id": "walk-03",
+   "text": "My phone is almost dead."
+  },
+  {
+   "id": "walk-04",
+   "text": "The traffic is way too slow today."
+  },
+  {
+   "id": "walk-05",
+   "text": "This coffee is too sweet."
+  },
+  {
+   "id": "walk-06",
+   "text": "We should get going before it rains."
+  },
+  {
+   "id": "walk-07",
+   "text": "We could grab lunch after this."
+  },
+  {
+   "id": "walk-08",
+   "text": "I should have brought a jacket."
+  },
+  {
+   "id": "walk-09",
+   "text": "I should be home by six."
+  },
+  {
+   "id": "walk-10",
+   "text": "Maybe I'll take the long way back."
+  },
+  {
+   "id": "walk-11",
+   "text": "It would be nice if the sun came out."
+  },
+  {
+   "id": "walk-12",
+   "text": "The dog really needs a walk."
+  },
+  {
+   "id": "walk-13",
+   "text": "That new cafe looks too crowded."
+  },
+  {
+   "id": "walk-14",
+   "text": "The bus is late again."
+  },
+  {
+   "id": "walk-15",
+   "text": "My shoes are too small."
+  },
+  {
+   "id": "walk-16",
+   "text": "The park needs more benches."
+  },
+  {
+   "id": "walk-17",
+   "text": "What if it rains tomorrow?"
+  },
+  {
+   "id": "walk-18",
+   "text": "What if the bus doesn't come?"
+  },
+  {
+   "id": "walk-19",
+   "text": "I want to sit down for a minute."
+  },
+  {
+   "id": "walk-20",
+   "text": "We should totally go to that concert."
+  },
+  {
+   "id": "walk-21",
+   "text": "The music in that shop was way too loud."
+  },
+  {
+   "id": "walk-22",
+   "text": "Wow, the sky is really dark over there."
+  },
+  {
+   "id": "walk-23",
+   "text": "That podcast was way too long."
+  },
+  {
+   "id": "walk-24",
+   "text": "The light here is lovely at this time of day."
+  },
+  {
+   "id": "walk-25",
+   "text": "I can't believe how busy the market is."
+  },
+  {
+   "id": "walk-26",
+   "text": "We could do this walk every Sunday."
+  },
+  {
+   "id": "walk-27",
+   "text": "How about a coffee first?"
+  },
+  {
+   "id": "walk-28",
+   "text": "My back is killing me."
+  },
+  {
+   "id": "walk-29",
+   "text": "It's way too cold for October."
+  },
+  {
+   "id": "walk-30",
+   "text": "There's a problem with the bus timetable, it's always late."
+  },
+  {
+   "id": "muse-01",
+   "text": "I wonder if anyone reads the changelog."
+  },
+  {
+   "id": "muse-02",
+   "text": "Honestly the week went better than I thought."
+  },
+  {
+   "id": "muse-03",
+   "text": "The pricing question is interesting though."
+  },
+  {
+   "id": "muse-04",
+   "text": "I keep going back and forth on the name."
+  },
+  {
+   "id": "muse-05",
+   "text": "It's funny how the simple features are the ones people use."
+  },
+  {
+   "id": "muse-06",
+   "text": "Maybe the real problem is that nobody knows the board exists."
+  },
+  {
+   "id": "muse-07",
+   "text": "I think the onboarding is fine actually."
+  },
+  {
+   "id": "muse-08",
+   "text": "The search is fast enough for now."
+  },
+  {
+   "id": "muse-09",
+   "text": "The board looks great on the big screen."
+  },
+  {
+   "id": "muse-10",
+   "text": "I'm not sure the digest is worth it."
+  },
+  {
+   "id": "muse-11",
+   "text": "I should stop worrying about the launch."
+  },
+  {
+   "id": "muse-12",
+   "text": "We should celebrate when this ships."
+  }
+ ]
+}

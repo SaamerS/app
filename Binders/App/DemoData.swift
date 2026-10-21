@@ -270,7 +270,7 @@ enum DemoData {
             if let holder {
                 card.assignee = holder.name
                 card.assigneeIsAgent = holder.isAgent
-                card.claimExpiresAt = holder.isAgent && column != .done && column != .review ? Date().addingTimeInterval(minutesLeft * 60) : nil
+                card.claimExpiresAt = holder.isAgent && column == .inProgress ? Date().addingTimeInterval(minutesLeft * 60) : nil
             }
             card.createdAt = Date().addingTimeInterval(-(events.first?.3 ?? 1) * 3600)
             card.updatedAt = Date().addingTimeInterval(-(events.last?.3 ?? 1) * 3600)

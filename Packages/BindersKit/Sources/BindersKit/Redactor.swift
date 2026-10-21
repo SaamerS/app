@@ -29,10 +29,17 @@ public enum Redactor {
         apply(#"(?i)\b(password|passcode|passwd|pwd|pin|secret|token|api[ _-]?key|access[ _-]?key)\b(\s*(?:[:=]|is)\s*)(\S+)"#) { match, source in
             source.substring(with: match.range(at: 1)) + source.substring(with: match.range(at: 2)) + "[redacted]"
         }
-        // Card numbers: 13 to 19 digits with optional spaces or dashes that pass the Luhn check.
+        // Card numbers: 13 to 19 digits with optional spaces or dashes that pass the Luhn check. One can run on into its
+        // expiry or code ("4111 1111 1111 1111 12/27"): groups come off the end until what's left is a card, or too short.
         apply(#"\b\d(?:[ -]?\d){12,18}\b"#) { match, source in
-            let digits = source.substring(with: match.range).filter(\.isNumber)
-            return (13...19).contains(digits.count) && luhn(digits) ? "[card]" : nil
+            let run = source.substring(with: match.range)
+            var kept = Substring(run)
+            while true {
+                let digits = String(kept.filter(\.isNumber))
+                if (13...19).contains(digits.count), luhn(digits) { return "[card]" + run.dropFirst(kept.count) }
+                guard digits.count > 13, let cut = kept.lastIndex(where: { $0 == " " || $0 == "-" }) else { return nil }
+                kept = kept[..<cut]
+            }
         }
         apply(#"\b\d{3}-\d{2}-\d{4}\b"#) { _, _ in "[ssn]" }
         apply(#"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b"#) { _, _ in "[iban]" }

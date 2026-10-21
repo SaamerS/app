@@ -119,6 +119,8 @@ final class WritingCaptureService {
     /// `requireAccessibility` is false only in tests: prompts to agents don't need it, reading other apps' fields does.
     func start(requireAccessibility: Bool = true) {
         guard !isOn else { return }
+        // What it keeps goes into the library: not while that didn't open.
+        guard Store.shared.allowsSave() else { return }
         guard AXIsProcessTrusted() || !requireAccessibility else {
             flowBar.toast("Writing capture needs Accessibility access — grant it in Settings", symbol: "pencil.slash", duration: 5)
             return
@@ -343,25 +345,27 @@ final class WritingCaptureService {
         lastCommittedByKey[draft.key] = text
 
         let redacted = Redactor.redact(text)
+        // The subject and the window's title (which often holds the subject) are redacted the same way as the text.
+        let subject = draft.subject.map { Redactor.redact($0) }, title = draft.context.windowTitle.map { Redactor.redact($0) }
         let record = WritingRecord(text: redacted.text)
         record.appName = draft.context.appName
         record.bundleID = draft.context.bundleID
-        record.windowTitle = draft.context.windowTitle
+        record.windowTitle = title?.text
         record.url = draft.context.url
         record.recipients = draft.recipients.joined(separator: ", ")
-        record.subject = draft.subject
-        record.redactions = redacted.count
+        record.subject = subject?.text
+        record.redactions = redacted.count + (subject?.count ?? 0) + (title?.count ?? 0)
         record.source = Self.source(bundleID: draft.context.bundleID ?? "", url: draft.context.url)
         let binder = Store.shared.binder(settings.currentBinderID) ?? Store.shared.defaultBinder()
         record.binderID = binder.id
         Store.shared.insert(record)
         AutomationService.shared.fire(.writingCaptured, payload: AutomationPayload(
-            text: redacted.text, title: draft.subject ?? "", app: draft.context.appName ?? "", binder: binder.name,
+            text: redacted.text, title: subject?.text ?? "", app: draft.context.appName ?? "", binder: binder.name,
             summary: draft.recipients.joined(separator: ", "), link: "binders://open?section=writing"))
         capturedThisSession += 1
         Log.app.notice("Capture: kept \(record.wordCount) words from \(record.appName ?? "app", privacy: .public), \(redacted.count) redacted")
         afterCommit?(record)
-        let target = draft.recipients.first.map { " → \($0)" } ?? (draft.subject.map { " · \($0)" } ?? "")
+        let target = draft.recipients.first.map { " → \($0)" } ?? (subject.map { " · \($0.text)" } ?? "")
         lastCaptureSummary = "\(draft.context.appName ?? "app")\(target)"
         flowBar.toast("Kept \(record.wordCount) words\(target)\(redacted.count > 0 ? " · \(redacted.count) redacted" : "")", symbol: "pencil.line", duration: 2.5)
     }

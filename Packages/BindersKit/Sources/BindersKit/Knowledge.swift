@@ -361,6 +361,26 @@ public enum KnowledgeQueryIntent {
         let text = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
         return text.hasSuffix("?") || text.range(of: "(?i)^(?:who|what|when|where|why|how|which|did|do|does|is|are|was|were)\\b", options: .regularExpression) != nil
     }
+
+    /// "What was our Ignite booth again?" → "Ignite booth": a question you ask yourself about your own things, and what to
+    /// search for. It counts when the words after the question word hold our, my, we, I or us, or the question ends in
+    /// "again". The search leaves out our, my, the, a, an, again and exactly, as full-text search would keep looking for
+    /// "again". Nil when it doesn't count.
+    public static func recallSubject(from instruction: String) -> String? {
+        let text = instruction.replacingOccurrences(of: "’", with: "'")
+            .trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "?.!")))
+        let pattern = #"(?i)^(?:what|when|where|who|which|how\s+much|how\s+many|how\s+long)(?:'s|'re|\s+is|\s+was|\s+were|\s+are|\s+did|\s+do|\s+does|\s+had)?\s+(.+)$"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+              let range = Range(match.range(at: 1), in: text) else { return nil }
+        let words = TextNorm.words(String(text[range]))
+        let keys = words.map(TextNorm.normalizeWord)
+        guard keys.contains(where: { ["our", "my", "we", "i", "us"].contains($0) }) || keys.last == "again" else { return nil }
+        let skipped: Set<String> = ["our", "my", "the", "a", "an", "again", "exactly"]
+        let subject = zip(words, keys).filter { !skipped.contains($0.1) }.map(\.0).joined(separator: " ")
+            .trimmingCharacters(in: .punctuationCharacters.union(.whitespaces))
+        return subject.isEmpty ? nil : subject
+    }
 }
 
 public struct KnowledgeContext: Equatable, Sendable {
@@ -383,6 +403,12 @@ public enum KnowledgePrompts {
         - "You" in meeting transcripts is the user.
         - A source labelled CORRECTION is the user's correction: what it says is right replaces what it calls wrong, in every other source, whatever their dates. Don't repeat the wrong version as fact.
         """
+    }
+
+    /// For something asked out loud and heard back in a notification: one or two sentences from the sources, or NO ANSWER.
+    public static func briefAnswerSystemPrompt(today: String) -> String {
+        SuggestionPrompts.answerSystemPrompt(today: today)
+            + "\n- A source labelled CORRECTION is the user's correction: what it says is right replaces what it calls wrong, in every other source, whatever their dates."
     }
 
     public static func answerUserPrompt(question: String, contexts: [KnowledgeContext]) -> String {
@@ -586,5 +612,44 @@ public struct GraphSimulation: Sendable {
         }
         alpha = max(0, alpha - 0.005)
         return speed / Double(count)
+    }
+
+    /// Runs the layout to rest at once, for when nothing should move on screen (Reduce Motion).
+    public mutating func settle() {
+        // Energy runs out within 200 steps; the bound only guards against a change to that.
+        var steps = 0
+        while alpha > 0, positions.count > 1, steps < 1_000 {
+            step()
+            steps += 1
+        }
+        alpha = 0
+    }
+
+    /// Picks up where an earlier layout of much the same graph left off, so new data moves the picture a little rather
+    /// than blooming it again from the centre. Nodes it had keep their places; a new node starts beside the nodes it
+    /// links to, or by the centre if it links to none of them. A graph with the same nodes and links stays as it was;
+    /// otherwise only as much energy goes back in as the change needs. With nothing in common, it blooms as new.
+    public mutating func carryOver(from previous: GraphSimulation) {
+        var kept = Set<Int>()
+        for (offset, id) in ids.enumerated() {
+            guard let old = previous.index(of: id) else { continue }
+            positions[offset] = previous.positions[old]
+            velocities[offset] = previous.velocities[old]
+            kept.insert(offset)
+        }
+        guard !kept.isEmpty else { return }
+        for offset in ids.indices where !kept.contains(offset) {
+            let neighbours = links.compactMap { link in link.a == offset ? link.b : (link.b == offset ? link.a : nil) }.filter(kept.contains)
+            guard !neighbours.isEmpty else { continue }
+            let centre = neighbours.reduce(SIMD2<Double>.zero) { $0 + positions[$1] } / Double(neighbours.count)
+            let angle = Double(offset) * 2.399963
+            positions[offset] = centre + SIMD2(cos(angle), sin(angle)) * 0.03
+        }
+        func pairs(_ simulation: GraphSimulation) -> Set<String> {
+            Set(simulation.links.map { link in [simulation.ids[link.a], simulation.ids[link.b]].sorted().joined(separator: "\u{1}") })
+        }
+        let changed = (ids.count - kept.count) + (previous.ids.count - kept.count) + pairs(self).symmetricDifference(pairs(previous)).count
+        let energy = changed == 0 ? 0 : min(1, 0.25 + 0.5 * Double(changed) / Double(max(ids.count, 1)))
+        alpha = ids.count > 1 ? max(previous.alpha, energy) : 0
     }
 }

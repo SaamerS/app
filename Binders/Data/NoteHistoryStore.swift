@@ -88,17 +88,20 @@ enum NoteHistory {
     }
 }
 
-/// A note's earlier versions: pick one to read it, then copy it or put it back.
+/// A note's earlier versions: pick one to read it, or what changed since, then copy it or put it back.
 struct NoteHistorySheet: View {
     @Environment(\.dismiss) private var dismiss
     let note: NoteItem
+    /// See What Changed on an agent's edit: opens at the version kept just before that moment, showing what changed since.
+    var changesFrom: Date? = nil
     @State private var versions: [NoteHistory.Version] = []
     @State private var selected: NoteHistory.Version?
+    @State private var showingChanges = false
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("Earlier versions of “\(note.title)”").font(.headline).lineLimit(1)
+                Text("Earlier versions of “\(note.title)”").font(BindersTheme.cardTitle).lineLimit(1)
                 Spacer()
                 Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
             }
@@ -112,23 +115,34 @@ struct NoteHistorySheet: View {
                 HStack(spacing: 0) {
                     List(versions, selection: $selected) { version in
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(version.date.formatted(date: .abbreviated, time: .shortened))
+                            Text(version.date.formatted(date: .abbreviated, time: .shortened)).monospacedDigit()
                             Text(changeLabel(version)).font(.caption).foregroundStyle(.secondary)
                         }
                         .tag(version)
                     }
+                    .scrollContentBackground(.hidden)
+                    .background(BindersTheme.ground2)
                     .frame(width: 230)
                     Divider()
                     if let selected {
                         VStack(alignment: .leading, spacing: 0) {
                             ScrollView {
-                                MarkdownBlocks(markdown: selected.text, onToggleTask: nil)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(20)
+                                if showingChanges {
+                                    NoteChangesView(lines: NoteVersions.lines(from: selected.text, to: note.text))
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(20)
+                                } else {
+                                    MarkdownBlocks(markdown: selected.text, onToggleTask: nil)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(20)
+                                }
                             }
                             Divider()
                             HStack {
                                 Button("Copy") { TextInserter.copyToClipboard(selected.text) }
+                                Toggle("Show Changes Since", isOn: $showingChanges)
+                                    .toggleStyle(.button)
+                                    .help("What changed from this version to the note as it is now")
                                 Spacer()
                                 Button("Restore This Version") {
                                     NoteHistory.restore(selected, to: note)
@@ -143,9 +157,13 @@ struct NoteHistorySheet: View {
             }
         }
         .frame(width: 780, height: 540)
+        .pageGround()
         .task {
             versions = NoteHistory.versions(of: note.id)
-            selected = versions.first
+            // The version kept as the change landed is from the same moment, give or take the rounding of its name.
+            let before = changesFrom.flatMap { moment in versions.first { $0.date <= moment.addingTimeInterval(1) } }
+            selected = before ?? versions.first
+            showingChanges = before != nil
         }
     }
 
@@ -157,5 +175,56 @@ struct NoteHistorySheet: View {
         if change.added > 0 { parts.append("\(change.added) \(change.added == 1 ? "line" : "lines") added") }
         if change.removed > 0 { parts.append("\(change.removed) removed") }
         return parts.joined(separator: ", ") + " since"
+    }
+}
+
+/// What changed from a version to the note as it is now, line by line: what was taken out struck through, what was
+/// added marked with a plus, the rest as it was.
+struct NoteChangesView: View {
+    let lines: [NoteVersions.Line]
+
+    private var unchanged: Bool {
+        lines.allSatisfy { line in
+            if case .same = line { return true }
+            return false
+        }
+    }
+
+    var body: some View {
+        if unchanged {
+            Text("Nothing has changed since this version.").foregroundStyle(.secondary)
+        } else {
+            LazyVStack(alignment: .leading, spacing: 2) {
+                ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                    row(line)
+                }
+            }
+            .textSelection(.enabled)
+        }
+    }
+
+    @ViewBuilder
+    private func row(_ line: NoteVersions.Line) -> some View {
+        switch line {
+        case .same(let text):
+            mark(" ", text).foregroundStyle(.secondary)
+        case .added(let text):
+            mark("+", text)
+                .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(.infoFill(0.12)))
+                .accessibilityLabel("Added: \(text)")
+        case .removed(let text):
+            mark("−", text, struck: true).foregroundStyle(.secondary)
+                .accessibilityLabel("Taken out: \(text)")
+        }
+    }
+
+    private func mark(_ sign: String, _ text: String, struck: Bool = false) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(sign).monospaced().frame(width: 12)
+            Text(text.isEmpty ? " " : text).strikethrough(struck).frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 4)
+        .padding(.vertical, 1)
+        .accessibilityElement(children: .combine)
     }
 }

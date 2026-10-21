@@ -47,8 +47,28 @@ public struct ConversationSplitter: Sendable {
     /// The conversation in progress, if any.
     public private(set) var current: Conversation?
 
+    /// How long after the last speech a listening glyph still moves: the gaps between words. Not the quiet of a
+    /// conversation that's still open, which lasts until `silenceToClose`.
+    public static let speakingGrace: TimeInterval = 1
+
+    /// Someone is speaking at `now`, going by when speech was last heard (nil: not since listening began, or no
+    /// conversation is open): what a listening glyph moves with, and holds still without.
+    public static func isSpeaking(lastSpeech: Date?, now: Date = Date()) -> Bool {
+        guard let lastSpeech else { return false }
+        return now.timeIntervalSince(lastSpeech) < speakingGrace
+    }
+
     public init(settings: Settings = Settings()) {
         self.settings = settings
+    }
+
+    /// Whether a conversation opening at `start` continues the one before it (lane Y2): that one was closed by a cut (the
+    /// 90-minute split, or listening stopping: a call, Siri, Mute), at `lastCut`, and this opens within the quiet that would
+    /// otherwise have closed it, `silenceToClose` after its last speech (`lastEnd`). A close after quiet, or a Wrap Up, is
+    /// no cut: pass nil for `lastCut`.
+    public static func continues(lastEnd: Date?, lastCut: Date?, start: Date, settings: Settings = Settings()) -> Bool {
+        guard let lastEnd, let lastCut, start >= lastCut else { return false }
+        return start.timeIntervalSince(lastEnd) < settings.silenceToClose
     }
 
     /// One stretch of audio, `duration` seconds from `time`: speech or not.
@@ -78,6 +98,40 @@ public struct ConversationSplitter: Sendable {
     public mutating func finish() -> [Event] {
         guard let open = current else { return [] }
         return [close(open)]
+    }
+
+    /// You said it's over (Wrap up now): whatever is open closes now, kept from `minimum` seconds of speech, as you asked
+    /// for it to be written down. Listening goes on; the next speech opens a new one.
+    public mutating func wrapUp(keepingFrom minimum: TimeInterval) -> [Event] {
+        guard let open = current else { return [] }
+        current = nil
+        return [open.speech >= min(minimum, settings.minSpeech) ? .closed(open) : .dropped(open)]
+    }
+
+    /// Lets the open conversation go without an event, for when a moment took its words and nothing else was said in it.
+    /// Returns what was open; the next speech opens a new one.
+    @discardableResult
+    public mutating func discard() -> Conversation? {
+        let open = current
+        current = nil
+        return open
+    }
+
+    /// A conversation `discard` let go comes back, as the moment that took its words wasn't kept after all: open again
+    /// when nothing is (its quiet counted from where its speech ended), or one with the conversation open now, which then
+    /// runs from the earlier of the two starts to the later of the two ends, with the speech of both. True when it's open
+    /// again on its own.
+    @discardableResult
+    public mutating func takeBack(_ earlier: Conversation) -> Bool {
+        guard var open = current else {
+            current = earlier
+            return true
+        }
+        open.start = min(open.start, earlier.start)
+        open.end = max(open.end, earlier.end)
+        open.speech += earlier.speech
+        current = open
+        return false
     }
 
     private mutating func close(_ conversation: Conversation) -> Event {
@@ -164,6 +218,32 @@ public struct CaptureSpans: Codable, Equatable, Sendable {
         } else {
             spans.append(Span(fileStart: fileDuration, wallStart: wallStart, duration: duration))
         }
+    }
+
+    /// The file's audio (`samples`, `rate` a second) cut span by span, each with when it was heard: for writing two
+    /// conversations' audio into one file, in the order it was said. A span past the samples' end is cut short or left out.
+    public func pieces(of samples: [Float], rate: Double = 16_000) -> [(wallStart: Date, samples: [Float])] {
+        spans.compactMap { span in
+            let from = max(0, min(samples.count, Int((span.fileStart * rate).rounded())))
+            let to = max(from, min(samples.count, Int(((span.fileStart + span.duration) * rate).rounded())))
+            return to > from ? (span.wallStart, Array(samples[from..<to])) : nil
+        }
+    }
+
+    /// Where in the file a moment heard at `wall` is (lane Y2): `wallTime(atFile:)`'s inverse. A moment between two spans,
+    /// or outside them, goes to the nearest edge of the nearest span; nil without spans.
+    public func fileTime(atWall wall: Date) -> TimeInterval? {
+        guard !spans.isEmpty else { return nil }
+        if let inside = spans.first(where: { wall >= $0.wallStart && wall <= $0.wallStart.addingTimeInterval($0.duration) }) {
+            return inside.fileStart + wall.timeIntervalSince(inside.wallStart)
+        }
+        let nearest = spans.min { a, b in
+            func distance(_ span: Span) -> TimeInterval {
+                wall < span.wallStart ? span.wallStart.timeIntervalSince(wall) : wall.timeIntervalSince(span.wallStart.addingTimeInterval(span.duration))
+            }
+            return distance(a) < distance(b)
+        }!
+        return wall < nearest.wallStart ? nearest.fileStart : nearest.fileStart + nearest.duration
     }
 
     /// When a moment of the file was heard. A moment past the end belongs to the last span.

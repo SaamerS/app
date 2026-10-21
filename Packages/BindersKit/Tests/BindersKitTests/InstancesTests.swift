@@ -22,6 +22,14 @@ final class InstancesTests: XCTestCase {
         XCTAssertFalse(AppInstances.isApp(arguments: ["/x/Binders", "--selftest-capture-probe"]))
     }
 
+    func testTheDecisionFolderCheckDoesNot() {
+        // The short-lived helper that reads a decision model's tokenizer and chat template outside the app.
+        XCTAssertFalse(AppInstances.isApp(arguments: ["Binders", "--check-decision-folder", "/x", "--reader", "chat"]))
+        XCTAssertFalse(AppInstances.isApp(arguments: ["/Applications/Binders.app/Contents/MacOS/Binders", "--check-decision-folder", "/Users/sam/Models/x",
+                                                      "--reader", "tev1"]))
+        XCTAssertTrue(AppInstances.isApp(arguments: ["/x/Binders", "--check-decision-folders"]), "only that flag, whole")
+    }
+
     func testArgumentsAreReadFromTheKernelBuffer() {
         let args = ["/Applications/Binders.app/Contents/MacOS/Binders", "--mcp"]
         XCTAssertEqual(AppInstances.arguments(fromProcArgs: procArgs(args)), args)

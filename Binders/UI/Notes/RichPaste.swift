@@ -8,7 +8,7 @@ enum RichPaste {
     static func markdown(from pasteboard: NSPasteboard) -> String? {
         let attributed: NSAttributedString?
         if let html = pasteboard.data(forType: .html) {
-            attributed = NSAttributedString(html: html, options: [.characterEncoding: String.Encoding.utf8.rawValue], documentAttributes: nil)
+            attributed = NSAttributedString(html: withoutFetches(html), options: [.characterEncoding: String.Encoding.utf8.rawValue], documentAttributes: nil)
         } else if let rtfd = pasteboard.data(forType: .rtfd) {
             attributed = NSAttributedString(rtfd: rtfd, documentAttributes: nil)
         } else if let rtf = pasteboard.data(forType: .rtf) {
@@ -21,6 +21,27 @@ enum RichPaste {
         let plain = (pasteboard.string(forType: .string) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !markdown.isEmpty, markdown != plain else { return nil }
         return markdown
+    }
+
+    /// The HTML without what its importer would fetch from the web while turning it into text: pictures, frames, media,
+    /// stylesheets and scripts, and pictures named in styles. A note keeps none of them; bold and italic in styles stay.
+    static func withoutFetches(_ html: Data) -> Data {
+        guard var text = String(data: html, encoding: .utf8) else { return html }
+        for pattern in [#"(?is)<(script|style|iframe|video|audio|picture|object|embed|svg)\b.*?</\1\s*>"#,
+                        #"(?i)<(img|source|link|meta|iframe|embed|input|image|track)\b[^>]*>"#] {
+            text = text.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
+        }
+        // A picture named in a style ("background: url(…)") only: the rest of the style, bold or italic, stays.
+        guard let styles = try? NSRegularExpression(pattern: #"(?i)style\s*=\s*("[^"]*"|'[^']*')"#) else { return Data(text.utf8) }
+        let whole = text as NSString
+        var result = "", last = 0
+        for match in styles.matches(in: text, range: NSRange(location: 0, length: whole.length)) {
+            result += whole.substring(with: NSRange(location: last, length: match.range.location - last))
+            result += whole.substring(with: match.range).replacingOccurrences(of: #"(?i)url\s*\([^)]*\)"#, with: "none", options: .regularExpression)
+            last = match.range.location + match.range.length
+        }
+        result += whole.substring(from: last)
+        return Data(result.utf8)
     }
 
     private enum Kind: Equatable {

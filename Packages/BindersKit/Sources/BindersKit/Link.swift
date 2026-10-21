@@ -2,7 +2,7 @@ import CryptoKit
 import Foundation
 import Network
 
-/// The phone link: how an iPhone (or any paired client) reaches Binders on a Mac, over the home network or Tailscale.
+/// The phone link: how an iPhone (or any paired client) reaches Binders on a Mac, over the home network or a VPN.
 ///
 /// The Mac is the server and the only writer. A client pairs once by scanning a QR code, which carries a one-time secret;
 /// over a connection keyed by that secret it receives a device key of its own. From then on it connects with TLS 1.2
@@ -66,7 +66,7 @@ public struct LinkPairing: Codable, Equatable, Sendable {
     public var version: Int
     /// The Mac's name, shown on the phone.
     public var name: String
-    /// "host:port" pairs to try, local network first, then Tailscale.
+    /// "host:port" pairs to try: the local network first, then VPN addresses, names and IPv6, IPv6 in brackets.
     public var addresses: [String]
     public var secret: Data
     public var expires: Date

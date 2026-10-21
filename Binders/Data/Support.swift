@@ -11,6 +11,20 @@ enum Log {
     static let hotkey = Logger(subsystem: "io.binders.mac", category: "hotkey")
 }
 
+/// Where Binders keeps its preferences. A run against a throwaway folder (BINDERS_DATA_DIR: the self-tests, the demo
+/// shots) keeps them in a file in that folder, so it never changes the real app's settings, which a Debug build shares
+/// (same bundle identifier), and runs side by side don't change each other's.
+enum AppDefaults {
+    static let store: UserDefaults = {
+        guard AppPaths.isDemo, let store = UserDefaults(suiteName: AppPaths.support.appendingPathComponent("defaults").path) else { return .standard }
+        return store
+    }()
+
+    /// A window's frame is remembered under its name in the app's own preferences, which a suite can't take: a run
+    /// against a throwaway folder doesn't remember it at all.
+    static func frameName(_ name: String) -> String { AppPaths.isDemo ? "" : name }
+}
+
 enum AppPaths {
     /// Product screenshots run against a throwaway folder of fictional data, named by this environment variable.
     /// The override is honoured only for a folder that is empty (it is then marked) or already carries the marker, so it

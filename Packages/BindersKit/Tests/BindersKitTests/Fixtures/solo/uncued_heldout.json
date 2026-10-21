@@ -1,0 +1,302 @@
+{
+ "about": "Held out: written after rules.uncued was fixed on uncued_phrases.json, to see what it does on phrasing it wasn't written against. Run once before any change (gate_heldout.py writes gate_heldout.out.txt). No real people's names; none has a cue. `want`: fix, todo or idea to keep; negatives to let go.",
+ "phrases": [
+  {
+   "id": "held-f01",
+   "text": "The calendar view cuts off the last day of the week.",
+   "want": "fix"
+  },
+  {
+   "id": "held-f02",
+   "text": "Dictation drops the last word sometimes.",
+   "want": "fix"
+  },
+  {
+   "id": "held-f03",
+   "text": "The changelog is out of date.",
+   "want": "fix"
+  },
+  {
+   "id": "held-f04",
+   "text": "Notifications come twice on the Mac.",
+   "want": "fix"
+  },
+  {
+   "id": "held-f05",
+   "text": "The README still says the old install steps.",
+   "want": "fix"
+  },
+  {
+   "id": "held-f06",
+   "text": "The settings page is a mess.",
+   "want": "fix"
+  },
+  {
+   "id": "held-f07",
+   "text": "The tooltip on the share button is wrong.",
+   "want": "fix"
+  },
+  {
+   "id": "held-f08",
+   "text": "The beta keeps logging me out.",
+   "want": "fix"
+  },
+  {
+   "id": "held-f09",
+   "text": "The demo video won't play on Safari.",
+   "want": "fix"
+  },
+  {
+   "id": "held-f10",
+   "text": "Card titles get cut off on the iPhone.",
+   "want": "fix"
+  },
+  {
+   "id": "held-f11",
+   "text": "The installer asks for the password twice.",
+   "want": "fix"
+  },
+  {
+   "id": "held-f12",
+   "text": "The font on the pricing page is too small.",
+   "want": "fix"
+  },
+  {
+   "id": "held-f13",
+   "text": "Search doesn't find anything in old captures.",
+   "want": "fix"
+  },
+  {
+   "id": "held-f14",
+   "text": "There's a bug when you paste a link into a card.",
+   "want": "fix"
+  },
+  {
+   "id": "held-f15",
+   "text": "The agents page takes forever to load.",
+   "want": "fix"
+  },
+  {
+   "id": "held-t01",
+   "text": "I should write the release notes tonight.",
+   "want": "todo"
+  },
+  {
+   "id": "held-t02",
+   "text": "I ought to reply to the landlord.",
+   "want": "todo"
+  },
+  {
+   "id": "held-t03",
+   "text": "Maybe I should cancel the old domain.",
+   "want": "todo"
+  },
+  {
+   "id": "held-t04",
+   "text": "I really should update the screenshots on the site.",
+   "want": "todo"
+  },
+  {
+   "id": "held-t05",
+   "text": "We must ship the fix by Friday.",
+   "want": "todo"
+  },
+  {
+   "id": "held-t06",
+   "text": "I'd like to clean up the onboarding copy.",
+   "want": "todo"
+  },
+  {
+   "id": "held-t07",
+   "text": "Add a task to back up the photos.",
+   "want": "todo"
+  },
+  {
+   "id": "held-t08",
+   "text": "I'd better pay the electricity bill.",
+   "want": "todo"
+  },
+  {
+   "id": "held-t09",
+   "text": "I need the receipts for the accountant by Monday.",
+   "want": "todo"
+  },
+  {
+   "id": "held-t10",
+   "text": "Should probably call the garage about the car.",
+   "want": "todo"
+  },
+  {
+   "id": "held-i01",
+   "text": "What if we charged for teams only?",
+   "want": "idea"
+  },
+  {
+   "id": "held-i02",
+   "text": "We could let agents comment on each other's cards.",
+   "want": "idea"
+  },
+  {
+   "id": "held-i03",
+   "text": "It'd be great to have a dark icon.",
+   "want": "idea"
+  },
+  {
+   "id": "held-i04",
+   "text": "A weekly email of what got done would be nice.",
+   "want": "idea"
+  },
+  {
+   "id": "held-i05",
+   "text": "Maybe the widget could show the next meeting.",
+   "want": "idea"
+  },
+  {
+   "id": "held-i06",
+   "text": "Here's a thought: a shared inbox for the team.",
+   "want": "idea"
+  },
+  {
+   "id": "held-i07",
+   "text": "We might try a referral code at launch.",
+   "want": "idea"
+  },
+  {
+   "id": "held-i08",
+   "text": "Imagine if the board could talk back.",
+   "want": "idea"
+  },
+  {
+   "id": "held-i09",
+   "text": "How about letting people pin a card.",
+   "want": "idea"
+  },
+  {
+   "id": "held-i10",
+   "text": "What if I made the keyboard learn snippets?",
+   "want": "idea"
+  }
+ ],
+ "negatives": [
+  {
+   "id": "held-n01",
+   "text": "The sandwich here is way too big."
+  },
+  {
+   "id": "held-n02",
+   "text": "This bench is wet."
+  },
+  {
+   "id": "held-n03",
+   "text": "The view from up here is incredible."
+  },
+  {
+   "id": "held-n04",
+   "text": "My headphones keep falling out."
+  },
+  {
+   "id": "held-n05",
+   "text": "The queue at the post office was so long."
+  },
+  {
+   "id": "held-n06",
+   "text": "That guy's dog is huge."
+  },
+  {
+   "id": "held-n07",
+   "text": "The park map is confusing."
+  },
+  {
+   "id": "held-n08",
+   "text": "My calendar is way too full this week."
+  },
+  {
+   "id": "held-n09",
+   "text": "The train app says it's delayed."
+  },
+  {
+   "id": "held-n10",
+   "text": "The wind is so annoying today."
+  },
+  {
+   "id": "held-n11",
+   "text": "Their website is so slow."
+  },
+  {
+   "id": "held-n12",
+   "text": "The menu at that place was confusing."
+  },
+  {
+   "id": "held-n13",
+   "text": "The signs here are hard to read."
+  },
+  {
+   "id": "held-n14",
+   "text": "The football app crashed during the match."
+  },
+  {
+   "id": "held-n15",
+   "text": "We should go for a swim later."
+  },
+  {
+   "id": "held-n16",
+   "text": "We could meet up on Thursday."
+  },
+  {
+   "id": "held-n17",
+   "text": "I want to get a coffee."
+  },
+  {
+   "id": "held-n18",
+   "text": "What if I'm wrong about all this?"
+  },
+  {
+   "id": "held-n19",
+   "text": "It'd be nice to sit in the sun for a bit."
+  },
+  {
+   "id": "held-n20",
+   "text": "The phone keeps buzzing in my pocket."
+  },
+  {
+   "id": "held-n21",
+   "text": "The ticket machine doesn't work."
+  },
+  {
+   "id": "held-n22",
+   "text": "My laptop battery is too low."
+  },
+  {
+   "id": "held-n23",
+   "text": "The post was too long to read on the bus."
+  },
+  {
+   "id": "held-n24",
+   "text": "Honestly the docs for that library are terrible."
+  },
+  {
+   "id": "held-n25",
+   "text": "I should have said something earlier."
+  },
+  {
+   "id": "held-n26",
+   "text": "We should be careful crossing here."
+  },
+  {
+   "id": "held-n27",
+   "text": "Maybe we could try that new place."
+  },
+  {
+   "id": "held-n28",
+   "text": "How about trying the other path."
+  },
+  {
+   "id": "held-n29",
+   "text": "That build of the bridge took years."
+  },
+  {
+   "id": "held-n30",
+   "text": "The light at the crossing is broken."
+  }
+ ]
+}

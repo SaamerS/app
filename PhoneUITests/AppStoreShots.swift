@@ -101,6 +101,9 @@ final class AppStoreShots: XCTestCase {
         back(app)
         app.buttons["Ask"].tap()
         _ = app.staticTexts["Sources"].waitForExistence(timeout: 90)
+        // With a Mac that streams, Sources shows while the answer is still being written: the tour waits for it to finish.
+        let written = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: app.activityIndicators.firstMatch)
+        _ = XCTWaiter.wait(for: [written], timeout: 90)
         pause(4)
         app.buttons["Done"].tap()
         pause(1)
@@ -139,7 +142,8 @@ final class AppStoreShots: XCTestCase {
     private func launch(_ arguments: [String], resume: Bool = false) -> XCUIApplication {
         let app = XCUIApplication()
         app.terminate()
-        app.launchArguments = arguments
+        // The screens these shots were framed on: the home before the tabs.
+        app.launchArguments = ["-classicHome", "YES"] + arguments
         app.launch()
         let answer = app.alerts.buttons[resume ? "Resume" : "Not Now"]
         if answer.waitForExistence(timeout: 3) { answer.tap() }

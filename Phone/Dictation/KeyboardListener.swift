@@ -104,6 +104,7 @@ final class KeyboardListener {
             fail("Didn't catch anything. Try again, a little closer to the microphone.")
             return
         }
+        // The app's own cleanup, so the keyboard waits about 4 s at most too.
         let cleaned = if let connection { await DictationSession.cleanUp(raw, connection: connection) } else { (text: raw, by: "") }
         state.text = cleaned.text
         state.phase = .done
@@ -200,8 +201,8 @@ final class KeyboardListener {
         }
         state = KeyboardBridge.State(phase: .off)
         publish()
+        // In the background, the link goes with the hold.
         connection?.holdOpen = false
-        if UIApplication.shared.applicationState != .active { connection?.sceneChanged(active: false) }
     }
 
     /// Lets go of the microphone it keeps ready, unless you're dictating: All-day capture wants it back.

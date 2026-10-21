@@ -93,6 +93,12 @@ struct MLXClient: LLMClient {
 
     func stream(system: String, user: String, maxTokens: Int, temperature: Double, timeout: TimeInterval,
                 stopWhen: @escaping @Sendable (String) -> Bool) async throws -> String {
+        try await stream(system: system, user: user, maxTokens: maxTokens, temperature: temperature, timeout: timeout,
+                         stopWhen: stopWhen, onText: { _ in })
+    }
+
+    func stream(system: String, user: String, maxTokens: Int, temperature: Double, timeout: TimeInterval,
+                stopWhen: @escaping @Sendable (String) -> Bool, onText: @escaping @Sendable (String) -> Void) async throws -> String {
         let directory = try directory
         let idle = idleMinutes
         let work: @Sendable () async throws -> String = {
@@ -106,6 +112,7 @@ struct MLXClient: LLMClient {
                 try Task.checkCancellation()
                 guard case .chunk(let chunk) = event else { continue }
                 text += chunk
+                onText(text)
                 if chunk.contains("\n"), stopWhen(text) { break }
             }
             await MLXRuntime.shared.used(keepFor: idle)

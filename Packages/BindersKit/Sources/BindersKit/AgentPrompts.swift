@@ -46,9 +46,13 @@ public enum AgentPrompts {
     }
 
     /// The prompt, trimmed, unless it isn't writing: a slash command on its own ("/clear", "/model opus"), a shell
-    /// command run through the agent ("!git status"), or a reply too short to mean much on its own ("yes", "go ahead").
+    /// command run through the agent ("!git status"), a reply too short to mean much on its own ("yes", "go ahead"), or
+    /// the words Binders gives an agent it wakes for a card, which are Binders' and not yours. Those start with
+    /// `AgentWake.promptMarker`, perhaps after what a harness puts in front of a message from another session (a line or
+    /// a tag naming the sender), as when Binders posts a card into the Claude Code session you have open.
     public static func worthKeeping(_ raw: String) -> String? {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.prefix(500).contains(AgentWake.promptMarker) { return nil }
         if text.hasPrefix("!") { return nil }
         if text.hasPrefix("/") {
             // "/compact keep the decisions about pricing": the words after a command can be worth keeping.

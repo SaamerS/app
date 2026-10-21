@@ -22,6 +22,15 @@ final class RedactorTests: XCTestCase {
         XCTAssertEqual(Redactor.redact("nothing sensitive here, meeting at 3").count, 0)
     }
 
+    func testACardNumberRunningOnIntoItsExpiryStillGoes() {
+        let typed = Redactor.redact("Use card 4111 1111 1111 1111 12/27, code 123")
+        XCTAssertEqual(typed.text, "Use card [card] 12/27, code 123")
+        XCTAssertEqual(Redactor.redact("4111111111111111 12/27").text, "[card] 12/27")
+        XCTAssertEqual(Redactor.redact("Card 4111-1111-1111-1111-12").text, "Card [card]-12")
+        // A run that's no card however it's cut stays.
+        XCTAssertEqual(Redactor.redact("Order 1234 5678 9012 3456 78").text, "Order 1234 5678 9012 3456 78")
+    }
+
     func testLuhnRejectsRandomDigitRuns() {
         XCTAssertTrue(Redactor.luhn("4111111111111111"))
         XCTAssertFalse(Redactor.luhn("4111111111111112"))

@@ -6,7 +6,7 @@ import XCTest
 final class KeyboardTests: XCTestCase {
     func testDictatingWithTheKeyboard() throws {
         let app = XCUIApplication()
-        app.launchArguments = ["-open", "newnote", "-keyboardText", "Um so send the pricing deck by Thursday."]
+        app.launchArguments = ["-classicHome", "YES", "-open", "newnote", "-keyboardText", "Um so send the pricing deck by Thursday."]
         app.launch()
 
         let mic = app.descendants(matching: .any)["keyboard-mic"]
@@ -58,7 +58,7 @@ final class KeyboardTests: XCTestCase {
 final class KeyboardTypingTests: XCTestCase {
     func testCorrectsSuggestsAndDeletes() throws {
         let app = XCUIApplication()
-        app.launchArguments = ["-open", "newnote"]
+        app.launchArguments = ["-classicHome", "YES", "-open", "newnote"]
         app.launch()
         if !app.descendants(matching: .any)["keyboard-mic"].waitForExistence(timeout: 8) {
             KeyboardSetup.enable()

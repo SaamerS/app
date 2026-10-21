@@ -162,6 +162,77 @@ public struct TeamNote: Equatable, Sendable {
     }
 }
 
+/// Whose words a shared note holds, in its file's front matter, so it travels with the note: the agent that wrote it
+/// (`binders_made_by`), and the agent that last changed it and when (`binders_edited_by`, `binders_edited_at`), until
+/// someone makes it theirs. On a teammate's Mac it's labelled, Ask leaves it out and a correction in it steers nothing,
+/// as on yours. Names are kept exactly as the note has them, so what's written reads back the same and the sync hash
+/// agrees on both Macs. A Binders that doesn't know a line keeps it as it is (`extraFrontmatter`), so an older teammate's
+/// edit doesn't take the mark off.
+public struct TeamNoteMark: Equatable, Sendable {
+    public static let madeByKey = "binders_made_by:"
+    public static let editedByKey = "binders_edited_by:"
+    public static let editedAtKey = "binders_edited_at:"
+
+    public var madeBy: String?
+    public var editedBy: String?
+    public var editedAt: Date?
+
+    /// An empty name counts as none, and a time goes only with the agent that edited.
+    public init(madeBy: String? = nil, editedBy: String? = nil, editedAt: Date? = nil) {
+        self.madeBy = madeBy.flatMap { $0.isEmpty ? nil : $0 }
+        self.editedBy = editedBy.flatMap { $0.isEmpty ? nil : $0 }
+        self.editedAt = self.editedBy == nil ? nil : editedAt
+    }
+
+    /// The mark a note file's front matter lines carry; none when they carry nothing, as in files from before edits
+    /// were marked.
+    public init(lines: [String]) {
+        self.init(madeBy: Self.value(Self.madeByKey, in: lines), editedBy: Self.value(Self.editedByKey, in: lines),
+                  editedAt: Self.value(Self.editedAtKey, in: lines).flatMap { try? Date($0, strategy: .iso8601) })
+    }
+
+    /// No agent's words in it, or someone made it theirs.
+    public var isEmpty: Bool { madeBy == nil && editedBy == nil }
+
+    /// Its lines, to go after the note's other front matter; none for a note that's all yours.
+    public var lines: [String] {
+        var lines: [String] = []
+        if let madeBy { lines.append(Self.line(Self.madeByKey, madeBy)) }
+        if let editedBy {
+            lines.append(Self.line(Self.editedByKey, editedBy))
+            if let editedAt { lines.append(Self.line(Self.editedAtKey, editedAt.formatted(.iso8601))) }
+        }
+        return lines
+    }
+
+    /// A note file's other front matter lines, with any mark taken out, to write the note's own in their place.
+    public static func removing(from lines: [String]) -> [String] {
+        lines.filter { line in ![madeByKey, editedByKey, editedAtKey].contains { line.hasPrefix($0) } }
+    }
+
+    /// What it adds to the note's sync hash: nothing for a note that's all yours, and for a note an agent wrote exactly
+    /// what was added before edits were marked, so updating makes no note look changed. The time isn't in it: it comes
+    /// with an edit, whose words change the hash anyway, and a file keeps it only to the second.
+    public var hashSuffix: String {
+        (madeBy.map { "\n\u{1}made by \($0)" } ?? "") + (editedBy.map { "\n\u{1}edited by \($0)" } ?? "")
+    }
+
+    /// A line's value, unquoted as `line` quotes it; nil when the line is missing or empty.
+    static func value(_ key: String, in lines: [String]) -> String? {
+        guard let line = lines.first(where: { $0.hasPrefix(key) }) else { return nil }
+        var value = String(line.dropFirst(key.count)).trimmingCharacters(in: .whitespaces)
+        if value.count >= 2, value.hasPrefix("\""), value.hasSuffix("\"") {
+            value = String(value.dropFirst().dropLast()).replacingOccurrences(of: "\\\"", with: "\"").replacingOccurrences(of: "\\\\", with: "\\")
+        }
+        return value.isEmpty ? nil : value
+    }
+
+    /// `binders_made_by: "Claude Code"`, as Binders has always written it.
+    static func line(_ key: String, _ value: String) -> String {
+        key + " \"" + value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+    }
+}
+
 public enum TeamCoding {
     public static func encoder() -> JSONEncoder {
         let encoder = JSONEncoder()

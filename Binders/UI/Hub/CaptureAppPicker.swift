@@ -23,7 +23,7 @@ struct CaptureAppPicker: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Capture writing in…").font(.headline)
+                Text("Capture writing in…").font(BindersTheme.cardTitle)
                 Text("Apps that are open now. What you write in them is kept once you send or save it.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -72,6 +72,7 @@ struct CaptureAppPicker: View {
             .padding(12)
         }
         .frame(width: 460, height: 460)
+        .pageGround()
         .onAppear(perform: load)
     }
 

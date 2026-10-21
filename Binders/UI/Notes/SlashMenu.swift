@@ -56,7 +56,9 @@ final class SlashMenu {
         panel.backgroundColor = .clear
         panel.hasShadow = true
         panel.level = .popUpMenu
-        let hosting = NSHostingView(rootView: SlashMenuView(menu: self) { [weak self] item in self?.choose(item) })
+        // Its own window, so it's told whose pages it's on: inside a binder, the selected row wears the binder's colour.
+        let hosting = NSHostingView(rootView: SlashMenuView(menu: self) { [weak self] item in self?.choose(item) }
+            .binderTint(textView.styler.tint?.index))
         panel.contentView = hosting
         window.addChildWindow(panel, ordered: .above)
         self.panel = panel
@@ -124,6 +126,20 @@ final class SlashMenu {
 private struct SlashMenuView: View {
     let menu: SlashMenu
     let choose: (SlashMenu.Item) -> Void
+    @Environment(\.binderTint) private var binderTint
+    @Environment(\.colorScheme) private var colorScheme
+
+    /// The selected row: the accent with white words, or inside a binder a light wash of the binder's control colour with
+    /// ink words, as strong as a selected row in the sidebar.
+    private var selectedFill: Color {
+        guard let binderTint else { return BindersTheme.accent }
+        return binderTint.control.opacity(colorScheme == .dark ? 0.3 : 0.14)
+    }
+
+    private func words(_ selected: Bool) -> Color { selected && binderTint == nil ? .white : .primary }
+    private func glyphs(_ selected: Bool, hint: Bool = false) -> Color {
+        selected && binderTint == nil ? .white.opacity(hint ? 0.8 : 1) : .secondary
+    }
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -147,16 +163,16 @@ private struct SlashMenuView: View {
                                 }
                             }
                             .frame(width: 22)
-                            .foregroundStyle(index == menu.selected ? Color.white : Color.secondary)
+                            .foregroundStyle(glyphs(index == menu.selected))
                             Text(item.title)
                             Spacer(minLength: 8)
-                            Text(item.hint).font(.caption).foregroundStyle(index == menu.selected ? Color.white.opacity(0.8) : Color.secondary)
+                            Text(item.hint).font(.caption).foregroundStyle(glyphs(index == menu.selected, hint: true))
                         }
                         .font(.callout)
-                        .foregroundStyle(index == menu.selected ? Color.white : Color.primary)
+                        .foregroundStyle(words(index == menu.selected))
                         .padding(.horizontal, 8)
                         .frame(height: 30)
-                        .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(index == menu.selected ? Color.accentColor : .clear))
+                        .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(index == menu.selected ? selectedFill : .clear))
                         .contentShape(Rectangle())
                         .onTapGesture { choose(item) }
                         .onHover { inside in if inside { menu.selected = index } }
@@ -171,6 +187,15 @@ private struct SlashMenuView: View {
         }
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.primary.opacity(0.1)))
+    }
+}
+
+extension SlashMenu {
+    /// The menu as it opens, its first row selected, on the pages of the binder wearing `colour` (nil: outside one): for
+    /// the draw self-test, which has no note to type in.
+    static func drawn(colour: Int?) -> some View {
+        let menu = SlashMenu(textView: MarkdownTextView(frame: .zero), at: 0)
+        return SlashMenuView(menu: menu) { _ in }.binderTint(colour).frame(width: 280, height: 320)
     }
 }
 

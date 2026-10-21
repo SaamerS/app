@@ -67,11 +67,13 @@ struct MarkdownNoteEditor: View {
     var reveal: EditorReveal? = nil
     /// Buttons for the note as a whole, at the right end of the toolbar: its panels, popping it out.
     var accessories: AnyView? = nil
+    /// The note page's words, for an editor on `paperSheet()`: paper ink in the light appearance, ink in the dark.
+    var paper = false
     @State private var model = MarkdownEditorModel()
     /// Every note editor follows the same choice.
-    @AppStorage("notesShowMarkdown") private var showsMarkup = false
+    @AppStorage("notesShowMarkdown", store: AppDefaults.store) private var showsMarkup = false
     /// ⌘= and ⌘- make the words bigger or smaller everywhere notes are written.
-    @AppStorage(TextZoom.key) private var zoom: Double = 1
+    @AppStorage(TextZoom.key, store: AppDefaults.store) private var zoom: Double = 1
 
     var body: some View {
         VStack(spacing: 0) {
@@ -79,7 +81,7 @@ struct MarkdownNoteEditor: View {
                             accessories: accessories)
             Divider().opacity(0.5)
             MarkdownEditor(text: $text, model: model, fontSize: (fontSize * (zoom == 0 ? 1 : zoom)).rounded(), placeholder: placeholder, inset: inset,
-                           showsMarkup: showsMarkup, links: links, focused: focused, reveal: reveal)
+                           showsMarkup: showsMarkup, links: links, focused: focused, reveal: reveal, paper: paper)
         }
     }
 }
@@ -104,6 +106,7 @@ struct MarkdownToolbar: View {
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
+            .quietControl()
             .help("Heading")
             separator
             button("bold", "Bold  ⌘B", .bold)
@@ -133,6 +136,7 @@ struct MarkdownToolbar: View {
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
                 .fixedSize()
+                .quietControl()
                 .help("Outline: jump to a heading")
                 .accessibilityLabel("Outline")
             }
@@ -177,6 +181,8 @@ struct MarkdownEditor: NSViewRepresentable {
     var links: NoteLinks? = nil
     var focused = false
     var reveal: EditorReveal? = nil
+    /// On the note page: its words, which follow the appearance as the page does.
+    var paper = false
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -191,7 +197,7 @@ struct MarkdownEditor: NSViewRepresentable {
         let textView = MarkdownTextView(frame: .zero, textContainer: container)
         layout.delegate = textView
         textView.showsMarkup = showsMarkup
-        textView.styler = MarkdownStyler(fontSize: fontSize)
+        textView.styler = MarkdownStyler(fontSize: fontSize, onPaper: paper, tint: context.environment.binderTint)
         textView.styler.linkExists = links?.exists
         textView.styler.embedSize = { [weak textView] source, width in
             textView?.embedSize(source: source, width: width) ?? NSSize(width: 360, height: 200)
@@ -253,9 +259,11 @@ struct MarkdownEditor: NSViewRepresentable {
             context.coordinator.revealed = reveal.id
             Self.go(textView, to: reveal.place)
         }
-        // Zoomed: everything restyled at the new size.
-        if textView.styler.fontSize != fontSize {
-            var styler = MarkdownStyler(fontSize: fontSize)
+        // Zoomed, or on another binder's pages (or its colour changed): everything restyled, at the new size, with the
+        // links in the binder's colour.
+        let tint = context.environment.binderTint
+        if textView.styler.fontSize != fontSize || textView.styler.tint != tint {
+            var styler = MarkdownStyler(fontSize: fontSize, onPaper: textView.styler.onPaper, tint: tint)
             styler.linkExists = textView.styler.linkExists
             styler.embedSize = textView.styler.embedSize
             textView.styler = styler
@@ -432,6 +440,20 @@ struct MarkdownStyler {
     var linkExists: ((String) -> Bool)?
     /// How big a picture or video is drawn, from its source and the width its caption asks for.
     var embedSize: ((String, Int?) -> NSSize)?
+    /// The note page: its words, paper ink and paper's muted ones in the light appearance, the theme's in the dark.
+    /// Elsewhere the theme's ink. Both follow the appearance.
+    var onPaper = false
+    /// The binder whose pages the editor is on, whose colour its links and marks wear; nil elsewhere.
+    var tint: BinderTint?
+
+    var ink: NSColor { onPaper ? BindersTheme.NS.paperInk : BindersTheme.NS.ink }
+    var secondary: NSColor { onPaper ? BindersTheme.NS.paperMuted : BindersTheme.NS.muted }
+    var tertiary: NSColor { onPaper ? BindersTheme.NS.paperFaint : BindersTheme.NS.faint }
+    /// Links, [[links]] and #tags, as words that read on the page: the accent's, or the binder's on its pages.
+    var link: NSColor { tint.map { BinderPalette.nsTextColor($0.index) } ?? BindersTheme.NS.accentText }
+    /// What's marked or chosen on the page, a #tag's fill and a selected picture's ring: the accent, or the binder's
+    /// colour on its pages.
+    var accent: NSColor { tint.map { BinderPalette.nsColor($0.index) } ?? BindersTheme.NS.accent }
 
     var baseFont: NSFont { .systemFont(ofSize: fontSize) }
     var codeFont: NSFont { .monospacedSystemFont(ofSize: fontSize * 0.9, weight: .regular) }
@@ -444,7 +466,7 @@ struct MarkdownStyler {
     }
 
     var baseAttributes: [NSAttributedString.Key: Any] {
-        [.font: baseFont, .foregroundColor: NSColor.labelColor, .paragraphStyle: baseParagraph]
+        [.font: baseFont, .foregroundColor: ink, .paragraphStyle: baseParagraph]
     }
 
     /// Styles `range`. `concealed` says whether hidden markup takes no room, which is where wrapped list lines line up.
@@ -470,7 +492,7 @@ struct MarkdownStyler {
                 let line = NSIntersectionRange((storage.string as NSString).lineRange(for: span.range), range)
                 storage.addAttributes([.font: codeFont, .markdownCodeBlock: true], range: line)
                 if span.style == .codeFence {
-                    storage.addAttribute(.foregroundColor, value: NSColor.tertiaryLabelColor, range: target)
+                    storage.addAttribute(.foregroundColor, value: tertiary, range: target)
                     // The ``` goes; a language name after it stays, faintly.
                     let fence = (storage.string as NSString).range(of: #"^ {0,3}(`{3,}|~{3,})"#, options: .regularExpression, range: span.range)
                     if fence.location != NSNotFound { storage.addAttribute(.markdownConceal, value: true, range: NSIntersectionRange(fence, range)) }
@@ -479,7 +501,7 @@ struct MarkdownStyler {
                 let style = baseParagraph.mutableCopy() as! NSMutableParagraphStyle
                 style.firstLineHeadIndent = 14
                 style.headIndent = 14
-                storage.addAttributes([.foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: style, .markdownQuote: true], range: target)
+                storage.addAttributes([.foregroundColor: secondary, .paragraphStyle: style, .markdownQuote: true], range: target)
             case .rule:
                 storage.addAttributes([.foregroundColor: NSColor.clear, .markdownRule: true], range: target)
             case .tableRow(let table, let header, let delimiter):
@@ -493,7 +515,7 @@ struct MarkdownStyler {
                 style.paragraphSpacingBefore = size.height + EmbedLayout.gap + fontSize * 0.4
                 style.paragraphSpacing = fontSize * 0.6
                 storage.addAttributes([.paragraphStyle: style, .font: NSFont.systemFont(ofSize: fontSize * 0.82),
-                                       .foregroundColor: NSColor.secondaryLabelColor, .markdownEmbed: EmbedBox(source: source, size: size)],
+                                       .foregroundColor: secondary, .markdownEmbed: EmbedBox(source: source, size: size)],
                                       range: target)
             default:
                 break
@@ -505,23 +527,23 @@ struct MarkdownStyler {
             case .bold: convert(storage, target, to: .boldFontMask)
             case .italic: convert(storage, target, to: .italicFontMask)
             case .strikethrough:
-                storage.addAttributes([.strikethroughStyle: NSUnderlineStyle.single.rawValue, .foregroundColor: NSColor.secondaryLabelColor], range: target)
+                storage.addAttributes([.strikethroughStyle: NSUnderlineStyle.single.rawValue, .foregroundColor: secondary], range: target)
             case .inlineCode:
-                storage.addAttributes([.font: codeFont, .backgroundColor: NSColor.labelColor.withAlphaComponent(0.07)], range: target)
+                storage.addAttributes([.font: codeFont, .backgroundColor: ink.withAlpha(0.07)], range: target)
             case .listMarker:
-                storage.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor, range: target)
+                storage.addAttribute(.foregroundColor, value: secondary, range: target)
                 if target.length == 1, "-*+".contains((storage.string as NSString).substring(with: target)) {
                     storage.addAttribute(.markdownBullet, value: true, range: target)
                 }
             case .checkedText:
-                storage.addAttributes([.strikethroughStyle: NSUnderlineStyle.single.rawValue, .foregroundColor: NSColor.tertiaryLabelColor], range: target)
+                storage.addAttributes([.strikethroughStyle: NSUnderlineStyle.single.rawValue, .foregroundColor: tertiary], range: target)
             case .link:
-                storage.addAttributes([.foregroundColor: NSColor.linkColor, .underlineStyle: NSUnderlineStyle.single.rawValue], range: target)
+                storage.addAttributes([.foregroundColor: link, .underlineStyle: NSUnderlineStyle.single.rawValue], range: target)
                 if let address = linkAddress(after: span.range, in: storage.string) {
                     storage.addAttributes([.markdownLink: address, .toolTip: "⌘-click to open \(address)"], range: target)
                 }
             case .linkURL:
-                storage.addAttributes([.foregroundColor: NSColor.tertiaryLabelColor, .markdownConceal: true], range: target)
+                storage.addAttributes([.foregroundColor: tertiary, .markdownConceal: true], range: target)
             case .codeLine(let language):
                 let line = (storage.string as NSString).substring(with: span.range)
                 for token in CodeHighlighter.spans(in: line, language: language) {
@@ -531,11 +553,11 @@ struct MarkdownStyler {
                 }
             case .autolink:
                 let address = (storage.string as NSString).substring(with: span.range)
-                storage.addAttributes([.foregroundColor: NSColor.linkColor, .underlineStyle: NSUnderlineStyle.single.rawValue,
+                storage.addAttributes([.foregroundColor: link, .underlineStyle: NSUnderlineStyle.single.rawValue,
                                        .markdownLink: address, .toolTip: "⌘-click to open \(address)"], range: target)
             case .tag:
-                storage.addAttributes([.foregroundColor: NSColor.controlAccentColor,
-                                       .backgroundColor: NSColor.controlAccentColor.withAlphaComponent(0.1)], range: target)
+                storage.addAttributes([.foregroundColor: link,
+                                       .backgroundColor: accent.withAlphaComponent(0.1)], range: target)
             case .wikiLink(let title):
                 let found = linkExists?(title) ?? true
                 let destination = WikiTarget(title)
@@ -543,7 +565,7 @@ struct MarkdownStyler {
                     : found ? "Click to open \(title)"
                     : destination.isFile ? "\(destination.page) isn't in this Mac's attachments"
                     : "Click to make a note called “\(destination.page)”"
-                storage.addAttributes([.foregroundColor: found ? NSColor.controlAccentColor : NSColor.controlAccentColor.withAlphaComponent(0.55),
+                storage.addAttributes([.foregroundColor: found ? link : link.withAlpha(0.8),
                                        .markdownWikiLink: title, .cursor: NSCursor.pointingHand, .toolTip: tip], range: target)
             default:
                 break
@@ -553,11 +575,11 @@ struct MarkdownStyler {
             guard let target = clipped(span) else { continue }
             switch span.style {
             case .syntax:
-                storage.addAttributes([.foregroundColor: NSColor.tertiaryLabelColor, .markdownConceal: true], range: target)
+                storage.addAttributes([.foregroundColor: tertiary, .markdownConceal: true], range: target)
             case .tableTab:
-                storage.addAttributes([.foregroundColor: NSColor.tertiaryLabelColor, .markdownTableTab: true], range: target)
+                storage.addAttributes([.foregroundColor: tertiary, .markdownTableTab: true], range: target)
             case .tableHidden:
-                storage.addAttributes([.foregroundColor: NSColor.tertiaryLabelColor, .markdownTableHidden: true], range: target)
+                storage.addAttributes([.foregroundColor: tertiary, .markdownTableHidden: true], range: target)
             case .task(let checked):
                 // The "[ ]" stays in the text; the layout manager draws a checkbox where it is.
                 // Monospaced, so "[ ]" and "[x]" are the same width and the words after them line up.
@@ -622,16 +644,22 @@ struct MarkdownStyler {
         return string.substring(with: NSRange(location: start, length: close.location - start))
     }
 
-    /// Code's colours, as Xcode uses them; they follow light and dark.
+    /// Code's colours, after Xcode's but clear of the four that mean something (red, amber, green, lavender); they
+    /// follow light and dark, on the note page too.
     static func color(of token: CodeHighlighter.Token) -> NSColor {
         switch token {
-        case .keyword: .systemPink
-        case .string: .systemRed
-        case .number: .systemBlue
-        case .comment: .secondaryLabelColor
-        case .type: .systemPurple
+        case .keyword: codeKeyword
+        case .string: codeString
+        case .number: codeNumber
+        case .comment: BindersTheme.NS.muted
+        case .type: codeType
         }
     }
+
+    private static let codeKeyword = BindersTheme.dynamic("codeKeyword", dark: 0xE65C94, light: 0xB8336A)
+    private static let codeString = BindersTheme.dynamic("codeString", dark: 0x3FB8B6, light: 0x1D7F7D)
+    private static let codeNumber = BindersTheme.dynamic("codeNumber", dark: 0x6CB2F0, light: 0x2668B0)
+    private static let codeType = BindersTheme.dynamic("codeType", dark: 0x8F80FF, light: 0x4A39D6)
 
     private func convert(_ storage: NSTextStorage, _ range: NSRange, to trait: NSFontTraitMask) {
         storage.enumerateAttribute(.font, in: range) { value, run, _ in
@@ -946,7 +974,7 @@ final class MarkdownTextView: NSTextView, NSTextStorageDelegate, NSLayoutManager
         super.draw(dirtyRect)
         guard string.isEmpty, !placeholder.isEmpty else { return }
         let origin = NSPoint(x: textContainerInset.width + (textContainer?.lineFragmentPadding ?? 5), y: textContainerInset.height)
-        (placeholder as NSString).draw(at: origin, withAttributes: [.font: styler.baseFont, .foregroundColor: NSColor.placeholderTextColor])
+        (placeholder as NSString).draw(at: origin, withAttributes: [.font: styler.baseFont, .foregroundColor: styler.tertiary])
     }
 
     // MARK: Commands
@@ -1328,8 +1356,8 @@ final class MarkdownLayoutManager: NSLayoutManager {
             let side = font.pointSize * 1.1
             let box = NSRect(x: origin.x + rect.midX - side / 2, y: origin.y + rect.midY - side / 2, width: side, height: side)
             let symbol = checked ? "checkmark.square.fill" : "square"
-            // A white tick on the accent colour, or an empty grey box.
-            let colors: [NSColor] = checked ? [.white, .controlAccentColor] : [.secondaryLabelColor]
+            // A white tick on green, which is done, or an empty grey box.
+            let colors: [NSColor] = checked ? [.white, BindersTheme.NS.done] : [.secondaryLabelColor]
             let configuration = NSImage.SymbolConfiguration(pointSize: font.pointSize, weight: .regular)
                 .applying(NSImage.SymbolConfiguration(paletteColors: colors))
             NSImage(systemSymbolName: symbol, accessibilityDescription: checked ? "Done" : "To do")?

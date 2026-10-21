@@ -2,23 +2,6 @@ import SwiftData
 import SwiftUI
 import BindersKit
 
-/// Colours a binder can wear on its spine.
-enum BinderPalette {
-    static let colors: [Color] = [
-        BindersTheme.accent,
-        Color(red: 0.16, green: 0.62, blue: 0.62),
-        Color(red: 0.93, green: 0.52, blue: 0.20),
-        Color(red: 0.90, green: 0.36, blue: 0.58),
-        Color(red: 0.30, green: 0.66, blue: 0.36),
-        Color(red: 0.26, green: 0.60, blue: 0.90),
-        Color(red: 0.85, green: 0.68, blue: 0.20),
-        Color(red: 0.50, green: 0.54, blue: 0.62),
-    ]
-    static let names = ["Indigo", "Teal", "Orange", "Pink", "Green", "Sky", "Amber", "Slate"]
-
-    static func color(_ index: Int) -> Color { colors[abs(index) % colors.count] }
-}
-
 enum BinderTab: String, CaseIterable {
     case overview = "Overview", board = "Board", meetings = "Meetings", conversations = "Captures", notes = "Notes", knowledge = "Knowledge"
 }
@@ -33,7 +16,8 @@ extension MeetingRecord {
     var symbol: String { isConversation ? "bubble.left.and.bubble.right" : "person.2.wave.2" }
 }
 
-/// One binder: what's in it, what's still open in it, and whether the team sees it.
+/// One binder: what's in it, what's still open in it, and whether the team sees it. Its colour marks its name, and on
+/// its pages it takes the accent's place on what you act on, over a ground with a trace of it.
 struct BinderPage: View {
     @Environment(HubNavigation.self) private var navigation
     @Environment(TeamSyncService.self) private var team
@@ -48,6 +32,9 @@ struct BinderPage: View {
     @State private var renaming = false
     /// The name as it was before renaming, for the links to it.
     @State private var nameBefore = ""
+    /// What goes here is text until you click it, choose its button with the keyboard, or choose What Goes Here… in the
+    /// menu, as the name is.
+    @State private var describing = false
 
     private var binder: BinderRecord? {
         binders.first { $0.id == binderID } ?? binders.first(where: \.isDefault)
@@ -84,7 +71,9 @@ struct BinderPage: View {
                             .fill(BinderPalette.color(binder.colorIndex))
                             .frame(width: 26, height: 26)
                     }
-                    .menuStyle(.borderlessButton)
+                    // A borderless menu draws no shape label (only symbols): the button style draws the square itself.
+                    .menuStyle(.button)
+                    .buttonStyle(.plain)
                     .menuIndicator(.hidden)
                     .fixedSize()
                     .disabled(binder.isTeamCopy)
@@ -123,11 +112,14 @@ struct BinderPage: View {
                         Toggle("Share with team", isOn: Binding(get: { binder.sharedWithTeam }, set: { team.setShared(binder, $0) }))
                             .toggleStyle(.switch)
                             .controlSize(.small)
-                            .help("Everything in this binder syncs to the team, including what you add later. Audio never leaves this Mac.")
+                            .help("Its notes and meetings sync to the team, including ones you add later, with the files attached to those notes. Captures, notes from what you said to yourself, to-dos, cards and the audio Binders records stay on this Mac.")
                     }
                     Menu {
                         if !binder.isTeamCopy {
                             Button("Rename…") { renaming = true }
+                            if !binder.isDefault {
+                                Button("What Goes Here…") { describing = true }
+                            }
                             Button(binder.archived ? "Unarchive" : "Archive") {
                                 binder.archived.toggle()
                                 binder.updatedAt = Date()
@@ -146,6 +138,10 @@ struct BinderPage: View {
                     .fixedSize()
                 }
                 Text(subtitle(binder, counts: counts)).foregroundStyle(.secondary)
+                // What goes in it, for sorting new cards: not for General, which is never offered, nor a teammate's copy.
+                if !binder.isDefault, !binder.isTeamCopy {
+                    WhatGoesHereField(binder: binder, editing: $describing)
+                }
             }
             .padding(.horizontal, 24)
             .padding(.top, 24)
@@ -178,6 +174,8 @@ struct BinderPage: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
+        .pageGround()
+        .binderTint(binder.colorIndex)
         .onAppear {
             settings.currentBinderID = binder.id
             consumePendingTab()
@@ -191,7 +189,21 @@ struct BinderPage: View {
                 team.scheduleSync(after: 0.5)
             }
         } message: {
-            Text("Its \(counts.meetings) meetings and \(counts.notes) notes move to General. If it was shared, they leave the team space.")
+            Text(deleteMessage(binder, counts: counts))
+        }
+    }
+
+    /// What deleting a binder does with what's in it: it all moves to General and takes on General's sharing, said before
+    /// it happens. Captures and notes made from what you said stay on this Mac either way.
+    private func deleteMessage(_ binder: BinderRecord, counts: (meetings: Int, notes: Int)) -> String {
+        let moved = "Its \(counts.meetings) \(counts.meetings == 1 ? "meeting" : "meetings") and \(counts.notes) \(counts.notes == 1 ? "note" : "notes") move to General."
+        guard team.isConfigured else { return moved }
+        let generalShared = binders.first(where: \.isDefault)?.sharedWithTeam ?? false
+        switch (binder.sharedWithTeam, generalShared) {
+        case (true, false): return moved + " They leave the team space."
+        case (false, true): return moved + " General is shared with your team, so they go to the team space too. Captures and notes made from what you said stay on this Mac."
+        case (true, true): return moved + " They stay in the team space."
+        case (false, false): return moved
         }
     }
 
@@ -259,9 +271,9 @@ struct BinderOverview: View {
 
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(alignment: .firstTextBaseline) {
-                        Text("To-dos").font(BindersTheme.columnTitle)
+                        Text("To-dos").font(BindersTheme.columnTitle).foregroundStyle(.sectionInk)
                         Spacer()
-                        Text(open == 0 ? "nothing open" : "\(open) open").font(.callout).foregroundStyle(.secondary)
+                        Text(open == 0 ? "nothing open" : "\(open) open").font(.callout).monospacedDigit().foregroundStyle(.secondary)
                     }
                     TaskBoard(tasks: tasks)
                 }
@@ -279,18 +291,19 @@ struct BinderOverview: View {
 
                 if !people.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Comes up in this binder").font(BindersTheme.columnTitle)
+                        Text("Comes up in this binder").font(BindersTheme.columnTitle).foregroundStyle(.sectionInk)
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 8, alignment: .leading)], alignment: .leading, spacing: 8) {
                             ForEach(people) { entity in
                                 HStack(spacing: 5) {
                                     Circle().fill(EntityStyle.color(entity.type)).frame(width: 6, height: 6)
                                     Text(entity.name).lineLimit(1)
-                                    Text("\(entity.documents)").foregroundStyle(.secondary)
+                                    Text("\(entity.documents)").monospacedDigit().foregroundStyle(.secondary)
                                 }
                                 .font(.callout)
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 5)
-                                .background(Capsule().fill(Color.primary.opacity(0.06)))
+                                .background(Capsule().fill(BindersTheme.surface))
+                                .overlay(Capsule().strokeBorder(BindersTheme.line))
                             }
                         }
                     }
@@ -306,13 +319,13 @@ struct BinderOverview: View {
 
     private func recentList(title: String, empty: String, items: [(UUID, String, String, () -> Void)]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(title).font(BindersTheme.columnTitle)
+            Text(title).font(BindersTheme.columnTitle).foregroundStyle(.sectionInk)
             if items.isEmpty { Text(empty).foregroundStyle(.secondary) }
             ForEach(items, id: \.0) { item in
                 Button(action: item.3) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(item.1).lineLimit(1)
-                        Text(item.2).font(.caption).foregroundStyle(.secondary)
+                        Text(item.2).font(BindersTheme.time()).foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
@@ -322,6 +335,60 @@ struct BinderOverview: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .paperCard(padding: 16)
+    }
+}
+
+/// A binder's "What goes here", in your words: a plain button until you click it or choose it with the keyboard (or What
+/// Goes Here… in the binder's menu), as the name is text, so it never takes the focus when the page opens; then one line,
+/// saved when the field lets go. At most 140 characters, line breaks joined. The card router reads it with the binder's
+/// latest titles. Not synced to your team.
+struct WhatGoesHereField: View {
+    @Bindable var binder: BinderRecord
+    @Binding var editing: Bool
+    @State private var text = ""
+    @FocusState private var focused: Bool
+    static let limit = 140
+
+    var body: some View {
+        Group {
+            if editing {
+                TextField("What goes here", text: $text, prompt: Text("What goes here, in a few words"))
+                    .textFieldStyle(.plain)
+                    .focused($focused)
+                    .onSubmit { focused = false }
+                    .onAppear {
+                        text = binder.whatGoesHere
+                        DispatchQueue.main.async { focused = true }
+                    }
+                    .onChange(of: text) { _, new in
+                        if new.count > Self.limit { text = String(new.prefix(Self.limit)) }
+                    }
+                    .onChange(of: focused) { _, now in
+                        guard !now else { return }
+                        let line = String(PythonText.oneLine(text).prefix(Self.limit))
+                        if line != binder.whatGoesHere {
+                            binder.whatGoesHere = line
+                            binder.updatedAt = Date()
+                            Store.shared.save()
+                        }
+                        editing = false
+                    }
+            } else {
+                // A button, so Tab reaches it and VoiceOver reads it as something to change.
+                Button { editing = true } label: {
+                    Text(binder.whatGoesHere.isEmpty ? "What goes here, in a few words" : binder.whatGoesHere)
+                        .foregroundStyle(binder.whatGoesHere.isEmpty ? .tertiary : .secondary)
+                        .lineLimit(1)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("What goes here")
+                .accessibilityValue(binder.whatGoesHere.isEmpty ? "Not said yet" : binder.whatGoesHere)
+                .accessibilityHint("Edits what goes in this binder")
+            }
+        }
+        .font(.callout)
+        .help("Binders goes by this, and the latest titles in the binder, to file what you say or type.")
     }
 }
 

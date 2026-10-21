@@ -66,5 +66,13 @@ final class CommitmentTests: XCTestCase {
         XCTAssertEqual(stamp(CommitmentDetection.dueDate(from: "3pm", relativeTo: now)), "09/15/2026, 15:00")
         XCTAssertNil(CommitmentDetection.dueDate(from: "when I get a chance", relativeTo: now))
         XCTAssertNil(CommitmentDetection.dueDate(from: nil, relativeTo: now))
+        // A day of the month alone is this month's, or next month's once it has gone, never next year's.
+        XCTAssertEqual(stamp(CommitmentDetection.dueDate(from: "by the 20th", relativeTo: now)), "09/20/2026, 17:00")
+        XCTAssertEqual(stamp(CommitmentDetection.dueDate(from: "by the 10th", relativeTo: now)), "10/10/2026, 17:00")
+        // A month alone, after before or by: the last day before it starts.
+        XCTAssertEqual(stamp(CommitmentDetection.dueDate(from: "before March", relativeTo: now)), "02/28/2027, 17:00")
+        XCTAssertEqual(stamp(CommitmentDetection.dueDate(from: "by October", relativeTo: now)), "09/30/2026, 17:00")
+        XCTAssertEqual(stamp(CommitmentDetection.dueDate(from: "by March 3rd", relativeTo: now)), "03/03/2027, 17:00")
+        XCTAssertEqual(stamp(CommitmentDetection.dueDate(from: "before Friday", relativeTo: now)), "09/18/2026, 17:00")
     }
 }

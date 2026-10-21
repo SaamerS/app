@@ -26,7 +26,7 @@ enum LLMProviderKind: String, CaseIterable, Codable, Identifiable {
 final class AppSettings {
     static let shared = AppSettings()
 
-    @ObservationIgnored private let defaults = UserDefaults.standard
+    @ObservationIgnored private let defaults = AppDefaults.store
 
     var hotkeys: HotkeyBindings { didSet { save(hotkeys, "hotkeys") } }
     var speechModel: SpeechModelID { didSet { defaults.set(speechModel.rawValue, forKey: "speechModel") } }
@@ -36,6 +36,9 @@ final class AppSettings {
 
     var aiFormatting: Bool { didSet { defaults.set(aiFormatting, forKey: "aiFormatting") } }
     var commandModeEnabled: Bool { didSet { defaults.set(commandModeEnabled, forKey: "commandModeEnabled") } }
+    /// Command Mode says its answer to a spoken status question ("what's happening with my work streams?") as well as
+    /// showing it.
+    var readAnswersAloud: Bool { didSet { defaults.set(readAnswersAloud, forKey: "readAnswersAloud") } }
     var llmProvider: LLMProviderKind { didSet { defaults.set(llmProvider.rawValue, forKey: "llmProvider") } }
     /// Minutes of no requests after which Ollama frees the model's memory; 0 keeps it loaded.
     var modelIdleMinutes: Int { didSet { defaults.set(modelIdleMinutes, forKey: "modelIdleMinutes") } }
@@ -48,6 +51,13 @@ final class AppSettings {
     var mlxEmbeddingModel: String { didSet { defaults.set(mlxEmbeddingModel, forKey: "mlxEmbeddingModel") } }
     /// Where MLX models are downloaded from: Hugging Face, or a company's mirror of it.
     var mlxEndpoint: String { didSet { defaults.set(mlxEndpoint, forKey: "mlxEndpoint") } }
+    /// The decision model (DecisionChoice): "tev1", "off", a Hugging Face name, a folder's path or a server's address. ""
+    /// until you choose: Tev1 0.8B on Apple silicon, Off on an Intel Mac. Nothing writes it but a choice in Settings.
+    var decisionModel: String { didSet { defaults.set(decisionModel, forKey: "decisionModel") } }
+    /// Minutes unused before the decision model lets go of its memory; 0 keeps it. 5 by default, as lane R1 did.
+    var decisionIdleMinutes: Int { didSet { defaults.set(decisionIdleMinutes, forKey: "decisionIdleMinutes") } }
+    /// The decision models chosen before, newest first, at most 6, for "Also on this Mac".
+    var decisionModelsUsed: [String] { didSet { defaults.set(decisionModelsUsed, forKey: "decisionModelsUsed") } }
     var styles: StyleSettings { didSet { save(styles, "styles") } }
 
     var voiceCommands: Bool { didSet { defaults.set(voiceCommands, forKey: "voiceCommands") } }
@@ -141,6 +151,7 @@ final class AppSettings {
         vocabularyBoost = defaults.object(forKey: "vocabularyBoost") as? Bool ?? true
         aiFormatting = defaults.object(forKey: "aiFormatting") as? Bool ?? true
         commandModeEnabled = defaults.object(forKey: "commandModeEnabled") as? Bool ?? true
+        readAnswersAloud = defaults.object(forKey: "readAnswersAloud") as? Bool ?? true
         if let saved = defaults.string(forKey: "llmProvider").flatMap(LLMProviderKind.init(rawValue:)), LLMProviderKind.available.contains(saved) {
             llmProvider = saved
         } else {
@@ -149,11 +160,15 @@ final class AppSettings {
             let isNew = !FileManager.default.fileExists(atPath: AppPaths.store.path)
             let start: LLMProviderKind = MLXModels.isSupported && isNew ? .mlx : .ollama
             llmProvider = start
-            UserDefaults.standard.set(start.rawValue, forKey: "llmProvider")
+            AppDefaults.store.set(start.rawValue, forKey: "llmProvider")
         }
         mlxModel = defaults.string(forKey: "mlxModel") ?? MLXModels.suggested.id
         mlxEmbeddingModel = defaults.string(forKey: "mlxEmbeddingModel") ?? MLXModels.embeddingSuggestion.id
         mlxEndpoint = defaults.string(forKey: "mlxEndpoint") ?? "https://huggingface.co"
+        // Read, never written here (a didSet doesn't run in init): a launch writes none of the three until you choose.
+        decisionModel = defaults.string(forKey: "decisionModel") ?? ""
+        decisionIdleMinutes = defaults.object(forKey: "decisionIdleMinutes") as? Int ?? 5
+        decisionModelsUsed = defaults.stringArray(forKey: "decisionModelsUsed") ?? []
         modelIdleMinutes = defaults.object(forKey: "modelIdleMinutes") as? Int ?? 15
         ollamaURL = defaults.string(forKey: "ollamaURL") ?? "http://127.0.0.1:11434"
         ollamaModel = defaults.string(forKey: "ollamaModel") ?? ModelAdvisor.recommendation(memoryGB: ModelAdvisor.memoryGB(bytes: ProcessInfo.processInfo.physicalMemory)).model
@@ -200,11 +215,11 @@ final class AppSettings {
         commitmentReminders = defaults.object(forKey: "commitmentReminders") as? Bool ?? true
         embeddingModel = defaults.string(forKey: "embeddingModel") ?? "embeddinggemma"
         teamFolderPath = defaults.string(forKey: "teamFolderPath")
-        if let memberID = UserDefaults.standard.string(forKey: "teamMemberID") {
+        if let memberID = AppDefaults.store.string(forKey: "teamMemberID") {
             teamMemberID = memberID
         } else {
             let memberID = UUID().uuidString
-            UserDefaults.standard.set(memberID, forKey: "teamMemberID")
+            AppDefaults.store.set(memberID, forKey: "teamMemberID")
             teamMemberID = memberID
         }
         teamMemberName = defaults.string(forKey: "teamMemberName") ?? ""
@@ -225,7 +240,12 @@ final class AppSettings {
     /// Whether Binders manages the model's memory (as opposed to keeping it loaded).
     var managesModelMemory: Bool { llmProvider == .ollama && modelIdleMinutes > 0 }
 
-    func makeLLMClient() -> LLMClient? {
+    /// The model client, in the lane its caller belongs to: `.now` for what you wait on, `.later` for background work.
+    func makeLLMClient(lane: ModelLane.Priority = .now) -> LLMClient? {
+        makeProviderClient().map { LanedClient(inner: $0, lane: lane, interrupts: llmProvider == .ollama) }
+    }
+
+    private func makeProviderClient() -> LLMClient? {
         switch llmProvider {
         case .ollama:
             guard let url = URL(string: ollamaURL), !ollamaModel.isEmpty else { return nil }
@@ -244,7 +264,7 @@ final class AppSettings {
     }
 
     private static func load<T: Decodable>(_ key: String) -> T? {
-        guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
+        guard let data = AppDefaults.store.data(forKey: key) else { return nil }
         return try? JSONDecoder().decode(T.self, from: data)
     }
 }

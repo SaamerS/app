@@ -9,6 +9,7 @@ let package = Package(
     ],
     targets: [
         .target(name: "BindersKit"),
-        .testTarget(name: "BindersKitTests", dependencies: ["BindersKit"]),
+        // Fixtures: the coding tools' own help text and option lists, as checked for their built-in agents.
+        .testTarget(name: "BindersKitTests", dependencies: ["BindersKit"], resources: [.copy("Fixtures")]),
     ]
 )

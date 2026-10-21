@@ -87,7 +87,8 @@ struct QuickSwitcher: View {
             .padding(.vertical, 14)
             Divider()
             if results.isEmpty {
-                Text(commandsOnly ? "No command matches “\(typed)”." : "Nothing matches “\(typed)”.")
+                // What you typed, quoted.
+                (Text(commandsOnly ? "No command matches " : "Nothing matches ") + Text("“\(typed)”").font(BindersTheme.quote()) + Text("."))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(16)
@@ -135,7 +136,7 @@ struct QuickSwitcher: View {
         HStack(spacing: 12) {
             Image(systemName: item.symbol)
                 .font(.system(size: 14))
-                .foregroundStyle(selected ? Color.white : Color.accentColor)
+                .foregroundStyle(selected ? Color.white : BindersTheme.accentText)
                 .frame(width: 22)
             VStack(alignment: .leading, spacing: 1) {
                 Text(item.title).lineLimit(1)
@@ -152,7 +153,7 @@ struct QuickSwitcher: View {
         .foregroundStyle(selected ? Color.white : Color.primary)
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
-        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(selected ? Color.accentColor : Color.clear))
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(selected ? BindersTheme.accent : Color.clear))
         .contentShape(Rectangle())
     }
 
@@ -202,7 +203,7 @@ struct QuickSwitcher: View {
         items += cards.prefix(400).map { card in
             SwitcherItem(id: "c:\(card.id)", title: card.title, subtitle: ["Card", card.column.title, binderName(card.binderID)].filter { !$0.isEmpty }.joined(separator: " · "),
                          symbol: "rectangle.split.3x1", date: card.updatedAt, boost: card.column == .done ? -2 : 0) {
-                show(binder: card.binderID, tab: .board) { $0.pendingCardID = card.id }
+                navigation.open(card: card)
             }
         }
         items += entities.map { entity in
@@ -276,6 +277,7 @@ struct QuickSwitcher: View {
         }
         var items = [
             command("New Note", "square.and.pencil", "In \(binder.name)") {
+                guard Store.shared.allowsSave() else { return }
                 let note = NoteItem()
                 note.binderID = binder.id
                 note.sharedWithTeam = binder.sharedWithTeam
@@ -288,10 +290,11 @@ struct QuickSwitcher: View {
                 Task { await controller.meetings.toggle() }
             },
             command(controller.capture.isOn ? "Turn Off Writing Capture" : "Turn On Writing Capture", "pencil.line") { controller.capture.toggle() },
-            command("Ask Your Work", "sparkles", "Search and ask everything in Binders") { navigation.selection = .knowledge },
+            command("Ask Your Work", BindersTheme.askSymbol, "Search and ask everything in Binders") { navigation.selection = .knowledge },
         ]
         items += TemplateStore.all.map { template in
             command("New Note: \(template.name)", "doc.badge.plus", "From the template, in \(binder.name)") {
+                guard Store.shared.allowsSave() else { return }
                 let note = TemplateStore.newNote(from: template, in: binder)
                 show(binder: binder.id, tab: .notes) { $0.pendingNoteID = note.id }
             }
@@ -304,8 +307,9 @@ struct QuickSwitcher: View {
                 team.setShared(binder, !binder.sharedWithTeam)
             })
         }
+        // Each part of Settings opens its page at its section; the line under it names the page.
         items += SettingsPage.visible.map { page in
-            command("Settings: \(page.title)", "gearshape") {
+            command("Settings: \(page.title)", page.symbol, "On the \(page.group.title) page") {
                 navigation.pendingSettingsPage = page
                 navigation.selection = .settings
             }

@@ -6,7 +6,7 @@ import BindersKit
 final class TranscriptRecord {
     @Attribute(.unique) var id: UUID
     var createdAt: Date
-    /// "dictation" or "command"
+    /// "dictation", "command", or "moment" (something you said to yourself near your iPhone)
     var mode: String
     var rawText: String
     var finalText: String
@@ -22,9 +22,11 @@ final class TranscriptRecord {
     var usedLLM: Bool
     var fallbackReason: String?
     var audioFileName: String?
-    /// inserted, empty, failed
+    /// inserted, empty, failed; for a moment, answered
     var status: String
     var errorMessage: String?
+    /// A moment's state (MomentService): what it was read as, what became of it, what it made.
+    var outcomeJSON: String = ""
 
     init(id: UUID = UUID(), createdAt: Date = Date(), mode: String, rawText: String, finalText: String, appName: String?,
          bundleID: String?, category: String?, duration: Double, asrMillis: Int, llmMillis: Int, engine: String,
@@ -109,6 +111,9 @@ final class BinderRecord {
     var teamAuthorID: String?
     /// On this binder's board, agents may move cards to Done themselves instead of handing them over for review.
     var agentsMayFinish: Bool = false
+    /// "What goes here", in your words: one line the card router reads, with the latest titles in it, to file a card or a
+    /// to-do that doesn't say where it goes. Empty: the titles alone. Not synced to your team.
+    var whatGoesHere: String = ""
 
     static let paletteSize = 8
 
@@ -141,6 +146,36 @@ final class NoteItem {
     var status: String?
     var owner: String?
     var dueAt: Date?
+    /// The agent that wrote it over MCP, if one did: shown on the note, and its #corrections don't steer answers.
+    var madeBy: String?
+    /// The agent that last changed it over MCP when it isn't that agent's own note (append_to_note, update_note), and
+    /// when. Like `madeBy`, it holds until you make the note yours.
+    var editedBy: String?
+    var editedAt: Date?
+    /// Made from what you said to yourself (a moment), or quoting a capture: it stays unshared wherever it's filed or
+    /// moved, a binder shared with your team included (Store.move, TeamSyncService.setShared), and team sync never sends
+    /// it. Marked on the note itself, so deleting History, where the moment is kept, doesn't unmark it.
+    var staysUnshared: Bool = false
+
+    /// An agent's words in it, until you make it yours: labelled wherever it shows, left out of answers, and a correction
+    /// in it steers nothing.
+    var agentMark: AgentMark { AgentMark(madeBy: madeBy, editedBy: editedBy, editedAt: editedAt) }
+
+    /// An agent changed it: marked as that agent's edit, unless it's the agent's own note. True when it was marked.
+    @discardableResult
+    func markEdited(by agent: String, at date: Date = Date()) -> Bool {
+        guard AgentMark.marksEdit(by: agent, madeBy: madeBy) else { return false }
+        editedBy = agent
+        editedAt = date
+        return true
+    }
+
+    /// Make It Mine: an agent's words in it count as yours from now on.
+    func makeMine() {
+        madeBy = nil
+        editedBy = nil
+        editedAt = nil
+    }
 
     var properties: NoteProperties {
         get { NoteProperties(status: status, owner: owner, due: dueAt) }
@@ -221,6 +256,12 @@ final class CommitmentRecord {
     var sourceApp: String?
     var binderID: UUID?
     var reminderScheduled: Bool = false
+    /// Where a to-do came from (TodoOrigin): automations run for the ones you made, and for the others only when a rule
+    /// takes them. Nil for promises and for to-dos from before it was kept.
+    var origin: String?
+    /// Who added it when that wasn't you, as the board says who made a card: the agent or tool ("Claude Code"), or
+    /// "a link" for binders://todo.
+    var madeBy: String?
 
     init(task: String, kind: String, owner: String) {
         self.id = UUID()
@@ -233,9 +274,21 @@ final class CommitmentRecord {
     var isPromise: Bool { kind != "ask" }
     /// Added by voice ("add to-do…"), so it came from nobody's message.
     var isTodo: Bool { kind == "todo" }
+    var todoOrigin: TodoOrigin? { origin.flatMap(TodoOrigin.init(rawValue:)) }
 
+    /// Where it came from, where to-dos show it: "Added by Claude Code", "Added by a link", "Promised to Sam in Mail".
     var sourceTitle: String {
-        if isTodo { return "Added by voice" }
+        if isTodo {
+            switch todoOrigin {
+            case .agent?:
+                let name = (madeBy ?? "").trimmingCharacters(in: .whitespaces)
+                return "Added by \(name.isEmpty || BoardRules.isReserved(name) || ["AI agent", "An AI agent"].contains(name) ? "an AI agent" : name)"
+            case .link?: return "Added by a link"
+            case .phone?: return "Added on your iPhone"
+            case .moment?, .suggestion?: return "Said to yourself"
+            case .voice?, nil: return "Added by voice"
+            }
+        }
         let who = to.flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 } ?? "someone"
         let place = sourceApp.map { " in \($0)" } ?? ""
         return isPromise ? "Promised to \(who)\(place)" : "Asked of \(who)\(place)"
@@ -259,6 +312,9 @@ final class MeetingRecord {
     var routingReason: String?
     /// A conversation's suggestions: cards for what you said you'd do, answers to what you asked (JSON).
     var suggestionsJSON: String = "[]"
+    /// Lane Y2: what the iPhone vouched for a capture in which it heard only you, and what the reading found (SoloVouch, as
+    /// JSON). Empty for every capture that came any other way.
+    var soloJSON: String = ""
     var appName: String?
     var attendees: [String]
     var userNotes: String
@@ -356,31 +412,74 @@ final class MeetingSegmentRecord {
 final class Store {
     static let shared = Store()
 
+    /// What Binders says while its library didn't open: on the hub's banner, at the top of the menu bar menu, and in place
+    /// of a save you asked for.
+    static let unavailableMessage = "Binders couldn't open its library, so nothing new can be saved. Quit and reopen Binders."
+    /// What a tool, an agent or the phone hears when it asks Binders to save something then.
+    static let refusedMessage = "Binders can't save right now: its library didn't open."
+    /// And when it asks to read: the stand-in is empty, which isn't what the library holds.
+    static let unreadableMessage = "Binders can't read your binders right now: its library didn't open. The user can quit and reopen Binders."
+    /// And what Ask on this Mac says then (the Knowledge page, Command Mode): which notes hold an agent's words, and your
+    /// corrections, are in the library.
+    static let unanswerableMessage = "Binders can't answer from your binders right now: its library didn't open. Quit and reopen Binders."
+    /// And after a dictation or a Command Mode result was pasted then: it went where you asked, and History doesn't have it.
+    static let notKeptMessage = "Pasted, but not kept in History: Binders couldn't open its library. Quit and reopen Binders."
+    /// The same for a dictation pasted as you said it, as AI formatting didn't answer.
+    static let notKeptUnformattedMessage = "Pasted without AI formatting, and not kept in History: Binders couldn't open its library. Quit and reopen Binders."
+    /// The same for one copied to the clipboard instead, as you'd switched apps.
+    static let notKeptCopiedMessage = "You switched apps, so it was copied to the clipboard. It isn't kept in History: Binders couldn't open its library. Quit and reopen Binders."
+    /// And for Paste Last Transcript then: no dictation is kept to paste.
+    static let nothingToPasteMessage = "Nothing to paste: dictations aren't kept while Binders can't open its library. Quit and reopen Binders."
+    /// What to do about it, on the help page.
+    static let unavailableHelp = URL(string: "https://binders.io/help.html#library")!
+
     let container: ModelContainer
     var context: ModelContext { container.mainContext }
-    /// True when the database couldn't be opened and an empty in-memory store stands in; team sync pauses then.
+    /// True when the database couldn't be opened and an empty in-memory store stands in. Nothing new is kept then: saves
+    /// are refused (`canSave`, `allowsSave()`), phones are turned away so they keep what they have, team sync and indexing
+    /// pause, and the hub and the menu bar menu say so.
     let isFallback: Bool
+    /// Told when a save you asked for is refused because the library didn't open; the app shows `unavailableMessage`.
+    var onRefused: (() -> Void)?
     /// Bumped whenever a meeting's transcript changes, so readers can cache per revision.
     private(set) var segmentRevisions: [UUID: Int] = [:]
 
     private convenience init() {
-        self.init(url: AppPaths.store)
+        self.init(url: AppPaths.store, failing: Self.failsForSelfTest)
     }
 
-    /// A separate store; the app uses `shared`, self-tests use throwaway files.
-    init(url: URL) {
+    /// `--selftest-fallback`, in a throwaway folder only: the library counts as one that didn't open, so the test sees
+    /// Binders as you would then.
+    private static var failsForSelfTest: Bool { AppPaths.isDemo && CommandLine.arguments.contains("--selftest-fallback") }
+
+    /// A separate store; the app uses `shared`, self-tests use throwaway files. `failing` opens the stand-in, as when the
+    /// file can't be opened.
+    init(url: URL, failing: Bool = false) {
         let schema = Schema([TranscriptRecord.self, DictionaryWord.self, SnippetItem.self, NoteItem.self,
                              MeetingRecord.self, MeetingSegmentRecord.self, BinderRecord.self, WritingRecord.self,
                              CommitmentRecord.self, TaskCard.self, TaskEvent.self])
         let configuration = ModelConfiguration(schema: schema, url: url)
         do {
+            if failing { throw CocoaError(.fileReadCorruptFile) }
             container = try ModelContainer(for: schema, configurations: [configuration])
             isFallback = false
         } catch {
-            Log.app.error("Store failed to open, falling back to in-memory: \(error.localizedDescription)")
+            Log.app.error("Store failed to open\(failing ? " (self-test)" : ""), falling back to in-memory: \(error.localizedDescription)")
             container = try! ModelContainer(for: schema, configurations: [ModelConfiguration(isStoredInMemoryOnly: true)])
             isFallback = true
         }
+    }
+
+    /// Whether anything can be kept: not while the library didn't open, when whatever went into the stand-in would be gone
+    /// at quit.
+    var canSave: Bool { !isFallback }
+
+    /// For a save you asked for (a window, a shortcut, a link, your voice): true when it can go ahead. While the library
+    /// didn't open it says so instead (`onRefused`), and nothing is saved.
+    func allowsSave() -> Bool {
+        guard isFallback else { return true }
+        onRefused?()
+        return false
     }
 
     func vocabulary() -> [VocabularyTerm] {
@@ -407,7 +506,13 @@ final class Store {
         return (try? context.fetch(descriptor)) ?? []
     }
 
+    /// Never while the library didn't open: whatever got this far then would show until quit and be gone after. A save you
+    /// ask for is refused before it gets here, with why (`allowsSave()`); anything else is dropped, and logged.
     func insert(_ model: some PersistentModel) {
+        guard canSave else {
+            Log.app.error("Not kept, as the library didn't open: \(String(describing: type(of: model)), privacy: .public)")
+            return
+        }
         context.insert(model)
         save()
     }
@@ -427,9 +532,11 @@ final class Store {
         do { try context.save() } catch { Log.app.error("Save failed: \(error.localizedDescription)") }
     }
 
-    /// Adds a term unless an entry with the same spelling exists; returns true when added.
+    /// Adds a term unless an entry with the same spelling exists; returns true when added. Never while the library didn't
+    /// open, so a word learned then isn't announced as kept.
     @discardableResult
     func addDictionaryWord(_ term: String, aliases: [String] = [], source: String) -> Bool {
+        guard canSave else { return false }
         let existing = (try? context.fetch(FetchDescriptor<DictionaryWord>())) ?? []
         if let match = existing.first(where: { $0.term.caseInsensitiveCompare(term) == .orderedSame }) {
             let newAliases = aliases.filter { alias in !match.aliases.contains { $0.caseInsensitiveCompare(alias) == .orderedSame } }
@@ -549,6 +656,14 @@ final class Store {
         return (try? context.fetch(descriptor))?.first
     }
 
+    /// The notes with an agent's words in them that you haven't made yours, by id string (as search results name their
+    /// source): what answers leave out and search labels. Read each time, so Make It Mine counts at once.
+    func agentMarks() -> [String: AgentMark] {
+        let notes = (try? context.fetch(FetchDescriptor<NoteItem>(predicate: #Predicate { $0.madeBy != nil || $0.editedBy != nil }))) ?? []
+        return Dictionary(notes.compactMap { note in note.agentMark.isEmpty ? nil : (note.id.uuidString, note.agentMark) },
+                          uniquingKeysWith: { first, _ in first })
+    }
+
     func binder(_ id: UUID?) -> BinderRecord? {
         guard let id else { return nil }
         return ((try? context.fetch(FetchDescriptor<BinderRecord>(predicate: #Predicate { $0.id == id }))) ?? []).first
@@ -614,6 +729,24 @@ final class Store {
             save()
             Log.app.info("Filed existing meetings and notes into binders")
         }
+        markMomentNotes()
+    }
+
+    /// Notes made from what you said to yourself before that was marked on the note itself (`staysUnshared`), found by
+    /// their moment's id while History still has it: marked, and unshared if a move had shared one, which takes it off the
+    /// team folder at the next sync. Each launch, before team sync starts; it finds nothing once they're marked.
+    func markMomentNotes() {
+        guard canSave else { return }
+        let moments = Array(momentIDs())
+        guard !moments.isEmpty else { return }
+        let unmarked = (try? context.fetch(FetchDescriptor<NoteItem>(predicate: #Predicate { moments.contains($0.id) && !$0.staysUnshared }))) ?? []
+        guard !unmarked.isEmpty else { return }
+        for note in unmarked where !note.isTeamCopy {
+            note.staysUnshared = true
+            note.sharedWithTeam = false
+        }
+        save()
+        Log.app.info("Marked \(unmarked.count) notes made from what you said, so they stay unshared")
     }
 
     func binderID(ofMeeting id: UUID?) -> UUID? {
@@ -622,6 +755,18 @@ final class Store {
     }
 
     /// True when the id is one of the iPhone's conversations rather than a meeting.
+    /// Something you said to yourself near the iPhone, or a note or to-do made from it: it has the moment's id.
+    func isMoment(_ id: UUID) -> Bool {
+        ((try? context.fetchCount(FetchDescriptor<TranscriptRecord>(predicate: #Predicate { $0.id == id && $0.mode == "moment" }))) ?? 0) > 0
+    }
+
+    /// Every moment's id, for checking many notes at once.
+    func momentIDs() -> Set<UUID> {
+        var descriptor = FetchDescriptor<TranscriptRecord>(predicate: #Predicate { $0.mode == "moment" })
+        descriptor.propertiesToFetch = [\.id]
+        return Set(((try? context.fetch(descriptor)) ?? []).map(\.id))
+    }
+
     func isConversation(_ id: UUID?) -> Bool {
         guard let id else { return false }
         return ((try? context.fetch(FetchDescriptor<MeetingRecord>(predicate: #Predicate { $0.id == id }))) ?? []).first?.isConversation ?? false
@@ -666,13 +811,16 @@ final class Store {
         if !old.isEmpty { Log.app.info("Deleted \(old.count) trivial conversations older than \(days) days") }
     }
 
+    /// Your notes take on the binder's sharing, except one made from what you said, which stays unshared in a shared
+    /// binder too.
     func move(_ note: NoteItem, to binder: BinderRecord) {
         note.binderID = binder.id
-        if !note.isTeamCopy { note.sharedWithTeam = binder.sharedWithTeam }
+        if !note.isTeamCopy { note.sharedWithTeam = binder.sharedWithTeam && !note.staysUnshared }
         save()
     }
 
-    /// Deletes a binder after moving its contents somewhere else; the default binder can't be deleted.
+    /// Deletes a binder after moving its contents somewhere else; the default binder can't be deleted. They take on that
+    /// binder's sharing as any move does (`move`): captures and notes made from what you said stay unshared.
     func deleteBinder(_ binder: BinderRecord, movingItemsTo target: BinderRecord) {
         guard !binder.isDefault, binder.id != target.id else { return }
         let binderID = binder.id
@@ -691,11 +839,17 @@ final class Store {
         save()
     }
 
+    /// Never while the library didn't open: the recordings belong to dictations the stand-in doesn't have. Notes made from
+    /// moments are marked on the note first, so taking the moments away leaves them unshared.
     func deleteAllHistory() {
+        guard allowsSave() else { return }
+        markMomentNotes()
         try? context.delete(model: TranscriptRecord.self)
         save()
         if let files = try? FileManager.default.contentsOfDirectory(at: AppPaths.audio, includingPropertiesForKeys: nil) {
             files.forEach { try? FileManager.default.removeItem(at: $0) }
         }
+        // The record of how each card was sorted goes with the moments it was about.
+        RouterLogFile.shared.clear()
     }
 }

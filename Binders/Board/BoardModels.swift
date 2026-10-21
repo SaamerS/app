@@ -31,6 +31,11 @@ final class TaskCard {
     /// The same card in Jira, Linear or GitHub, once one is connected.
     var externalKey: String?
     var externalURL: String?
+    /// Who the card is meant for before anyone takes it: an agent such as "Claude Code" or "Pennant", or a person. Kept
+    /// apart from the claim, so "meant for Pennant, not started" survives a lapse.
+    var meantFor: String?
+    /// Meant for someone by an agent rather than by you: a suggestion. Binders wakes no one for it until you assign it.
+    var meantForByAgent: Bool = false
 
     init(title: String, binderID: UUID?, column: BoardColumn = .backlog) {
         self.id = UUID()
@@ -56,6 +61,39 @@ final class TaskCard {
             claimExpiresAt = newValue.claimExpires
         }
     }
+
+    /// Its state in the words A2A and MCP Tasks use: its column, and in Blocked whether a question waits on you
+    /// (input_required) or it's blocked with a reason (failed). `events`, its timeline oldest first, when it's at hand;
+    /// only a Blocked card reads it.
+    @MainActor
+    func taskState(events: [TaskEvent]? = nil) -> TaskState {
+        guard column == .blocked else { return TaskState(column: column, questionWaiting: false) }
+        let id = self.id
+        let timeline = events ?? (try? Store.shared.context.fetch(FetchDescriptor<TaskEvent>(predicate: #Predicate { $0.taskID == id },
+                                                                                             sortBy: [SortDescriptor(\.createdAt)]))) ?? []
+        return TaskState(column: .blocked, timeline: timeline.map { (kind: $0.kindRaw, to: $0.toColumn ?? "") })
+    }
+
+    /// The request for your approval it waits on in Blocked, and what it asks, or nil. `events`, its timeline oldest first,
+    /// when it's at hand.
+    @MainActor
+    func waitingApproval(events: [TaskEvent]? = nil) -> (event: TaskEvent, approval: AgentApproval)? {
+        guard column == .blocked else { return nil }
+        let id = self.id
+        let timeline = events ?? (try? Store.shared.context.fetch(FetchDescriptor<TaskEvent>(predicate: #Predicate { $0.taskID == id },
+                                                                                             sortBy: [SortDescriptor(\.createdAt)]))) ?? []
+        guard let index = BoardRules.waitingApproval(in: timeline.map { (kind: $0.kindRaw, to: $0.toColumn ?? "") }),
+              let approval = AgentApproval(timeline: timeline[index].text) else { return nil }
+        return (timeline[index], approval)
+    }
+
+    /// Whether a save (ModelContext.didSave's userInfo) changed only cards and their timelines. The knowledge index and
+    /// team sharing hold neither, so they let such a save, an agent's progress report among them, go by.
+    nonisolated static func onlyBoards(_ userInfo: [AnyHashable: Any]?) -> Bool {
+        let changed = [ModelContext.NotificationKey.insertedIdentifiers, .updatedIdentifiers, .deletedIdentifiers]
+            .flatMap { userInfo?[$0.rawValue] as? [PersistentIdentifier] ?? [] }
+        return !changed.isEmpty && changed.allSatisfy { ["TaskCard", "TaskEvent"].contains($0.entityName) }
+    }
 }
 
 /// One line of a card's timeline: a move, a claim, a progress report, a question, an answer, a comment.
@@ -72,7 +110,16 @@ final class TaskEvent {
     var createdAt: Date
 
     enum Kind: String {
-        case created, moved, claimed, released, lapsed, progress, question, answer, comment, completed, edited
+        case created, moved, claimed, released, lapsed, progress, question, answer, comment, completed, edited, assigned, woke
+        /// What Binders found in the card's binder when the card first went to an agent ("From your binders"), by Binders.
+        /// Only Binders writes one; emptied, it was deleted, and it isn't written again.
+        case context
+        /// An agent asks your approval before it sends, posts, buys or deletes something outside Binders (request_approval):
+        /// `AgentApproval.timelineText`, by the agent. The card waits in Blocked until you decide.
+        case approval
+        /// The receipt for your decision on one: who decided, where, when and exactly what (`AgentApproval.receipt`), by
+        /// Binders. Your answer follows it, as an answer.
+        case decision
     }
 
     init(taskID: UUID, kind: Kind, author: BoardActor, text: String = "", from: BoardColumn? = nil, to: BoardColumn? = nil) {
@@ -88,4 +135,11 @@ final class TaskEvent {
     }
 
     var kind: Kind { Kind(rawValue: kindRaw) ?? .comment }
+}
+
+extension TaskEvent {
+    /// The event as a card's conversation reads it (`CardConversation`).
+    var conversation: CardConversation.Event {
+        CardConversation.Event(kind: kindRaw, author: author, byAgent: authorIsAgent, text: text, from: fromColumn, to: toColumn, at: createdAt)
+    }
 }

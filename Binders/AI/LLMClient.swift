@@ -1,4 +1,5 @@
 import Foundation
+import BindersKit
 
 enum LLMError: LocalizedError {
     case http(Int, String)
@@ -26,6 +27,10 @@ protocol LLMClient: Sendable {
     /// rails. It is asked after every chunk that completes a line.
     func stream(system: String, user: String, maxTokens: Int, temperature: Double, timeout: TimeInterval,
                 stopWhen: @escaping @Sendable (String) -> Bool) async throws -> String
+    /// The same, telling `onText` the reply so far each time it grows, for something shown as it's written (Ask). A client
+    /// that can't stream tells it once, with the whole reply.
+    func stream(system: String, user: String, maxTokens: Int, temperature: Double, timeout: TimeInterval,
+                stopWhen: @escaping @Sendable (String) -> Bool, onText: @escaping @Sendable (String) -> Void) async throws -> String
     func listModels() async throws -> [String]
     /// Loads the model into memory so the first dictation isn't slow.
     func warmUp() async
@@ -38,6 +43,54 @@ protocol LLMClient: Sendable {
 extension LLMClient {
     func unload() async {}
     func residency() async -> ModelResidency? { nil }
+
+    /// A client that can't stream: one reply, told once.
+    func stream(system: String, user: String, maxTokens: Int, temperature: Double, timeout: TimeInterval,
+                stopWhen: @escaping @Sendable (String) -> Bool, onText: @escaping @Sendable (String) -> Void) async throws -> String {
+        let text = try await stream(system: system, user: user, maxTokens: maxTokens, temperature: temperature, timeout: timeout, stopWhen: stopWhen)
+        onText(text)
+        return text
+    }
+}
+
+/// A model client whose replies wait their turn on the one model (ModelLane): what you're waiting for (dictation, Ask,
+/// what you said to your iPhone) goes first; write-ups and other background work go one at a time behind it. On Ollama,
+/// which answers one request per model at a time, what you're waiting for cuts in on a write-up, which starts again after.
+struct LanedClient: LLMClient {
+    let inner: LLMClient
+    let lane: ModelLane.Priority
+    let interrupts: Bool
+
+    var model: String { inner.model }
+
+    func complete(system: String, user: String, maxTokens: Int, temperature: Double, timeout: TimeInterval) async throws -> String {
+        let inner = inner
+        return try await ModelLane.shared.run(lane, interrupting: lane == .now && interrupts) {
+            try await inner.complete(system: system, user: user, maxTokens: maxTokens, temperature: temperature, timeout: timeout)
+        }
+    }
+
+    func stream(system: String, user: String, maxTokens: Int, temperature: Double, timeout: TimeInterval,
+                stopWhen: @escaping @Sendable (String) -> Bool) async throws -> String {
+        let inner = inner
+        return try await ModelLane.shared.run(lane, interrupting: lane == .now && interrupts) {
+            try await inner.stream(system: system, user: user, maxTokens: maxTokens, temperature: temperature, timeout: timeout, stopWhen: stopWhen)
+        }
+    }
+
+    func stream(system: String, user: String, maxTokens: Int, temperature: Double, timeout: TimeInterval,
+                stopWhen: @escaping @Sendable (String) -> Bool, onText: @escaping @Sendable (String) -> Void) async throws -> String {
+        let inner = inner
+        return try await ModelLane.shared.run(lane, interrupting: lane == .now && interrupts) {
+            try await inner.stream(system: system, user: user, maxTokens: maxTokens, temperature: temperature, timeout: timeout,
+                                   stopWhen: stopWhen, onText: onText)
+        }
+    }
+
+    func listModels() async throws -> [String] { try await inner.listModels() }
+    func warmUp() async { await inner.warmUp() }
+    func unload() async { await inner.unload() }
+    func residency() async -> ModelResidency? { await inner.residency() }
 }
 
 /// A model loaded on the server: how much memory it holds and when it will be freed.
@@ -89,16 +142,22 @@ private func openStream(_ url: URL, body: [String: Any], headers: [String: Strin
     return bytes
 }
 
-/// Gathers streamed text line by line (NDJSON or SSE "data:" lines). `content` pulls the new text out of one event,
-/// `thinking` any reasoning the server sends apart from it, and `isDone` recognizes the last one. Closing the
-/// connection early makes the server stop generating.
+/// Gathers streamed text line by line (NDJSON or SSE "data:" lines), telling `onText` the text so far each time it grows.
+/// `content` pulls the new text out of one event, `thinking` any reasoning the server sends apart from it, and `isDone`
+/// recognizes the last one. A server that answered with one plain reply instead of a stream is read with `whole`, and
+/// `onText` is told once. Closing the connection early makes the server stop generating.
 private func collect(_ bytes: URLSession.AsyncBytes, model: String, stopWhen: @escaping @Sendable (String) -> Bool,
+                     onText: @Sendable (String) -> Void = { _ in },
                      content: ([String: Any]) -> String?, thinking: ([String: Any]) -> String? = { _ in nil },
+                     whole: ([String: Any]) -> String? = { _ in nil },
                      isDone: ([String: Any]) -> Bool) async throws -> String {
     var text = ""
     var thought = false
+    /// What came, as it came: a reply that wasn't a stream is read whole at the end.
+    var body = ""
     defer { bytes.task.cancel() }
     for try await line in bytes.lines {
+        if text.isEmpty { body += line + "\n" }
         var payload = line.trimmingCharacters(in: .whitespaces)
         if payload.hasPrefix("data:") { payload = String(payload.dropFirst(5)).trimmingCharacters(in: .whitespaces) }
         if payload.isEmpty { continue }
@@ -108,6 +167,7 @@ private func collect(_ bytes: URLSession.AsyncBytes, model: String, stopWhen: @e
         if let error = json["error"] { throw LLMError.http(500, "\(error)") }
         if let chunk = content(json), !chunk.isEmpty {
             text += chunk
+            onText(text)
             if chunk.contains("\n"), stopWhen(text) {
                 Log.llm.warning("Stopped \(model) early: the output was repeating itself")
                 break
@@ -115,6 +175,14 @@ private func collect(_ bytes: URLSession.AsyncBytes, model: String, stopWhen: @e
         }
         if let chunk = thinking(json), !chunk.isEmpty { thought = true }
         if isDone(json) { break }
+    }
+    if text.trimmed.isEmpty, let json = (try? JSONSerialization.jsonObject(with: Data(body.utf8))) as? [String: Any] {
+        if let error = json["error"] { throw LLMError.http(500, "\(error)") }
+        if let reply = whole(json), !reply.trimmed.isEmpty {
+            Log.llm.notice("\(model, privacy: .public) answered in one piece rather than streaming")
+            text = reply
+            onText(text)
+        }
     }
     guard !text.trimmed.isEmpty else { throw thought ? LLMError.onlyThinking : LLMError.emptyResponse }
     return text
@@ -159,6 +227,12 @@ struct OllamaClient: LLMClient {
 
     func stream(system: String, user: String, maxTokens: Int, temperature: Double, timeout: TimeInterval,
                 stopWhen: @escaping @Sendable (String) -> Bool) async throws -> String {
+        try await stream(system: system, user: user, maxTokens: maxTokens, temperature: temperature, timeout: timeout,
+                         stopWhen: stopWhen, onText: { _ in })
+    }
+
+    func stream(system: String, user: String, maxTokens: Int, temperature: Double, timeout: TimeInterval,
+                stopWhen: @escaping @Sendable (String) -> Bool, onText: @escaping @Sendable (String) -> Void) async throws -> String {
         var body = chatBody(system: system, user: user, maxTokens: maxTokens, temperature: temperature, stream: true)
         let bytes: URLSession.AsyncBytes
         do {
@@ -167,8 +241,8 @@ struct OllamaClient: LLMClient {
             body.removeValue(forKey: "think")
             bytes = try await openStream(chatURL, body: body, timeout: timeout)
         }
-        return try await collect(bytes, model: model, stopWhen: stopWhen,
-                                 content: { ($0["message"] as? [String: Any])?["content"] as? String },
+        let message: ([String: Any]) -> String? = { ($0["message"] as? [String: Any])?["content"] as? String }
+        return try await collect(bytes, model: model, stopWhen: stopWhen, onText: onText, content: message, whole: message,
                                  isDone: { $0["done"] as? Bool == true })
     }
 
@@ -264,20 +338,38 @@ struct OpenAICompatibleClient: LLMClient {
 
     func stream(system: String, user: String, maxTokens: Int, temperature: Double, timeout: TimeInterval,
                 stopWhen: @escaping @Sendable (String) -> Bool) async throws -> String {
+        try await stream(system: system, user: user, maxTokens: maxTokens, temperature: temperature, timeout: timeout,
+                         stopWhen: stopWhen, onText: { _ in })
+    }
+
+    /// Whether the server turned streaming down: it then answers in one reply.
+    private static func rejectsStreaming(_ code: Int, _ message: String) -> Bool {
+        (400..<500).contains(code) && message.localizedCaseInsensitiveContains("stream") && !message.contains(noThinking)
+    }
+
+    func stream(system: String, user: String, maxTokens: Int, temperature: Double, timeout: TimeInterval,
+                stopWhen: @escaping @Sendable (String) -> Bool, onText: @escaping @Sendable (String) -> Void) async throws -> String {
         var body = chatBody(system: system, user: user, maxTokens: maxTokens, temperature: temperature, stream: true)
         let bytes: URLSession.AsyncBytes
         do {
-            bytes = try await openStream(chatURL, body: body, headers: headers, timeout: timeout)
-        } catch LLMError.http(let code, let message) where Self.rejectsNoThinking(code, message) {
-            body.removeValue(forKey: Self.noThinking)
-            bytes = try await openStream(chatURL, body: body, headers: headers, timeout: timeout)
+            do {
+                bytes = try await openStream(chatURL, body: body, headers: headers, timeout: timeout)
+            } catch LLMError.http(let code, let message) where Self.rejectsNoThinking(code, message) {
+                body.removeValue(forKey: Self.noThinking)
+                bytes = try await openStream(chatURL, body: body, headers: headers, timeout: timeout)
+            }
+        } catch LLMError.http(let code, let message) where Self.rejectsStreaming(code, message) {
+            let text = try await complete(system: system, user: user, maxTokens: maxTokens, temperature: temperature, timeout: timeout)
+            onText(text)
+            return text
         }
         func delta(_ json: [String: Any]) -> [String: Any]? {
             (json["choices"] as? [[String: Any]])?.first?["delta"] as? [String: Any]
         }
-        return try await collect(bytes, model: model, stopWhen: stopWhen,
+        return try await collect(bytes, model: model, stopWhen: stopWhen, onText: onText,
                                  content: { delta($0)?["content"] as? String },
                                  thinking: { Self.reasoning(delta($0)) },
+                                 whole: { ((($0["choices"] as? [[String: Any]])?.first?["message"]) as? [String: Any])?["content"] as? String },
                                  isDone: { ($0["choices"] as? [[String: Any]])?.first?["finish_reason"] is String })
     }
 

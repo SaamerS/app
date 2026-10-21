@@ -143,7 +143,7 @@ final class NotePopouts: NSObject, NSWindowDelegate {
     // MARK: Keeping them
 
     func restore() {
-        guard let data = UserDefaults.standard.data(forKey: Self.savedKey), let saved = try? JSONDecoder().decode([Saved].self, from: data) else { return }
+        guard let data = AppDefaults.store.data(forKey: Self.savedKey), let saved = try? JSONDecoder().decode([Saved].self, from: data) else { return }
         for item in saved {
             guard let note = Store.shared.note(item.id) else { continue }
             let popout = Popout(id: item.id, color: item.color ?? freeColor())
@@ -168,7 +168,7 @@ final class NotePopouts: NSObject, NSWindowDelegate {
                   bubble: popout.bubble?.frame.origin ?? popout.bubbleOrigin, collapsed: popout.collapsed, pinned: popout.look.pinned,
                   color: popout.look.colorIndex)
         }
-        UserDefaults.standard.set(try? JSONEncoder().encode(saved), forKey: Self.savedKey)
+        AppDefaults.store.set(try? JSONEncoder().encode(saved), forKey: Self.savedKey)
     }
 
     // MARK: Windows
@@ -181,6 +181,9 @@ final class NotePopouts: NSObject, NSWindowDelegate {
         window.isReleasedWhenClosed = false
         window.hidesOnDeactivate = false
         window.minSize = NSSize(width: 300, height: 220)
+        // A note's own window is its page, title bar and all, in the app's appearance: light paper in the light, a dark
+        // page in the dark.
+        window.backgroundColor = BindersTheme.NS.paper
         window.delegate = self
         window.identifier = NSUserInterfaceItemIdentifier(note.id.uuidString)
         let id = note.id
@@ -274,12 +277,17 @@ final class NotePopouts: NSObject, NSWindowDelegate {
         return menu
     }
 
-    /// After a drag, the bubble moves to the nearer side of the screen it's on.
+    /// After a drag, the bubble moves to the nearer side of the screen it's on: it slides there, or under Reduce Motion
+    /// goes straight there.
     fileprivate func settle(_ id: UUID, bubble: NSPanel) {
         let origin = edgePoint(near: bubble.frame)
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.18
-            bubble.animator().setFrameOrigin(origin)
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            bubble.setFrameOrigin(origin)
+        } else {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.18
+                bubble.animator().setFrameOrigin(origin)
+            }
         }
         popouts[id]?.bubbleOrigin = origin
         save()
@@ -355,7 +363,7 @@ final class BubbleColorMenu: NSObject, NSMenuDelegate {
     }
 }
 
-/// A note in its own window, with its colour along the top edge.
+/// A note in its own window, on its page, with its colour along the top edge.
 private struct PopoutNoteView: View {
     @Bindable var note: NoteItem
     let look: PopoutLook
@@ -363,14 +371,25 @@ private struct PopoutNoteView: View {
 
     var body: some View {
         MarkdownNoteEditor(text: $note.text, fontSize: 14, placeholder: "Write, or hold fn to dictate.", inset: NSSize(width: 14, height: 10),
-                           compactToolbar: true, links: LinkTargets.forNote(note), focused: focused)
+                           compactToolbar: true, links: LinkTargets.forNote(note), focused: focused, paper: true)
             .onChange(of: note.text) { previous, _ in
                 note.updatedAt = Date()
                 NoteHistory.changed(note.id, previous: previous)
             }
-            .background(Color(nsColor: .textBackgroundColor))
+            .paperSheet(raised: false)
             .overlay(alignment: .top) {
                 look.color.frame(height: 3).ignoresSafeArea()
+            }
+            // An agent's words in it: whose, as in the hub, where Make It Mine is.
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if !note.agentMark.isEmpty {
+                    AgentLabel(note.agentMark)
+                        .font(.caption)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 6)
+                        .background(BindersTheme.paper)
+                }
             }
             .onChange(of: note.title) { _, title in NSApp.windows.first { $0.identifier?.rawValue == note.id.uuidString }?.title = title }
     }
@@ -396,7 +415,9 @@ private struct PopoutTitleButtons: View {
             } label: {
                 Circle().fill(look.color).frame(width: 12, height: 12)
             }
-            .menuStyle(.borderlessButton)
+            // As the binder's colour square: a borderless menu draws no shape label.
+            .menuStyle(.button)
+            .buttonStyle(.plain)
             .menuIndicator(.hidden)
             .fixedSize()
             .help("Colour: the bubble and the window's edge wear it")

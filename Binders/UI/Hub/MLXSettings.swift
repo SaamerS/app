@@ -7,7 +7,6 @@ struct MLXModelSettings: View {
     @State private var askingName = false
     @State private var typedName = ""
     @State private var folderProblem: String?
-    @State private var showsSource = false
 
     private var models: MLXModels { .shared }
 
@@ -18,21 +17,15 @@ struct MLXModelSettings: View {
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
         LabeledContent("Model") {
-            modelMenu(selection: $settings.mlxModel, suggestions: MLXModels.suggestions, other: "Another Hugging Face model…")
+            // Title case, as menu items take it, and as the decision model's menu beside it reads.
+            modelMenu(selection: $settings.mlxModel, suggestions: MLXModels.suggestions, other: "Another Hugging Face Model…")
         }
         modelState(settings.mlxModel)
         LabeledContent("Search by meaning") {
             modelMenu(selection: $settings.mlxEmbeddingModel, suggestions: [MLXModels.embeddingSuggestion], other: nil)
         }
         modelState(settings.mlxEmbeddingModel)
-        DisclosureGroup("Where models come from", isExpanded: $showsSource) {
-            TextField("Download from", text: $settings.mlxEndpoint, prompt: Text("https://huggingface.co"))
-            SecureField("Access token (optional)", text: Binding(get: { settings.mlxToken }, set: { settings.mlxToken = $0 }))
-            Text("Hugging Face, or your company's mirror of it. A token is needed for models with a licence to accept, or a mirror that asks for one. A model IT has provided can be used from its folder: Model → Use a Model Folder….")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
+        MLXModelSource()
         .alert("Use another model", isPresented: $askingName) {
             TextField("mlx-community/…", text: $typedName)
             Button("Use") {
@@ -95,7 +88,8 @@ struct MLXModelSettings: View {
                 ProgressView(value: fraction) { Text("Downloading \(name(of: model))… \(Int(fraction * 100))%") }
                 Button("Cancel") { models.cancel(model) }
             } else if let folder = MLXModels.directory(for: model) {
-                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                // Downloaded is ready, not done: a check in the accent's words.
+                Image(systemName: BindersTheme.readySymbol).foregroundStyle(.tintText)
                 Text(model.hasPrefix("/") ? "From \(folder.path)" : "Downloaded · \(ByteCountFormatter.string(fromByteCount: MLXModels.size(of: folder), countStyle: .file))")
                 Spacer()
                 if !model.hasPrefix("/") {
@@ -103,11 +97,10 @@ struct MLXModelSettings: View {
                         .help("Moves the downloaded model to the Trash")
                 }
             } else if model.hasPrefix("/") {
-                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                Text(folderProblem ?? "There's no MLX model in that folder.")
+                StatusLabel(folderProblem ?? "There's no MLX model in that folder.", .problem)
             } else {
                 if let failure = models.failures[model] {
-                    Text(failure).foregroundStyle(.orange)
+                    StatusLabel(failure, .problem)
                 } else {
                     let size = (MLXModels.suggestions + [MLXModels.embeddingSuggestion]).first { $0.id == model }.map { " · \($0.gigabytes.formatted()) GB" } ?? ""
                     Text("Not downloaded yet\(size).")
@@ -136,5 +129,24 @@ struct MLXModelSettings: View {
         guard panel.runModal() == .OK, let folder = panel.url else { return }
         folderProblem = MLXModels.isModel(folder) ? nil : "“\(folder.lastPathComponent)” has no config.json and .safetensors weights."
         selection.wrappedValue = folder.path
+    }
+}
+
+/// Where MLX models are downloaded from, and the token for a licence or a mirror: the language model's, and the decision
+/// model's under its own section when the language model isn't built in, so it's never on the page twice.
+struct MLXModelSource: View {
+    @Environment(AppSettings.self) private var settings
+    @State private var shows = false
+
+    var body: some View {
+        @Bindable var settings = settings
+        DisclosureGroup("Where models come from", isExpanded: $shows) {
+            TextField("Download from", text: $settings.mlxEndpoint, prompt: Text("https://huggingface.co"))
+            SecureField("Access token (optional)", text: Binding(get: { settings.mlxToken }, set: { settings.mlxToken = $0 }))
+            Text("Hugging Face, or your company's mirror of it. A token is needed for models with a licence to accept, or a mirror that asks for one. A model IT has provided can be used from its folder: Model → Use a Model Folder….")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 }

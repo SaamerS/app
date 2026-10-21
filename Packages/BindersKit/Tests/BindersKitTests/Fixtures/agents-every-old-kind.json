@@ -1,0 +1,89 @@
+{
+  "agents" : [
+    {
+      "id" : "3F2504E0-4F89-11D3-9A0C-0305E82C3301",
+      "isEnabled" : true,
+      "name" : "Echo",
+      "report" : "mcp",
+      "wake" : {
+        "command" : {
+          "command" : "cat >> ~/cards.log",
+          "folder" : "/Users/sam"
+        }
+      },
+      "wakesPerHour" : 4
+    },
+    {
+      "binders" : [
+        "16FD2706-8BAF-433B-82EB-8C7FADA847DA"
+      ],
+      "id" : "6BA7B810-9DAD-11D1-80B4-00C04FD430C8",
+      "isEnabled" : false,
+      "name" : "Pennant",
+      "preset" : "pennant",
+      "report" : {
+        "ssh" : {
+          "host" : "sam@studio.local"
+        }
+      },
+      "wake" : {
+        "board" : {
+
+        }
+      }
+    },
+    {
+      "id" : "8F0B6C0C-5C4E-4C1E-9E0A-2B7F1D0C3A11",
+      "isEnabled" : true,
+      "name" : "Grok Bot",
+      "preset" : "grok-bot",
+      "report" : {
+        "status" : {
+          "url" : "https://example.test/status"
+        }
+      },
+      "vendor" : "xAI",
+      "wake" : {
+        "webhook" : {
+          "url" : "https://example.test/hook"
+        }
+      }
+    },
+    {
+      "binderContext" : false,
+      "id" : "C2D1A6F0-1B2C-4D3E-8F90-123456789ABC",
+      "isEnabled" : true,
+      "mayAct" : true,
+      "name" : "Filer",
+      "purpose" : "Filing receipts",
+      "report" : "manual",
+      "wake" : {
+        "shortcut" : {
+          "name" : "File card"
+        }
+      }
+    },
+    {
+      "id" : "0F1E2D3C-4B5A-4968-8776-655443322110",
+      "isEnabled" : true,
+      "name" : "Claude Code · app",
+      "preset" : "claude-code",
+      "report" : "mcp",
+      "wake" : {
+        "claudeCode" : {
+          "allowedDomains" : [
+            "github.com"
+          ],
+          "executable" : "/opt/homebrew/bin/claude",
+          "maxBudgetUSD" : 2.5,
+          "model" : "opus",
+          "permissionMode" : "auto",
+          "postToOpenSession" : true,
+          "repository" : "/Users/sam/code/app"
+        }
+      },
+      "wakesPerHour" : 6
+    }
+  ],
+  "paused" : false
+}

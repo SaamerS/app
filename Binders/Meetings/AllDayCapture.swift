@@ -27,7 +27,8 @@ final class AllDayCaptureService {
     }
 
     private(set) var status: Status = .off
-    /// Someone is speaking, or was a moment ago.
+    /// A conversation is open: from the first speech until three minutes of quiet close it. Not whether anyone is
+    /// speaking now, which is `hearsSpeech()`.
     private(set) var inConversation = false
     private(set) var error: String?
     /// The conversation being written down, and what's happening to it.
@@ -212,6 +213,19 @@ final class AllDayCaptureService {
         await worker.finish()
     }
 
+    /// Someone is speaking now, as capture hears it, while it listens: what the waveform in Settings moves with, and holds
+    /// still without through the quiet of a conversation that's still open. Asked only while it shows.
+    func hearsSpeech(now: Date = Date()) async -> Bool {
+        guard status == .listening else { return false }
+        return await speechHeard(now: now)
+    }
+
+    /// Speech heard within a second of `now` (the gaps between words), listening or not: for the self-test, which feeds
+    /// audio without the microphone.
+    func speechHeard(now: Date = Date()) async -> Bool {
+        ConversationSplitter.isSpeaking(lastSpeech: await worker.lastSpeech, now: now)
+    }
+
     // MARK: Conversations
 
     private func handle(_ event: CaptureWorker.Event) {
@@ -226,6 +240,10 @@ final class AllDayCaptureService {
         case .heard(let speech):
             rollStats()
             speechSeconds += speech
+        case .unsaved(let message):
+            Log.meeting.error("All-day capture: \(message)")
+        case .moment, .absorbed, .voiceDetector:
+            break
         }
     }
 
@@ -236,6 +254,7 @@ final class AllDayCaptureService {
     }
 
     func processWaiting() {
+        sweep()
         guard run == nil else { return }
         run = Task { [weak self] in
             guard let self else { return }
@@ -249,15 +268,30 @@ final class AllDayCaptureService {
         }
     }
 
-    /// Conversations a quit or crash left open become recorded, with what reached their file; short ones go. Week-old
-    /// audio kept for checking goes too.
-    private func recover() {
-        for var conversation in CaptureFiles.all() {
+    /// Audio kept for checking, once its day is up; and audio still not written down three days after it was heard (no
+    /// speech model all that time), which then fails, as audio is never kept longer than that.
+    private func sweep() {
+        for var conversation in CaptureFiles.all() where conversation.id != working {
             if let until = conversation.keepAudioUntil, until < Date() {
                 try? FileManager.default.removeItem(at: CaptureFiles.audioURL(conversation.id))
                 conversation.keepAudioUntil = nil
                 CaptureFiles.write(conversation)
             }
+            if [.recorded, .transcribing, .labelling].contains(conversation.state), !conversation.audioDeleted,
+               conversation.ended < Date().addingTimeInterval(-CapturedConversation.failedAudioKept) {
+                try? FileManager.default.removeItem(at: CaptureFiles.audioURL(conversation.id))
+                conversation.audioDeleted = true
+                conversation.state = .failed
+                conversation.error = "It wasn't written down within three days, so its audio was deleted."
+                CaptureFiles.write(conversation)
+            }
+        }
+    }
+
+    /// Conversations a quit or crash left open become recorded, with what reached their file; short ones go. Week-old
+    /// sent ones go too.
+    private func recover() {
+        for var conversation in CaptureFiles.all() {
             if conversation.state == .sent, conversation.started < Date().addingTimeInterval(-7 * 86_400) { CaptureFiles.remove(conversation.id) }
             guard conversation.state == .recording else { continue }
             let heard = max(0, conversation.spans.fileDuration - 2 * CaptureWorker.padding)
@@ -276,6 +310,9 @@ final class AllDayCaptureService {
     /// Writes one conversation down and keeps it. False when it has to wait (no speech model yet).
     private func process(_ conversation: CapturedConversation) async -> Bool {
         guard let controller else { return false }
+        // The library didn't open: it waits here, audio and all, for a Binders that can keep it, rather than be marked sent
+        // into a stand-in that's gone at quit.
+        guard Store.shared.canSave else { return false }
         var current = conversation
         working = current.id
         do {
@@ -318,8 +355,11 @@ final class AllDayCaptureService {
         } catch is SpeechWait {
             return false
         } catch {
+            // The Mac doesn't try a failed one again, so its audio goes now.
             current.state = .failed
             current.error = error.localizedDescription
+            try? FileManager.default.removeItem(at: CaptureFiles.audioURL(current.id))
+            current.audioDeleted = true
             CaptureFiles.write(current)
             return true
         }
@@ -391,6 +431,8 @@ enum BindersFiles {
     /// sit there.
     @discardableResult
     static func open(_ url: URL, controller: DictationController) -> String {
+        // Not while the library didn't open: the file stays where it is, to open again once Binders can keep it.
+        guard Store.shared.allowsSave() else { return Store.unavailableMessage }
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
         do {

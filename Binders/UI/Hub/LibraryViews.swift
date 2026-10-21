@@ -45,8 +45,8 @@ struct DictionaryView: View {
                         }
                         Spacer()
                         switch word.source {
-                        case "auto": Badge(text: "Learned", color: .blue)
-                        case "wispr": Badge(text: "Imported", color: .purple)
+                        case "auto": Badge(text: "Learned", tinted: true)
+                        case "wispr": Badge(text: "Imported")
                         default: EmptyView()
                         }
                         Button { Store.shared.delete(word) } label: { Image(systemName: "trash") }
@@ -56,6 +56,7 @@ struct DictionaryView: View {
                 }
             }
             .listStyle(.inset)
+            .scrollContentBackground(.hidden)
             .overlay {
                 if words.isEmpty {
                     ContentUnavailableView("No words yet", systemImage: "book.closed",
@@ -68,7 +69,7 @@ struct DictionaryView: View {
 
     private func add() {
         let value = term.trimmed
-        guard !value.isEmpty else { return }
+        guard !value.isEmpty, Store.shared.allowsSave() else { return }
         let heardAs = aliases.split(separator: ",").map { String($0).trimmed }.filter { !$0.isEmpty }
         if !Store.shared.addDictionaryWord(value, aliases: heardAs, source: "manual") {
             message = "“\(value)” is already in your dictionary."
@@ -80,9 +81,10 @@ struct DictionaryView: View {
     }
 
     private func runImport() {
+        guard Store.shared.allowsSave() else { return }
         do {
             let summary = try WisprImporter.importAll()
-            UserDefaults.standard.set(true, forKey: "importedFromWispr")
+            AppDefaults.store.set(true, forKey: "importedFromWispr")
             message = "Imported \(summary.words) words and \(summary.snippets) snippets from Wispr Flow."
         } catch {
             message = "Import failed: \(error.localizedDescription)"
@@ -107,11 +109,12 @@ struct SnippetsView: View {
                     .font(.body)
                     .frame(height: 70)
                     .padding(4)
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.15)))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(BindersTheme.lineStrong))
                 HStack {
-                    Text("\(expansion.count)/4000").font(.caption).foregroundStyle(.secondary)
+                    Text("\(expansion.count)/4000").font(.caption).monospacedDigit().foregroundStyle(.secondary)
                     Spacer()
                     Button("Add Snippet") {
+                        guard Store.shared.allowsSave() else { return }
                         Store.shared.insert(SnippetItem(trigger: trigger.trimmed, expansion: String(expansion.prefix(4000))))
                         trigger = ""
                         expansion = ""
@@ -124,7 +127,8 @@ struct SnippetsView: View {
                 ForEach(snippets) { snippet in
                     HStack(alignment: .top) {
                         VStack(alignment: .leading, spacing: 3) {
-                            Text("“\(snippet.trigger)”").font(.body.weight(.medium))
+                            // The phrase you say, quoted.
+                            Text("“\(snippet.trigger)”").font(BindersTheme.quote())
                             Text(snippet.expansion).font(.callout).foregroundStyle(.secondary).lineLimit(3)
                         }
                         Spacer()
@@ -135,6 +139,7 @@ struct SnippetsView: View {
                 }
             }
             .listStyle(.inset)
+            .scrollContentBackground(.hidden)
             .overlay {
                 if snippets.isEmpty {
                     ContentUnavailableView("No snippets yet", systemImage: "text.badge.plus",
@@ -155,11 +160,11 @@ private struct SnippetEditor: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Edit Snippet").font(.headline)
+            Text("Edit Snippet").font(BindersTheme.cardTitle)
             TextField("Trigger", text: $snippet.trigger).textFieldStyle(.roundedBorder)
             TextEditor(text: $snippet.expansion)
                 .frame(minHeight: 140)
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.15)))
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(BindersTheme.lineStrong))
             HStack {
                 Spacer()
                 Button("Done") {
@@ -171,6 +176,7 @@ private struct SnippetEditor: View {
         }
         .padding(20)
         .frame(width: 460)
+        .pageGround()
     }
 }
 
@@ -201,20 +207,19 @@ struct StyleView: View {
                     }
                 } else {
                     Text("In terminals and editors Binders keeps commands, flags, file paths and identifiers exact, understands “camel case” and spoken symbols, and skips the trailing period on short commands.")
-                        .padding(14)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(RoundedRectangle(cornerRadius: 12).fill(Color.primary.opacity(0.045)))
+                        .paperCard(padding: 14)
                 }
 
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Custom instructions").font(.headline)
+                    Text("Custom instructions").font(BindersTheme.cardTitle)
                     TextEditor(text: Binding(
                         get: { settings.styles.customInstructions[category.rawValue] ?? "" },
                         set: { settings.styles.customInstructions[category.rawValue] = $0 }))
                         .font(.body)
                         .frame(minHeight: 70)
                         .padding(4)
-                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.15)))
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(BindersTheme.lineStrong))
                     Text("For example: “Use British spelling”, “Never use em dashes”, “Sign emails with – Maya”.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
@@ -222,7 +227,7 @@ struct StyleView: View {
                 Divider()
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("App & website categories").font(.headline)
+                    Text("App & website categories").font(BindersTheme.cardTitle)
                     Text("Binders recognizes common apps automatically. Override any app or site here.")
                         .font(.callout).foregroundStyle(.secondary)
                     ForEach(settings.styles.appOverrides.keys.sorted(), id: \.self) { key in
@@ -293,18 +298,20 @@ private struct ToneCard: View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    Text(tone.displayName).font(.headline)
+                    Text(tone.displayName).font(BindersTheme.cardTitle)
                     Spacer()
                     Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                        .foregroundStyle(selected ? Color.accentColor : .secondary)
+                        .foregroundStyle(selected ? AnyShapeStyle(.tintText) : AnyShapeStyle(.secondary))
                 }
                 Text(tone.example).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(14)
             .frame(maxWidth: .infinity, minHeight: 110, alignment: .topLeading)
-            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.primary.opacity(selected ? 0.08 : 0.035)))
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(selected ? Color.accentColor : .clear, lineWidth: 1.5))
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(selected ? AnyShapeStyle(TintFill().opacity(0.08)) : AnyShapeStyle(Color.clear)))
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(BindersTheme.surface))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(selected ? AnyShapeStyle(.tintFill) : AnyShapeStyle(BindersTheme.line), lineWidth: selected ? 1.5 : 1))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -312,9 +319,11 @@ private struct ToneCard: View {
 }
 
 struct NotesView: View {
+    @Environment(DictationController.self) private var controller
     @Environment(HubNavigation.self) private var navigation
     @Environment(TeamSyncService.self) private var team
     @Environment(\.undoManager) private var undoManager
+    @ReducedMotion private var reduceMotion
     @Query private var notes: [NoteItem]
     @State private var selection: UUID?
     /// A note just made, whose editor takes the cursor.
@@ -371,6 +380,7 @@ struct NotesView: View {
     }
 
     private func newNote(from template: NoteTemplate?) {
+        guard Store.shared.allowsSave() else { return }
         let binder = Store.shared.binder(binderID ?? AppSettings.shared.currentBinderID) ?? Store.shared.defaultBinder()
         let note = TemplateStore.newNote(from: template, in: binder)
         focusID = note.id
@@ -391,7 +401,7 @@ struct NotesView: View {
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
-                    Text("Notes").font(BindersTheme.columnTitle)
+                    Text("Notes").font(BindersTheme.columnTitle).foregroundStyle(.sectionInk)
                     Spacer()
                     Menu {
                         Section("Status") {
@@ -412,6 +422,7 @@ struct NotesView: View {
                     .menuStyle(.borderlessButton)
                     .menuIndicator(.hidden)
                     .fixedSize()
+                    .quietControl()
                     .help("Show only notes with a status or a tag")
                     // A click makes a blank note; the menu starts one from a template.
                     Menu {
@@ -435,6 +446,7 @@ struct NotesView: View {
                     }
                     .menuStyle(.borderlessButton)
                     .fixedSize()
+                    .quietControl()
                     .help("New note. The arrow starts one from a template.")
                 }
                 .padding(.horizontal, 16)
@@ -457,6 +469,7 @@ struct NotesView: View {
                         Button(role: .destructive) { requestDelete(note) } label: { Label("Delete", systemImage: "trash") }
                     }
                 }
+                .scrollContentBackground(.hidden)
                 // ⌫ or ⌦ on the selected note, or right-click. Undo puts it back; a team note asks first.
                 .onDeleteCommand { if let note = notes.first(where: { $0.id == selection }) { requestDelete(note) } }
                 .onKeyPress(.deleteForward) {
@@ -468,6 +481,14 @@ struct NotesView: View {
                     if let id = ids.first, let note = notes.first(where: { $0.id == id }) {
                         Button("Open in Its Own Window") { NotePopouts.shared.open(note) }
                         Button("Fold into a Bubble") { NotePopouts.shared.open(note, collapsed: true) }
+                        Button("Put on Board") {
+                            guard Store.shared.allowsSave() else { return }
+                            MarkdownEditor.flushAll()
+                            let card = controller.board.create(from: note, by: .you)
+                            controller.router.suggestLater(for: card, origin: .toBoard)
+                            let name = Store.shared.binder(card.binderID)?.name
+                            controller.flowBar.toast(name.map { "Added to the \($0) board" } ?? "Added to the board", symbol: "checkmark.circle")
+                        }
                         Divider()
                         Button(sharedWithTeam(note) ? "Delete for Everyone…" : "Delete", role: .destructive) { requestDelete(note) }
                     }
@@ -494,15 +515,17 @@ struct NotesView: View {
                     .font(.callout)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
-                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.primary.opacity(0.06)))
+                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(BindersTheme.surface))
+                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(BindersTheme.line))
                     .padding(.horizontal, 10)
                     .padding(.top, 6)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    // It rises into place; under Reduce Motion it fades in.
+                    .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
                 }
                 Button("Open Scratchpad (\(AppSettings.shared.hotkeys.scratchpad?.displayString() ?? "menu bar"))") {
                     ScratchpadController.shared.show()
                 }
-                .buttonStyle(.link)
+                .themedLink()
                 .padding(12)
             }
             .frame(width: 260)
@@ -548,8 +571,8 @@ struct NotesView: View {
             .font(.caption.weight(.medium))
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
-            .background(Capsule().fill(Color.accentColor.opacity(0.12)))
-            .foregroundStyle(Color.accentColor)
+            .background(Capsule().fill(TintFill().opacity(0.14)))
+            .foregroundStyle(.tintText)
         }
         .buttonStyle(.plain)
         .help("Show all notes again")
@@ -580,7 +603,7 @@ struct PanelEdge: View {
 
     var body: some View {
         ZStack {
-            Rectangle().fill(Color(nsColor: .separatorColor)).frame(width: 1).opacity(visible ? 1 : 0)
+            Rectangle().fill(BindersTheme.line).frame(width: 1).opacity(visible ? 1 : 0)
             Color.clear.frame(width: 7).contentShape(Rectangle())
         }
         .frame(width: 7)
@@ -626,11 +649,19 @@ private struct NoteRow: View {
                     Image(systemName: "person.2")
                     Text("Shared ·")
                 }
-                Text(note.updatedAt, format: .relative(presentation: .named))
+                // An agent's words in it: whose, until you make it yours.
+                if !note.agentMark.isEmpty {
+                    AgentLabel(note.agentMark)
+                    Text("·")
+                }
+                Text(note.updatedAt, format: .relative(presentation: .named)).monospacedDigit()
                 if let status = note.status { Text("· \(status)") }
                 if let due = note.dueAt {
+                    // Late needs you: amber, with its clock.
                     let late = due < Calendar.current.startOfDay(for: Date()) && note.status != "Done"
-                    Text("· due \(due.formatted(.dateTime.month(.abbreviated).day()))").foregroundStyle(late ? Color.red : Color.secondary)
+                    Text("·")
+                    if late { Image(systemName: "clock").foregroundStyle(BindersTheme.needsYou).accessibilityHidden(true) }
+                    Text("due \(due.formatted(.dateTime.month(.abbreviated).day()))").foregroundStyle(late ? AnyShapeStyle(BindersTheme.needsYou) : AnyShapeStyle(.secondary))
                 }
             }
             .font(.caption)
@@ -641,6 +672,7 @@ private struct NoteRow: View {
 }
 
 struct NoteEditor: View {
+    @Environment(DictationController.self) private var controller
     @Environment(TeamSyncService.self) private var team
     @Environment(KnowledgeService.self) private var knowledge
     @Environment(AppSettings.self) private var settings
@@ -653,18 +685,31 @@ struct NoteEditor: View {
     var onDelete: () -> Void
     @State private var confirmDelete = false
     @State private var showingHistory = false
+    /// See What Changed: the history opens at the version from before an agent's change, showing what changed since.
+    @State private var historyFrom: Date?
     /// Every note follows the same choice.
-    @AppStorage("notesShowDigest") private var digestVisible = true
-    @AppStorage("notesDigestWidth") private var digestWidth: Double = 300
+    @AppStorage("notesShowDigest", store: AppDefaults.store) private var digestVisible = true
+    @AppStorage("notesDigestWidth", store: AppDefaults.store) private var digestWidth: Double = 300
     @State private var digestCopied = false
     /// "Updated 3 links in 2 notes", for a moment after a new title.
     @State private var renameNotice: String?
+    /// Put on Board: the card it made, and where, for a few seconds.
+    @State private var boardNotice: (card: TaskCard, line: String)?
 
     private var digesting: Bool { knowledge.digestingNoteIDs.contains(note.id) }
     private var digestStale: Bool { !note.digest.isEmpty && note.digestHash != KnowledgeService.noteContentHash(note.text) }
 
     var body: some View {
         VStack(spacing: 0) {
+            if !note.agentMark.isEmpty {
+                AgentNoteBanner(note: note, seeChanges: {
+                    MarkdownEditor.flushAll()
+                    historyFrom = note.editedAt
+                    showingHistory = true
+                }, madeMine: { knowledge.correctionsChanged() })
+                .padding(.horizontal, 24)
+                .padding(.top, 16)
+            }
             if note.isTeamCopy {
                 Label("\(note.teamAuthorName ?? "A teammate") shared this note. Your edits sync to everyone on the team.", systemImage: "person.2")
                     .font(.callout)
@@ -674,8 +719,13 @@ struct NoteEditor: View {
                     .padding(.top, 16)
             }
             HStack(spacing: 0) {
+                // The note page: a sheet, light paper in the light appearance and a dark page in the dark.
                 MarkdownNoteEditor(text: $note.text, fontSize: 15, placeholder: "Write, or hold fn to dictate.",
-                                   links: LinkTargets.forNote(note) { renamed($0) }, focused: focused, reveal: reveal, accessories: AnyView(noteButtons))
+                                   links: LinkTargets.forNote(note) { renamed($0) }, focused: focused, reveal: reveal, accessories: AnyView(noteButtons),
+                                   paper: true)
+                    .paperSheet()
+                    .padding([.leading, .vertical], 14)
+                    .padding(.trailing, 4)
                     .onChange(of: note.text) { previous, _ in
                         note.updatedAt = Date()
                         NoteHistory.changed(note.id, previous: previous)
@@ -688,7 +738,7 @@ struct NoteEditor: View {
                 }
             }
             HStack {
-                Text("\(note.text.wordCount) words").font(.caption).foregroundStyle(.secondary)
+                Text("\(note.text.wordCount) words").font(.caption).monospacedDigit().foregroundStyle(.secondary)
                 if let renameNotice {
                     Label(renameNotice, systemImage: "link")
                         .font(.caption)
@@ -705,16 +755,34 @@ struct NoteEditor: View {
                             team.scheduleSync(after: 0.5)
                         }
                     } label: {
-                        Label(binder.sharedWithTeam ? "\(binder.name) · shared" : binder.name, systemImage: binder.sharedWithTeam ? "person.2" : "books.vertical")
+                        // Made from what you said, it's on this Mac only, though its binder is shared.
+                        let shared = binder.sharedWithTeam && !note.staysUnshared
+                        Label(shared ? "\(binder.name) · shared" : binder.sharedWithTeam ? "\(binder.name) · on this Mac only" : binder.name,
+                              systemImage: shared ? "person.2" : "books.vertical")
                     }
                     .controlSize(.small)
                     .fixedSize()
                     .padding(.leading, 8)
-                    .help("Which binder this note is in. Sharing follows the binder.")
+                    .help(note.staysUnshared ? "Which binder this note is in. Made from what you said, it stays on this Mac, even in a shared binder."
+                          : "Which binder this note is in. Sharing follows the binder.")
                 }
                 Spacer()
+                if let boardNotice {
+                    // What was done, with the way to it.
+                    Label(boardNotice.line, systemImage: "checkmark.circle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .transition(.opacity)
+                    Button("Open") { HubWindowController.shared.navigation.open(card: boardNotice.card) }
+                        .controlSize(.small)
+                        .help("Open the card on its board")
+                }
+                Button { putOnBoard() } label: { Label("Put on Board", systemImage: "rectangle.split.3x1") }
+                    .help("A card on this binder's board with the note's title, its first lines and a link back to the note")
                 Button {
                     MarkdownEditor.flushAll()
+                    historyFrom = nil
                     showingHistory = true
                 } label: { Label("History", systemImage: "clock.arrow.circlepath") }
                     .help("Earlier versions of this note, to read or put back")
@@ -728,9 +796,22 @@ struct NoteEditor: View {
             }
             .padding(12)
         }
-        .sheet(isPresented: $showingHistory) { NoteHistorySheet(note: note) }
+        .sheet(isPresented: $showingHistory) { NoteHistorySheet(note: note, changesFrom: historyFrom) }
         .confirmationDialog("Delete this note for everyone on the team?", isPresented: $confirmDelete) {
             Button("Delete for Everyone", role: .destructive, action: delete)
+        }
+    }
+
+    /// Put on Board: a card in the note's binder, and a word that says where, with Open, for a few seconds.
+    private func putOnBoard() {
+        guard Store.shared.allowsSave() else { return }
+        MarkdownEditor.flushAll()
+        let card = controller.board.create(from: note, by: .you)
+        controller.router.suggestLater(for: card, origin: .toBoard)
+        let line = Store.shared.binder(card.binderID).map { "Added to the \($0.name) board" } ?? "Added to the board"
+        withAnimation { boardNotice = (card, line) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+            if boardNotice?.card.id == card.id { withAnimation { boardNotice = nil } }
         }
     }
 
@@ -750,7 +831,7 @@ struct NoteEditor: View {
         HStack(spacing: 4) {
             Toggle(isOn: $digestVisible) {
                 Image(systemName: "sidebar.right").frame(width: 24, height: 20)
-                    .foregroundStyle(digestVisible ? Color.accentColor : Color.secondary)
+                    .foregroundStyle(digestVisible ? AnyShapeStyle(.tintText) : AnyShapeStyle(.secondary))
             }
             .toggleStyle(.button)
             .help(digestVisible ? "Hide the digest and properties" : "Show the digest and properties beside the note")
@@ -771,13 +852,14 @@ struct NoteEditor: View {
             NotePropertiesPanel(note: note)
             Divider().padding(.vertical, 4)
             HStack {
-                Text("Digest").font(.headline)
+                Text("Digest").font(BindersTheme.cardTitle).foregroundStyle(.sectionInk)
                 Spacer()
                 if !note.digest.isEmpty {
                     Button(action: copyDigest) {
                         Image(systemName: digestCopied ? "checkmark" : "doc.on.doc")
                     }
                     .buttonStyle(.borderless)
+                    .quietControl()
                     .help("Copy the digest as Markdown")
                 }
                 if digesting {
@@ -787,9 +869,11 @@ struct NoteEditor: View {
                         MarkdownEditor.flushAll()
                         Task { await knowledge.digest(note) }
                     } label: {
-                        Image(systemName: note.digest.isEmpty ? "sparkles" : "arrow.clockwise")
+                        // The model writes it; no agent does, so not the sparkle.
+                        Image(systemName: note.digest.isEmpty ? BindersTheme.modelSymbol : "arrow.clockwise")
                     }
                     .buttonStyle(.borderless)
+                    .quietControl()
                     .disabled(note.text.wordCount < 3)
                     .help(note.digest.isEmpty ? "Write a digest with your local model" : "Write the digest again")
                 }
@@ -797,9 +881,8 @@ struct NoteEditor: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
                     if let digestIssue {
-                        Label(digestIssue, systemImage: "exclamationmark.triangle")
+                        StatusLabel(digestIssue, .problem)
                             .font(.callout)
-                            .foregroundStyle(.orange)
                             .fixedSize(horizontal: false, vertical: true)
                             .textSelection(.enabled)
                     }
@@ -852,10 +935,10 @@ struct NoteEditor: View {
     private var digestPlaceholder: String {
         if digesting { return "Reading the note…" }
         if note.text.wordCount < NoteDigest.minimumWords {
-            return "Short notes speak for themselves. Click the sparkles to digest this one anyway."
+            return "Short notes speak for themselves. Click the wand to digest this one anyway."
         }
         if !settings.noteDigests {
-            return "Digests are off in Settings → Knowledge. Click the sparkles to write one now."
+            return "Digests are off in Settings → Knowledge. Click the wand to write one now."
         }
         return "A digest is written about a minute and a half after you stop editing: a title, a summary, key points and to-dos, all searchable in Knowledge."
     }

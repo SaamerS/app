@@ -38,7 +38,10 @@ public struct MCPTool: Equatable, Sendable {
             if let options = parameter.options { property["enum"] = options }
             properties[parameter.name] = property
         }
-        return ["name": name, "description": description, "annotations": ["readOnlyHint": readOnly],
+        // Binders' writes add or change, and a changed note keeps its earlier versions: none destroys anything, and
+        // nothing reaches beyond this Mac. Saying so lets hosts run an unattended agent that writes.
+        return ["name": name, "description": description,
+                "annotations": ["readOnlyHint": readOnly, "destructiveHint": false, "openWorldHint": false],
                 "inputSchema": ["type": "object", "properties": properties, "required": parameters.filter(\.required).map(\.name)]]
     }
 }

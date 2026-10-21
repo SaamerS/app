@@ -7,7 +7,7 @@
 		<string>io.binders.app.conversations</string>
 	</array>
 	<key>BindersBackgroundInference</key>
-	<false/>
+	<true/>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
@@ -48,9 +48,11 @@
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Binders connects to Binders on your Mac over your network, so your to-dos, notes and meetings stay on your own devices.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Binders listens while you dictate, and while All-day capture is on, to write down your conversations; audio stays on this iPhone. After you dictate with the Binders keyboard, it keeps the microphone ready for five minutes so the next dictation starts at once; nothing is transcribed or kept until you tap the mic.</string>
+	<string>Binders listens while you dictate, and while All-day capture is on, to write down your conversations and, if you turn it on, what you say to yourself; audio stays on this iPhone. After you dictate with the Binders keyboard, it keeps the microphone ready for five minutes so the next dictation starts at once; nothing is transcribed or kept until you tap the mic.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Binders turns what you dictate into text on this iPhone.</string>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
@@ -62,7 +64,10 @@
 		<string>processing</string>
 	</array>
 	<key>UILaunchScreen</key>
-	<dict/>
+	<dict>
+		<key>UIColorName</key>
+		<string>LaunchGround</string>
+	</dict>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>

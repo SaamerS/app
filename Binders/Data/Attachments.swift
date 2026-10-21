@@ -98,7 +98,9 @@ enum Attachments {
     // MARK: Team folders
 
     /// Puts each attachment a shared note uses on both sides: next to the note's file in the team folder, and here.
-    static func sync(_ text: String, noteFile: URL) {
+    /// `upload`: false for a teammate's note, whose names could match a file of yours that's in no shared note: then
+    /// files only come down, never go up.
+    static func sync(_ text: String, noteFile: URL, upload: Bool = true) {
         let names = MarkdownMedia.attachmentNames(in: text)
         guard !names.isEmpty else { return }
         let manager = FileManager.default
@@ -106,7 +108,7 @@ enum Attachments {
         for name in names {
             let local = folder.appendingPathComponent(name), remote = remoteFolder.appendingPathComponent(name)
             let here = manager.fileExists(atPath: local.path), there = manager.fileExists(atPath: remote.path)
-            if here, !there {
+            if upload, here, !there {
                 try? manager.createDirectory(at: remoteFolder, withIntermediateDirectories: true)
                 try? manager.copyItem(at: local, to: remote)
             } else if there, !here {

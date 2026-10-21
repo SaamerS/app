@@ -111,6 +111,11 @@ public enum NotesEditing {
         return owner.caseInsensitiveCompare(person) == .orderedSame || owner.caseInsensitiveCompare(firstName(person)) == .orderedSame
     }
 
+    /// How many task lines in these notes aren't ticked yet.
+    public static func openTasks(in markdown: String) -> Int {
+        markdown.components(separatedBy: "\n").filter { task(from: $0).map { !$0.done && !$0.text.isEmpty } ?? false }.count
+    }
+
     /// Reads a task line the way the notes write them: "- [ ] Noah — order stickers" has owner "Noah".
     /// Only a dash with spaces around it separates an owner, and a plain hyphen only after "You", so prose isn't misread.
     public static func task(from line: String) -> TaskLine? {

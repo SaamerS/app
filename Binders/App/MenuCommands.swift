@@ -60,7 +60,7 @@ enum MenuShortcuts {
 
     /// What each changed command has: a shortcut, or nil for none.
     private static var overrides: [String: Hotkey?] {
-        guard let data = UserDefaults.standard.data(forKey: key),
+        guard let data = AppDefaults.store.data(forKey: key),
               let saved = try? JSONDecoder().decode([String: OptionalHotkey].self, from: data) else { return [:] }
         return saved.mapValues(\.hotkey)
     }
@@ -75,18 +75,18 @@ enum MenuShortcuts {
     static func set(_ hotkey: Hotkey?, for command: MenuCommand) {
         var all = overrides
         all[command.rawValue] = .some(hotkey)
-        UserDefaults.standard.set(try? JSONEncoder().encode(all.mapValues { OptionalHotkey(hotkey: $0) }), forKey: key)
+        AppDefaults.store.set(try? JSONEncoder().encode(all.mapValues { OptionalHotkey(hotkey: $0) }), forKey: key)
         rebuildMenu()
     }
 
     static func reset() {
-        UserDefaults.standard.removeObject(forKey: key)
+        AppDefaults.store.removeObject(forKey: key)
         rebuildMenu()
     }
 
     static func rebuildMenu() {
         guard NSApp.mainMenu != nil else { return }
-        NSApp.mainMenu = MainMenu.build()
+        MainMenu.install()
     }
 
     /// The command that already has `hotkey`, or a built-in one that can't be given away ("⌘C is Copy").
@@ -148,14 +148,14 @@ enum TextZoom {
     static let range = 0.7...2.0
 
     static var level: Double {
-        let saved = UserDefaults.standard.double(forKey: key)
+        let saved = AppDefaults.store.double(forKey: key)
         return saved == 0 ? 1 : saved
     }
 
     static func step(_ by: Double) {
         let next = ((level + by) * 10).rounded() / 10
-        UserDefaults.standard.set(min(max(next, range.lowerBound), range.upperBound), forKey: key)
+        AppDefaults.store.set(min(max(next, range.lowerBound), range.upperBound), forKey: key)
     }
 
-    static func reset() { UserDefaults.standard.set(1.0, forKey: key) }
+    static func reset() { AppDefaults.store.set(1.0, forKey: key) }
 }

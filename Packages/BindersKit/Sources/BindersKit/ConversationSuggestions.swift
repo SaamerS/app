@@ -1,14 +1,18 @@
 import CryptoKit
 import Foundation
 
-/// Something Binders offers once a conversation is written up: a card for what you said you'd do, or an answer, from
-/// your binders, to a question you asked. Shown on the conversation and sent as a notification to the device that heard it.
+/// Something Binders offers once a conversation is written up: a card for what you said you'd do, a card for an idea in
+/// it, or an answer, from your binders, to a question you asked. Shown on the conversation and sent as a notification to
+/// the device that heard it. A card or an idea can also be given to an agent, with Give to.
 public struct ConversationSuggestion: Codable, Equatable, Identifiable, Sendable {
-    public enum Kind: String, Codable, Sendable {
+    /// A phone reads only the kinds it lists (`LinkFeatures.suggestion`): iPhone 2.0 knows card and answer alone.
+    public enum Kind: String, Codable, Sendable, CaseIterable {
         /// Put a to-do from the conversation on its binder's board.
         case card
         /// A question you asked, answered from your notes, meetings and conversations.
         case answer
+        /// An idea from the conversation's notes, for its binder's Backlog.
+        case idea
     }
 
     public enum Status: String, Codable, Sendable {
@@ -53,7 +57,18 @@ public struct ConversationSuggestion: Codable, Equatable, Identifiable, Sendable
         switch kind {
         case .card: ("Put this on the \(binder) board?", text)
         case .answer: ("You asked: \(text)", String((answer ?? "").prefix(240)))
+        case .idea: ("An idea for the \(binder) board?", text)
         }
+    }
+
+    /// The card an idea becomes, the same every time it's said yes to or given to someone, so it's made once.
+    public var cardID: UUID {
+        var bytes = Array(SHA256.hash(data: Data("card|\(id)".utf8)).prefix(16))
+        // A version 4 UUID, as UUID() makes.
+        bytes[6] = (bytes[6] & 0x0F) | 0x40
+        bytes[8] = (bytes[8] & 0x3F) | 0x80
+        return UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                           bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]))
     }
 
     /// The link methods: the iPhone asks for suggestions on its conversations, and says yes or no to one.
@@ -67,7 +82,15 @@ public struct ConversationSuggestion: Codable, Equatable, Identifiable, Sendable
 
     /// The suggestions kept on a conversation, as JSON.
     public static func decodeList(_ json: String) -> [ConversationSuggestion] {
-        (try? JSONDecoder().decode([ConversationSuggestion].self, from: Data(json.utf8))) ?? []
+        decodeEach(Data(json.utf8))
+    }
+
+    /// A list of suggestions, skipping any this build can't read (a kind from a newer Mac) rather than losing them all.
+    public static func decodeEach(_ data: Data) -> [ConversationSuggestion] {
+        guard let items = try? JSONSerialization.jsonObject(with: data) as? [Any] else { return [] }
+        return items.compactMap { item in
+            (try? JSONSerialization.data(withJSONObject: item)).flatMap { try? JSONDecoder().decode(ConversationSuggestion.self, from: $0) }
+        }
     }
 
     public static func encodeList(_ list: [ConversationSuggestion]) -> String {
@@ -85,6 +108,33 @@ public enum SuggestionPrompts {
                   !youKnown || task.owner == nil || task.owner == TranscriptSegment.you else { continue }
             let todo = BoardTaskReference(place: .meeting, id: conversation, text: task.text).string
             if !found.contains(where: { $0.todo == todo }) { found.append((task.text, todo)) }
+            if found.count == limit { break }
+        }
+        return found
+    }
+
+    /// The ideas in a conversation's notes worth a card: the lines of its Ideas section, at most `limit`. Nothing for a
+    /// section that only says there were none.
+    public static func ideaCandidates(summary: String, limit: Int = 2) -> [String] {
+        var found: [String] = []
+        var inIdeas = false
+        for raw in summary.components(separatedBy: "\n") {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("#") {
+                inIdeas = line.trimmingCharacters(in: CharacterSet(charactersIn: "# ")).lowercased() == "ideas"
+                continue
+            }
+            guard inIdeas, NotesEditing.task(from: line) == nil else { continue }
+            var idea = line
+            for marker in ["- ", "* ", "• ", "+ "] where idea.hasPrefix(marker) {
+                idea = String(idea.dropFirst(marker.count))
+                break
+            }
+            if let range = idea.range(of: #"^\d{1,2}[.)]\s+"#, options: .regularExpression) { idea.removeSubrange(range) }
+            idea = idea.trimmingCharacters(in: .whitespaces)
+            let plain = idea.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".()_* "))
+            guard idea.count >= 4, !["none", "n/a", "no ideas", "none mentioned", "nothing", "no ideas mentioned"].contains(plain) else { continue }
+            if !found.contains(where: { $0.caseInsensitiveCompare(idea) == .orderedSame }) { found.append(String(idea.prefix(200))) }
             if found.count == limit { break }
         }
         return found

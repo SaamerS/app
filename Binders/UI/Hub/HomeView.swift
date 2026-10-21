@@ -5,30 +5,38 @@ import BindersKit
 
 struct HomeView: View {
     @Environment(CommitmentService.self) private var commitmentService
-    @Query(sort: \CommitmentRecord.createdAt, order: .reverse) private var commitments: [CommitmentRecord]
     @Environment(AppSettings.self) private var settings
     @Environment(HubNavigation.self) private var navigation
     @Environment(MeetingService.self) private var meetingService
-    @Query(sort: \TranscriptRecord.createdAt, order: .reverse) private var records: [TranscriptRecord]
+    /// The latest 500, for the history; a search looks through all of them.
+    @Query(HomeView.recentRecords) private var records: [TranscriptRecord]
     @Query private var allBinders: [BinderRecord]
-    @Query(sort: \MeetingRecord.createdAt, order: .reverse) private var meetings: [MeetingRecord]
-    @Query(sort: \NoteItem.updatedAt, order: .reverse) private var notes: [NoteItem]
+    /// The to-dos, each binder's counts and the stats: read with bounded fetches and kept up to date by saves, rather than
+    /// worked out from every meeting and note each time the page draws.
+    @State private var data = HomeData()
     @State private var search = ""
+    @State private var found: [TranscriptRecord]?
 
-    private var dictations: [UsageRecord] {
-        records.filter { $0.mode == "dictation" && $0.status == "inserted" }
-            .map { UsageRecord(date: $0.createdAt, words: $0.wordCount, duration: $0.duration) }
+    static var recentRecords: FetchDescriptor<TranscriptRecord> {
+        var descriptor = FetchDescriptor<TranscriptRecord>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
+        descriptor.fetchLimit = 500
+        return descriptor
     }
 
-    private var stats: UsageStats { StatsCalculator.compute(dictations) }
-
     private var filtered: [TranscriptRecord] {
-        let query = search.trimmed
-        guard !query.isEmpty else { return records }
-        return records.filter {
-            $0.finalText.localizedCaseInsensitiveContains(query) || $0.rawText.localizedCaseInsensitiveContains(query)
-                || ($0.appName?.localizedCaseInsensitiveContains(query) ?? false)
-        }
+        search.trimmed.isEmpty ? records : (found ?? [])
+    }
+
+    /// Through every dictation's text, and the app names of the latest ones.
+    private func find(_ query: String) -> [TranscriptRecord] {
+        var descriptor = FetchDescriptor<TranscriptRecord>(
+            predicate: #Predicate { $0.finalText.localizedStandardContains(query) || $0.rawText.localizedStandardContains(query) },
+            sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
+        descriptor.fetchLimit = 500
+        var matches = (try? Store.shared.context.fetch(descriptor)) ?? []
+        let ids = Set(matches.map(\.id))
+        matches += records.filter { !ids.contains($0.id) && ($0.appName?.localizedCaseInsensitiveContains(query) ?? false) }
+        return matches.sorted { $0.createdAt > $1.createdAt }
     }
 
     private var days: [(title: String, records: [TranscriptRecord])] {
@@ -51,16 +59,13 @@ struct HomeView: View {
         }
     }
 
-    private var tasks: [TaskEntry] {
-        TaskCollector.collect(meetings: Array(meetings.prefix(30)), notes: Array(notes.prefix(80)), commitments: Array(commitments.prefix(60)),
-                              openMeeting: open(meeting:), openNote: open(note:), commitmentActions: commitmentActions)
-    }
-
-    private var commitmentActions: CommitmentActions {
-        CommitmentActions(toggle: { commitmentService.toggle($0) }, dismiss: { commitmentService.setStatus($0, "dismissed") }, open: { record in
-            navigation.pendingWritingSearch = record.quote ?? record.task
-            navigation.selection = .writing
-        })
+    private var taskActions: TaskActions {
+        let commitmentService = commitmentService, navigation = navigation
+        return TaskActions(openMeeting: { navigation.open(meeting: $0) }, openNote: { navigation.open(note: $0) }, commitments: CommitmentActions(
+            toggle: { commitmentService.toggle($0) }, dismiss: { commitmentService.setStatus($0, "dismissed") }, open: { record in
+                navigation.pendingWritingSearch = record.quote ?? record.task
+                navigation.selection = .writing
+            }))
     }
 
     private var greeting: String {
@@ -72,8 +77,21 @@ struct HomeView: View {
 
     var body: some View {
         content
-            .onAppear(perform: consumePendingSearch)
+            .onAppear {
+                data.start(taskActions)
+                consumePendingSearch()
+            }
             .onChange(of: navigation.pendingHistorySearch) { consumePendingSearch() }
+            .followingWorkStreams()
+            // What the page first reads just shows; what arrives after files in, and counts roll.
+            .settlesAfterAppearing()
+            .task(id: search) {
+                let query = search.trimmed
+                guard !query.isEmpty else { return found = nil }
+                try? await Task.sleep(for: .milliseconds(150))
+                guard !Task.isCancelled else { return }
+                found = find(query)
+            }
     }
 
     private func consumePendingSearch() {
@@ -83,8 +101,8 @@ struct HomeView: View {
     }
 
     private var content: some View {
-        let tasks = tasks
-        let openCount = tasks.filter { !$0.done }.count
+        let openCount = data.openCount
+        let stats = data.stats
         return ScrollView {
             VStack(alignment: .leading, spacing: 26) {
                 HStack(alignment: .top, spacing: 16) {
@@ -105,12 +123,21 @@ struct HomeView: View {
                                   systemImage: meetingService.isRecording ? "stop.fill" : "record.circle")
                         }
                         .buttonStyle(.borderedProminent)
-                        .tint(meetingService.isRecording ? .red : .accentColor)
+                        // Red only while the microphone is live.
+                        .tint(meetingService.isRecording ? BindersTheme.live : BindersTheme.accent)
                         Button { newNote() } label: { Label("New note", systemImage: "square.and.pencil") }
                         Button { ScratchpadController.shared.show() } label: { Label("Scratchpad", systemImage: "note.text.badge.plus") }
                     }
                     .controlSize(.large)
                     .fixedSize()
+                }
+
+                NeedsYouStrip()
+
+                // Now: what's moving on the boards, and what was heard today.
+                HStack(alignment: .top, spacing: 16) {
+                    WorkStreamsSection()
+                    HeardTodaySection()
                 }
 
                 if !AppPaths.isDemo { SetupChecklist() }
@@ -119,11 +146,8 @@ struct HomeView: View {
                     Text("Binders").font(BindersTheme.columnTitle)
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 210), spacing: 12)], spacing: 12) {
                         ForEach(binders) { binder in
-                            let mine = meetings.filter { $0.binderID == binder.id && !$0.isConversation }
-                            let theirs = notes.filter { $0.binderID == binder.id }
-                            BinderCard(binder: binder, openCount: tasks.filter { !$0.done && $0.binderID == binder.id }.count,
-                                       meetingCount: mine.count, noteCount: theirs.count,
-                                       lastActivity: (mine.map(\.createdAt) + theirs.map(\.updatedAt)).max()) { open(binder) }
+                            BinderCard(binder: binder, openCount: data.openByBinder[binder.id] ?? 0,
+                                       activity: data.activity.map { $0[binder.id] ?? HomeData.Activity() }) { open(binder) }
                         }
                     }
                 }
@@ -133,14 +157,15 @@ struct HomeView: View {
                         HStack(alignment: .firstTextBaseline) {
                             Text("Open to-dos").font(BindersTheme.columnTitle)
                             Spacer()
-                            Text(openCount == 0 ? "nothing open" : "\(openCount) across your binders").font(.callout).foregroundStyle(.secondary)
+                            Text(openCount == 0 ? "nothing open" : "\(openCount) across your binders").font(.callout).monospacedDigit().foregroundStyle(.secondary)
+                                .rollingCount(openCount)
                         }
-                        TaskBoard(tasks: tasks, limit: 8, binderName: { id in binders.first { $0.id == id }?.name })
+                        TaskBoard(tasks: data.tasks, limit: 8, binderName: { id in binders.first { $0.id == id }?.name })
                     }
                     .frame(maxWidth: .infinity, alignment: .topLeading)
                     .paperCard(padding: 16)
                     VStack(spacing: 12) {
-                        ActivityChart(days: StatsCalculator.dailyWords(dictations)).paperCard(padding: 14)
+                        ActivityChart(days: data.daily).paperCard(padding: 14)
                         Grid(horizontalSpacing: 12, verticalSpacing: 12) {
                             GridRow {
                                 StatCard(title: "Words this week", value: stats.wordsThisWeek.formatted(), symbol: "text.word.spacing")
@@ -152,6 +177,7 @@ struct HomeView: View {
                             }
                         }
                     }
+                    .redacted(reason: data.statsRead ? [] : .placeholder)
                     .frame(width: 330)
                 }
 
@@ -196,32 +222,19 @@ struct HomeView: View {
     }
 
     private func openMeetings() {
-        navigation.binderID = settings.currentBinderID ?? Store.shared.defaultBinder().id
+        navigation.binderID = Store.shared.binder(settings.currentBinderID)?.id ?? Store.shared.defaultBinder().id
         navigation.pendingBinderTab = .meetings
         navigation.selection = .binder
     }
 
-    private func open(meeting: MeetingRecord) {
-        navigation.binderID = meeting.binderID ?? Store.shared.defaultBinder().id
-        navigation.pendingMeetingID = meeting.id
-        navigation.pendingBinderTab = .listing(meeting)
-        navigation.selection = .binder
-    }
-
-    private func open(note: NoteItem) {
-        navigation.binderID = note.binderID ?? Store.shared.defaultBinder().id
-        navigation.pendingNoteID = note.id
-        navigation.pendingBinderTab = .notes
-        navigation.selection = .binder
-    }
-
     private func newNote() {
+        guard Store.shared.allowsSave() else { return }
         let binder = Store.shared.binder(settings.currentBinderID) ?? Store.shared.defaultBinder()
         let note = NoteItem()
         note.binderID = binder.id
         note.sharedWithTeam = binder.sharedWithTeam
         Store.shared.insert(note)
-        open(note: note)
+        navigation.open(note: note)
     }
 
     private func formatMinutes(_ minutes: Int) -> String {
@@ -236,8 +249,9 @@ struct StatCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Image(systemName: symbol).foregroundStyle(Color.accentColor)
-            Text(value).font(.system(.title2, design: .rounded).weight(.semibold)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.7)
+            // The accent's; neutral on a binder's overview, whose colour is for its name and what you act on.
+            Image(systemName: symbol).foregroundStyle(.infoText)
+            Text(value).font(BindersTheme.count(22)).lineLimit(1).minimumScaleFactor(0.7).rollingCount(value)
             Text(title).font(.caption).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -255,30 +269,34 @@ struct HistoryRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 14) {
             Text(record.createdAt, format: .dateTime.hour().minute())
-                .font(.caption.monospacedDigit())
+                .font(BindersTheme.time())
                 .foregroundStyle(.secondary)
                 .frame(width: 62, alignment: .leading)
                 .padding(.top, 2)
 
             VStack(alignment: .leading, spacing: 5) {
+                // What you said, quoted in New York italic; a failure's message is Binders' own words.
                 Text(displayText)
+                    .font(record.finalText.isEmpty ? nil : BindersTheme.quote())
                     .foregroundStyle(record.finalText.isEmpty ? .secondary : .primary)
                     .lineLimit(expanded ? nil : 3)
                     .textSelection(.enabled)
                 HStack(spacing: 6) {
                     if let app = record.appName { Text(app) }
-                    if record.mode == "command" { Badge(text: "Command", color: .purple) }
-                    if record.status == "failed" { Badge(text: "Failed", color: .red) }
-                    if record.mode == "dictation", record.status == "inserted", !record.usedLLM { Badge(text: "No AI", color: .orange) }
-                    Text("\(record.wordCount) words · \(String(format: "%.1f", record.duration))s")
+                    if record.mode == "command" { Badge(text: "Command", tinted: true) }
+                    if record.mode == "moment" { Badge(text: "Said to yourself") }
+                    if record.status == "failed" { Badge(text: "Failed", symbol: BindersTheme.problemSymbol, color: BindersTheme.ink) }
+                    if record.mode == "dictation", record.status == "inserted", !record.usedLLM { Badge(text: "No AI") }
+                    Text("\(record.wordCount) words · \(String(format: "%.1f", record.duration))s").monospacedDigit()
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 if expanded {
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("Heard: \(record.rawText)").textSelection(.enabled)
-                        if let reason = record.fallbackReason ?? record.errorMessage { Text(reason).foregroundStyle(.orange) }
+                        (Text("Heard: ") + Text(record.rawText).font(BindersTheme.quote(.caption))).textSelection(.enabled)
+                        if let reason = record.fallbackReason ?? record.errorMessage { StatusLabel(reason, .problem) }
                         Text("Speech \(record.asrMillis) ms · Formatting \(record.llmMillis) ms · \(record.engine)\(record.llmModel.map { " · \($0)" } ?? "")")
+                            .monospacedDigit()
                     }
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -301,7 +319,7 @@ struct HistoryRow: View {
         }
         .padding(.vertical, 9)
         .padding(.horizontal, 10)
-        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(hovering ? Color.primary.opacity(0.05) : .clear))
+        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(hovering ? BindersTheme.ink.opacity(0.05) : .clear))
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .onTapGesture { expanded.toggle() }
@@ -352,7 +370,7 @@ struct SetupChecklist: View {
         let _ = tick
         if !settings.hasCompletedSetup || !requiredDone || !llmReady || Permissions.wisprFlowRunning != nil || showGlobeTip {
             VStack(alignment: .leading, spacing: 12) {
-                Text(settings.hasCompletedSetup ? "Needs attention" : "Get set up").font(.title3.weight(.semibold))
+                Text(settings.hasCompletedSetup ? "Needs attention" : "Get set up").font(.system(size: 17, weight: .heavy, design: .rounded))
 
                 SetupRow(done: micReady, title: "Microphone",
                          detail: "Binders only listens while you hold your shortcut.",
@@ -398,8 +416,8 @@ struct SetupChecklist: View {
                     }
                 }
                 if showGlobeTip {
-                    SetupRow(done: false, isTip: true, title: "Set the 🌐 key to “Do Nothing”",
-                             detail: "System Settings → Keyboard → “Press 🌐 key to”. Otherwise tapping fn can open the emoji picker.",
+                    SetupRow(done: false, isTip: true, title: "Set the Globe key to Do Nothing",
+                             detail: "System Settings → Keyboard → “Press Globe key to” (the fn key, with the globe on it). Otherwise tapping fn can open the emoji picker.",
                              actionTitle: "Keyboard Settings") { Permissions.openKeyboardSettings() }
                 }
                 if let wispr = Permissions.wisprFlowRunning {
@@ -410,7 +428,7 @@ struct SetupChecklist: View {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { tick += 1 }
                     }
                 }
-                if WisprImporter.isAvailable, !UserDefaults.standard.bool(forKey: "importedFromWispr") {
+                if WisprImporter.isAvailable, !AppDefaults.store.bool(forKey: "importedFromWispr") {
                     SetupRow(done: false, isTip: true, title: "Import from Wispr Flow",
                              detail: importMessage ?? "Bring over your dictionary words and snippets.",
                              actionTitle: "Import") { runImport() }
@@ -422,8 +440,9 @@ struct SetupChecklist: View {
                 }
             }
             .padding(18)
-            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.accentColor.opacity(0.07)))
-            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Color.accentColor.opacity(0.18)))
+            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(boxColor.opacity(0.07)))
+            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(BindersTheme.surface))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(boxColor.opacity(0.3)))
             .task {
                 while !Task.isCancelled {
                     try? await Task.sleep(for: .seconds(1.5))
@@ -435,6 +454,9 @@ struct SetupChecklist: View {
             }
         }
     }
+
+    /// Amber once setup was finished and something stopped working, which waits on you; the accent while setting up.
+    private var boxColor: Color { settings.hasCompletedSetup ? BindersTheme.needsYou : BindersTheme.accent }
 
     private var speechDetail: String {
         switch controller.speech.state {
@@ -531,9 +553,11 @@ struct SetupChecklist: View {
     }
 
     private func runImport() {
+        // Not while the library didn't open: it would be marked imported, and the words gone at quit.
+        guard Store.shared.allowsSave() else { return }
         do {
             let summary = try WisprImporter.importAll()
-            UserDefaults.standard.set(true, forKey: "importedFromWispr")
+            AppDefaults.store.set(true, forKey: "importedFromWispr")
             importMessage = "Imported \(summary.words) words and \(summary.snippets) snippets."
             controller.flowBar.toast("Imported \(summary.words) words and \(summary.snippets) snippets from Wispr Flow", symbol: "square.and.arrow.down")
         } catch {
@@ -554,9 +578,10 @@ struct SetupRow: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
+            // Granted and ready wear a check in the accent's text colour: green is kept for done.
             Image(systemName: done ? "checkmark.circle.fill" : (isTip ? "lightbulb" : "circle"))
                 .font(.title3)
-                .foregroundStyle(done ? Color.green : (isTip ? Color.yellow : Color.secondary))
+                .foregroundStyle(done ? AnyShapeStyle(.tintText) : AnyShapeStyle(.secondary))
                 .frame(width: 24)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(.body.weight(.medium))

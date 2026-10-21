@@ -69,16 +69,18 @@ enum MCPHost: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Whether the tool's configuration already names Binders, pointing at this copy.
+    /// Whether the tool's configuration already names Binders, pointing at this copy, with the tool's own name pinned
+    /// (BINDERS_AGENT): one added by an earlier Binders, without it, shows as not added, so Add sets the name that read
+    /// limits and the boards go by.
     var isConfigured: Bool {
         guard let data = try? Data(contentsOf: configURL) else { return false }
         if self == .codex {
             let text = String(decoding: data, as: UTF8.self)
-            return text.contains("[mcp_servers.binders]") && text.contains(Self.executable)
+            return text.contains("[mcp_servers.binders]") && text.contains(Self.executable) && text.contains("BINDERS_AGENT = \"\(name)\"")
         }
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let servers = object[serversKey] as? [String: Any], let entry = servers["binders"] as? [String: Any] else { return false }
-        return entry["command"] as? String == Self.executable
+        return entry["command"] as? String == Self.executable && (entry["env"] as? [String: Any])?["BINDERS_AGENT"] as? String == name
     }
 
     var status: Status { Status(present: isPresent, configured: isConfigured) }
@@ -95,8 +97,9 @@ enum MCPHost: String, CaseIterable, Identifiable {
 
     private var serversKey: String { self == .vsCode ? "servers" : "mcpServers" }
 
+    /// The tool's own name, which the server puts first on the board whatever an agent calls itself (BINDERS_AGENT).
     private var entry: [String: Any] {
-        var entry: [String: Any] = ["command": Self.executable, "args": ["--mcp"]]
+        var entry: [String: Any] = ["command": Self.executable, "args": ["--mcp"], "env": ["BINDERS_AGENT": name]]
         if self == .vsCode { entry["type"] = "stdio" }
         return entry
     }
@@ -106,13 +109,13 @@ enum MCPHost: String, CaseIterable, Identifiable {
         let exe = Self.executable
         switch self {
         case .claudeCode:
-            return "In a terminal:\n\nclaude mcp add -s user binders -- \"\(exe)\" --mcp"
+            return "In a terminal:\n\nclaude mcp add -s user binders -e BINDERS_AGENT=\"\(name)\" -- \"\(exe)\" --mcp"
         case .codex:
-            return "Add to ~/.codex/config.toml:\n\n[mcp_servers.binders]\ncommand = \"\(exe)\"\nargs = [\"--mcp\"]"
+            return "Add to ~/.codex/config.toml:\n\n[mcp_servers.binders]\ncommand = \"\(exe)\"\nargs = [\"--mcp\"]\nenv = { BINDERS_AGENT = \"\(name)\" }"
         case .vsCode:
-            return "Add to \(configURL.path.replacingOccurrences(of: Self.home.path, with: "~")):\n\n{ \"servers\": { \"binders\": { \"type\": \"stdio\", \"command\": \"\(exe)\", \"args\": [\"--mcp\"] } } }"
+            return "Add to \(configURL.path.replacingOccurrences(of: Self.home.path, with: "~")):\n\n{ \"servers\": { \"binders\": { \"type\": \"stdio\", \"command\": \"\(exe)\", \"args\": [\"--mcp\"], \"env\": { \"BINDERS_AGENT\": \"\(name)\" } } } }"
         default:
-            return "Add to \(configURL.path.replacingOccurrences(of: Self.home.path, with: "~")):\n\n{ \"mcpServers\": { \"binders\": { \"command\": \"\(exe)\", \"args\": [\"--mcp\"] } } }"
+            return "Add to \(configURL.path.replacingOccurrences(of: Self.home.path, with: "~")):\n\n{ \"mcpServers\": { \"binders\": { \"command\": \"\(exe)\", \"args\": [\"--mcp\"], \"env\": { \"BINDERS_AGENT\": \"\(name)\" } } } }"
         }
     }
 
@@ -120,9 +123,11 @@ enum MCPHost: String, CaseIterable, Identifiable {
     func add() async throws -> String {
         switch self {
         case .claudeCode:
-            // The tool's own command keeps its file in the shape it expects. Removing first makes this repeatable.
+            // The tool's own command keeps its file in the shape it expects. Removing first makes this repeatable. The name
+            // goes before -e, which takes any number of values and would take the name as one.
             let exe = Self.executable.replacingOccurrences(of: "'", with: "'\\''")
-            let script = "command -v claude >/dev/null || exit 127; claude mcp remove -s user binders >/dev/null 2>&1; claude mcp add -s user binders -- '\(exe)' --mcp"
+            let agent = name.replacingOccurrences(of: "'", with: "'\\''")
+            let script = "command -v claude >/dev/null || exit 127; claude mcp remove -s user binders >/dev/null 2>&1; claude mcp add -s user binders -e 'BINDERS_AGENT=\(agent)' -- '\(exe)' --mcp"
             let result = try await AutomationService.runProcess("/bin/zsh", ["-lc", script], stdin: nil, environment: nil, timeout: 60)
             if result.status == 127 { throw Failure.notFound("The claude command") }
             guard result.status == 0 else { throw Failure.command(result.stderr.trimmed.isEmpty ? "claude mcp add exited with \(result.status)" : result.stderr.trimmed) }
@@ -130,7 +135,7 @@ enum MCPHost: String, CaseIterable, Identifiable {
         case .codex:
             try Self.backup(configURL)
             var text = (try? String(contentsOf: configURL, encoding: .utf8)) ?? ""
-            let block = "[mcp_servers.binders]\ncommand = \"\(Self.executable)\"\nargs = [\"--mcp\"]\n"
+            let block = "[mcp_servers.binders]\ncommand = \"\(Self.executable)\"\nargs = [\"--mcp\"]\nenv = { BINDERS_AGENT = \"\(name)\" }\n"
             if let range = text.range(of: #"(?ms)^\[mcp_servers\.binders\]\n.*?(?=^\[|\z)"#, options: .regularExpression) {
                 text.replaceSubrange(range, with: block)
             } else {

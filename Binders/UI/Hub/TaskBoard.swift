@@ -22,6 +22,10 @@ struct TaskEntry: Identifiable {
     var due: Date? = nil
     /// Commitments the model got wrong can be waved away.
     var dismiss: (() -> Void)? = nil
+    /// An agent added it ("Added by Claude Code"): its group wears the agent's sparkle.
+    var byAgent = false
+    /// Said to yourself: your own words, quoted in New York italic.
+    var quoted = false
 
     var todo: TodoItem {
         let kind = switch kind {
@@ -59,7 +63,8 @@ enum TaskCollector {
                                      done: record.status == "done", sourceID: record.sourceWritingID ?? record.id, sourceTitle: record.sourceTitle,
                                      sourceDate: record.createdAt, binderID: record.binderID,
                                      toggle: { commitmentActions?.toggle(record) }, open: { commitmentActions?.open(record) },
-                                     due: record.dueAt, dismiss: { commitmentActions?.dismiss(record) }))
+                                     due: record.dueAt, dismiss: { commitmentActions?.dismiss(record) }, byAgent: record.todoOrigin == .agent,
+                                     quoted: record.todoOrigin == .moment || record.todoOrigin == .suggestion))
         }
         let reader = TeamSyncService.myName
         /// `author` is the teammate who shared it, whose "You" is them; nil for your own.
@@ -99,10 +104,22 @@ struct TaskBoard: View {
     /// Names the binder a task lives in, when tasks come from several binders.
     var binderName: ((UUID?) -> String?)? = nil
     @State private var ownerFilter: String?
-    /// Cards made from to-dos, to show which to-dos are on a board.
-    @Query(filter: #Predicate<TaskCard> { $0.sourceRef != nil }) private var linkedCards: [TaskCard]
+    /// The cards made from these to-dos, to show which are on a board. Only open to-dos show it, so only theirs are read,
+    /// rather than every card ever made from a to-do.
+    @Query private var linkedCards: [TaskCard]
     @State private var hovered: String?
-    @State private var openCard: TaskCard?
+
+    init(tasks: [TaskEntry], limit: Int? = nil, binderName: ((UUID?) -> String?)? = nil) {
+        self.tasks = tasks
+        self.limit = limit
+        self.binderName = binderName
+        _linkedCards = Query(filter: Self.cards(for: tasks.filter { !$0.done }.map(\.ref)))
+    }
+
+    /// Cards made from any of these to-dos.
+    static func cards(for refs: [String]) -> Predicate<TaskCard> {
+        #Predicate<TaskCard> { card in card.sourceRef.flatMap { refs.contains($0) } ?? false }
+    }
 
     private var cardsByTodo: [String: TaskCard] {
         linkedCards.reduce(into: [:]) { cards, card in if let todo = card.sourceRef { cards[todo] = card } }
@@ -128,6 +145,7 @@ struct TaskBoard: View {
         let title: String
         let date: Date
         let binderID: UUID?
+        let byAgent: Bool
         let open: () -> Void
         var tasks: [TaskEntry]
     }
@@ -144,7 +162,7 @@ struct TaskBoard: View {
             } else {
                 index[task.sourceID] = ordered.count
                 ordered.append(SourceGroup(id: task.sourceID, kind: task.kind, title: task.sourceTitle, date: task.sourceDate,
-                                           binderID: task.binderID, open: task.open, tasks: [task]))
+                                           binderID: task.binderID, byAgent: task.byAgent, open: task.open, tasks: [task]))
             }
         }
         return ordered
@@ -152,6 +170,7 @@ struct TaskBoard: View {
 
     var body: some View {
         let cards = cardsByTodo
+        let groups = groups
         VStack(alignment: .leading, spacing: 14) {
             if !owners.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -172,19 +191,26 @@ struct TaskBoard: View {
             ForEach(groups) { group in
                 VStack(alignment: .leading, spacing: 7) {
                     HStack(spacing: 6) {
-                        Image(systemName: group.kind == .meeting ? "person.2.wave.2" : (group.kind == .commitment ? "hand.raised" : "note.text"))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        // An agent's to-do wears its sparkle, in lavender.
+                        if group.byAgent {
+                            Image(systemName: BindersTheme.agentSymbol).font(.caption).foregroundStyle(BindersTheme.agent)
+                        } else {
+                            Image(systemName: group.kind == .meeting ? "person.2.wave.2" : (group.kind == .commitment ? "hand.raised" : "note.text"))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                         Button(group.title, action: group.open)
-                            .buttonStyle(.link)
+                            .themedLink()
                             .font(.callout.weight(.medium))
                             .lineLimit(1)
-                        Text(group.date, format: .relative(presentation: .named)).font(.caption).foregroundStyle(.secondary)
+                        Text(group.date, format: .relative(presentation: .named)).font(BindersTheme.time()).foregroundStyle(.secondary)
                         Spacer(minLength: 0)
-                        if let name = binderName?(group.binderID) { Badge(text: name, color: .secondary) }
+                        // Its binder's chip slides in as a new to-do files in.
+                        if let name = binderName?(group.binderID) { Badge(text: name).filingChip() }
                     }
-                    ForEach(group.tasks) { row($0, card: cards[$0.ref]) }
+                    ForEach(group.tasks) { row($0, card: cards[$0.ref]).transition(.filed) }
                 }
+                .transition(.filed)
             }
             if let limit, openTasks.count > limit {
                 Text("and \(openTasks.count - limit) more").font(.caption).foregroundStyle(.secondary)
@@ -200,32 +226,32 @@ struct TaskBoard: View {
                 .foregroundStyle(.secondary)
             }
         }
-        .sheet(item: $openCard) { card in
-            CardDetailView(card: card).environment(controller)
-        }
+        // A new to-do files in; a ticked one leaves the open ones.
+        .filing(groups.flatMap { $0.tasks.map(\.id) })
     }
 
     private func row(_ task: TaskEntry, card: TaskCard?) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
+            // A ticked to-do is done: green.
             Button(action: task.toggle) {
                 Image(systemName: task.done ? "checkmark.square.fill" : "square").font(.system(size: 15))
             }
             .buttonStyle(.plain)
-            .foregroundStyle(task.done ? Color.accentColor : Color.secondary)
+            .foregroundStyle(task.done ? AnyShapeStyle(BindersTheme.done) : AnyShapeStyle(.secondary))
             .help(task.done ? "Mark as not done" : "Mark as done")
             if let owner = task.owner { OwnerChip(name: owner) }
             Text(task.text)
+                .font(task.quoted ? BindersTheme.quote() : nil)
                 .strikethrough(task.done, color: .secondary)
-                .foregroundStyle(task.done ? Color.secondary : Color.primary)
+                .foregroundStyle(task.done ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
                 .fixedSize(horizontal: false, vertical: true)
             if let due = task.due, !task.done {
-                let overdue = due < Date()
-                Badge(text: CommitmentService.dueLabel(due), color: overdue ? .red : (Calendar.current.isDateInToday(due) ? .orange : .secondary))
+                DueBadge(due: due)
             }
             Spacer(minLength: 0)
             if let card, !task.done {
-                Button { openCard = card } label: {
-                    Badge(text: "On board · \(card.column.title)", color: .accentColor)
+                Button { CardWindows.shared.open(card) } label: {
+                    Badge(text: "On board · \(card.column.title)", tinted: true)
                 }
                 .buttonStyle(.plain)
                 .help("Open the card. The to-do is ticked off when the card is done.")
@@ -255,37 +281,48 @@ struct TaskBoard: View {
         }
         .contextMenu {
             if let card, !task.done {
-                Button("Open Card") { openCard = card }
+                Button("Open Card") { CardWindows.shared.open(card) }
             } else if !task.done {
                 Button("Add to Board") { moveToBoard(task) }
+            }
+            // A to-do of its own (one you said or added, not a checklist item in a note or a meeting) moves with its card.
+            if !task.done, task.todo.sourceKind == "commitment", let id = UUID(uuidString: task.todo.id) {
+                Menu("Move to") {
+                    MoveToBinderItems(current: task.todo.binderID) { target in controller.router.moveTodo(id, to: target, card: card) }
+                }
             }
         }
     }
 
     /// Puts a to-do on its binder's board, in Ready. It stays open here, marked as on the board, until its card is done.
     private func moveToBoard(_ task: TaskEntry) {
-        controller.board.create(from: task.todo, column: .ready, by: .you)
+        let made = controller.board.create(from: task.todo, column: .ready, by: .you)
+        if !made.existed { controller.router.suggestLater(for: made.card, origin: .toBoard) }
     }
 
     private func chip(_ label: String, count: Int, selected: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 5) {
                 Text(label)
-                Text("\(count)").foregroundStyle(selected ? Color.white.opacity(0.85) : Color.secondary)
+                Text("\(count)").monospacedDigit().foregroundStyle(selected ? AnyShapeStyle(OnTintFill(secondary: true)) : AnyShapeStyle(.secondary))
+                    .rollingCount(count)
             }
             .font(.caption.weight(.medium))
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
-            .background(Capsule().fill(selected ? Color.accentColor : Color.primary.opacity(0.07)))
-            .foregroundStyle(selected ? Color.white : Color.primary)
+            .background(Capsule().fill(selected ? AnyShapeStyle(.tintFill) : AnyShapeStyle(BindersTheme.ink.opacity(0.07))))
+            // Words that read on the fill: white on the accent and on Indigo, dark ink on a lighter binder colour.
+            .foregroundStyle(selected ? AnyShapeStyle(.onTintFill) : AnyShapeStyle(.primary))
         }
         .buttonStyle(.plain)
     }
 }
 
-/// A small name tag; "You" wears the accent.
+/// A small name tag; "You" wears the accent. On a binder's pages it's a neutral chip like the others, with "You" in ink
+/// so it still stands out.
 struct OwnerChip: View {
     let name: String
+    @Environment(\.binderTint) private var binderTint
 
     var body: some View {
         let mine = name == TranscriptSegment.you
@@ -293,9 +330,19 @@ struct OwnerChip: View {
             .font(.caption.weight(.semibold))
             .padding(.horizontal, 7)
             .padding(.vertical, 2)
-            .background(Capsule().fill(mine ? Color.accentColor.opacity(0.18) : Color.primary.opacity(0.07)))
-            .foregroundStyle(mine ? Color.accentColor : Color.secondary)
+            .background(Capsule().fill(mine ? AnyShapeStyle(.infoFill(0.18)) : AnyShapeStyle(BindersTheme.ink.opacity(0.07))))
+            .foregroundStyle(mine ? AnyShapeStyle(binderTint == nil ? BindersTheme.accentText : BindersTheme.ink) : AnyShapeStyle(.secondary))
             .lineLimit(1)
+    }
+}
+
+/// When a to-do or a card is due: amber with a clock once it's today or late, as it needs you; plain otherwise.
+struct DueBadge: View {
+    let due: Date
+
+    var body: some View {
+        let urgent = due < Date() || Calendar.current.isDateInToday(due)
+        Badge(text: CommitmentService.dueLabel(due), symbol: urgent ? "clock" : nil, color: urgent ? BindersTheme.needsYou : BindersTheme.muted)
     }
 }
 
@@ -308,9 +355,9 @@ struct ActivityChart: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("Last two weeks").font(.headline)
+                Text("Last two weeks").font(BindersTheme.cardTitle)
                 Spacer()
-                Text("\(total.formatted()) words").font(.caption).foregroundStyle(.secondary)
+                Text("\(total.formatted()) words").font(.caption).monospacedDigit().foregroundStyle(.secondary)
             }
             Canvas { context, size in
                 let peak = max(days.map(\.words).max() ?? 1, 1)
@@ -320,7 +367,7 @@ struct ActivityChart: View {
                     let height = max(3, CGFloat(day.words) / CGFloat(peak) * (size.height - 4))
                     let rect = CGRect(x: CGFloat(index) * slot + (slot - width) / 2, y: size.height - height, width: width, height: height)
                     let today = index == days.count - 1
-                    let color: Color = day.words == 0 ? Color.primary.opacity(0.08) : Color.accentColor.opacity(today ? 1 : 0.55)
+                    let color: Color = day.words == 0 ? BindersTheme.ink.opacity(0.08) : BindersTheme.accent.opacity(today ? 1 : 0.55)
                     context.fill(Path(roundedRect: rect, cornerRadius: width / 2), with: .color(color))
                 }
             }
@@ -336,33 +383,34 @@ struct ActivityChart: View {
     }
 }
 
-/// A binder at a glance: its colour on the spine, what's in it, what's open, and when it was last touched.
+/// A binder at a glance: its colour on the spine and on what's open, what's in it, and when it was last touched.
 struct BinderCard: View {
     let binder: BinderRecord
     let openCount: Int
-    let meetingCount: Int
-    let noteCount: Int
-    let lastActivity: Date?
+    /// What's in it, nil while it's being counted.
+    let activity: HomeData.Activity?
     let open: () -> Void
     @State private var hovering = false
 
     var body: some View {
+        let counted = activity ?? HomeData.Activity()
         Button(action: open) {
             VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 6) {
-                    Text(binder.name).font(.headline).lineLimit(1)
+                    Text(binder.name).font(BindersTheme.cardTitle).lineLimit(1)
                     Spacer(minLength: 0)
                     if binder.isTeamCopy || binder.sharedWithTeam {
                         Image(systemName: binder.isTeamCopy ? "person.2.fill" : "person.2").font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                Text("\(meetingCount) \(meetingCount == 1 ? "meeting" : "meetings") · \(noteCount) \(noteCount == 1 ? "note" : "notes")")
+                Text("\(counted.meetings) \(counted.meetings == 1 ? "meeting" : "meetings") · \(counted.notes) \(counted.notes == 1 ? "note" : "notes")")
                     .font(.callout)
                     .foregroundStyle(.secondary)
+                    .redacted(reason: activity == nil ? .placeholder : [])
                 HStack(spacing: 8) {
-                    if openCount > 0 { Badge(text: "\(openCount) open", color: .accentColor) }
-                    if let lastActivity {
-                        Text(lastActivity, format: .relative(presentation: .named)).font(.caption).foregroundStyle(.secondary)
+                    if openCount > 0 { Badge(text: "\(openCount) open", tinted: true).monospacedDigit().rollingCount(openCount) }
+                    if let last = activity?.last {
+                        Text(last, format: .relative(presentation: .named)).font(BindersTheme.time()).foregroundStyle(.secondary)
                     }
                 }
             }
@@ -370,8 +418,9 @@ struct BinderCard: View {
             .padding(.vertical, 12)
             .padding(.leading, 22)
             .padding(.trailing, 12)
-            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.primary.opacity(hovering ? 0.07 : 0.035)))
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.primary.opacity(0.08)))
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(BindersTheme.ink.opacity(hovering ? 0.04 : 0)))
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(BindersTheme.surface))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(hovering ? BindersTheme.lineStrong : BindersTheme.line))
             .overlay(alignment: .leading) {
                 RoundedRectangle(cornerRadius: 3, style: .continuous)
                     .fill(BinderPalette.color(binder.colorIndex))
@@ -382,6 +431,7 @@ struct BinderCard: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .binderTint(binder.colorIndex)
         .onHover { hovering = $0 }
     }
 }
