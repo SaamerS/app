@@ -229,6 +229,8 @@ enum LinkTargets {
             switch change.kind {
             case .note:
                 guard let note = Store.shared.note(id), note.text == from else { continue }
+                // In its history like any change, as the rename's own change was.
+                NoteHistory.willChange(note, to: to, always: true)
                 note.text = to
             case .meetingNotes, .meetingSummary:
                 guard let meeting = try? context.fetch(FetchDescriptor<MeetingRecord>(predicate: #Predicate { $0.id == id })).first else { continue }

@@ -116,6 +116,22 @@ final class MacNotifications: NSObject, UNUserNotificationCenterDelegate, @unche
         }
     }
 
+    /// Word of a spec (a note with Distill on): something in it is your turn, or all of it is done. Titles and counts
+    /// only. Never asks to notify: only when you've already let Binders. A click opens the note.
+    func post(spec title: String, body: String, note: UUID) {
+        guard !AppPaths.isDemo else { return }
+        install()
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            guard settings.authorizationStatus == .authorized else { return }
+            let content = UNMutableNotificationContent()
+            content.title = title
+            content.body = body
+            content.sound = .default
+            content.userInfo = ["note": note.uuidString]
+            UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "spec-\(note.uuidString)", content: content, trigger: nil))
+        }
+    }
+
     /// The card left Review (approved, sent back): "Ready for review" goes.
     func withdrawStatus(_ card: UUID) {
         guard !AppPaths.isDemo else { return }
@@ -188,10 +204,17 @@ final class MacNotifications: NSObject, UNUserNotificationCenterDelegate, @unche
         let suggestion = info["suggestion"] as? String
         let conversation = info["conversation"] as? String
         let card = (info["card"] as? String).flatMap(UUID.init(uuidString:))
+        let note = (info["note"] as? String).flatMap(UUID.init(uuidString:))
         let reply = (response as? UNTextInputNotificationResponse)?.userText.trimmingCharacters(in: .whitespacesAndNewlines)
         let action = response.actionIdentifier
         DispatchQueue.main.async {
             MainActor.assumeIsolated {
+                // A spec's word: its note.
+                if let note, action != UNNotificationDismissActionIdentifier, let item = Store.shared.note(note) {
+                    HubWindowController.shared.navigation.open(note: item)
+                    HubWindowController.shared.show()
+                    return
+                }
                 if let card {
                     if action == Self.answer {
                         self.answer(card, with: reply ?? "")
@@ -233,7 +256,10 @@ final class MacNotifications: NSObject, UNUserNotificationCenterDelegate, @unche
         let wakes: String? = if case .wakes(let agent, _, _) = controller.agents.commentReach(for: card, events: controller.board.timeline(id)) {
             agent.components(separatedBy: " · ").first
         } else { nil }
-        controller.board.comment(card, text: text, by: .you)
+        // An answer to an approval waits for the team's database while it's off or out of reach (lane DB8).
+        if let refused = controller.board.comment(card, text: text, by: .you) {
+            return controller.flowBar.toast(refused, symbol: "exclamationmark.triangle", duration: 6)
+        }
         let added = wakes.map { "Added your answer to “\(card.title)”, and sent it to \($0)." } ?? "Added your answer to “\(card.title)”."
         controller.flowBar.toast(waiting ? "Answered. “\(card.title)” is back in \(card.column.title)." : added, symbol: "text.bubble", duration: 4)
     }

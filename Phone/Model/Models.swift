@@ -179,11 +179,38 @@ struct AgentList: Codable, Equatable {
         var soloStart: Bool? = nil
         var solo: String? = nil
         var autoFingerprint: String? = nil
+        /// A teammate's agent (lane DB2), from a Mac that lists LinkFeatures.teamAgents: its owner's Mac starts it, on cards
+        /// in the shared binders it takes (`binders`, by name). Your Mac can't wake it; giving it a card asks first, naming
+        /// its owner and who it sends cards to (`sendsTo`). Nil from any other Mac, and for your own agents.
+        var teammate: Bool? = nil
+        var owner: String? = nil
+        var binders: [String]? = nil
+        var headless: Bool? = nil
+        var purpose: String? = nil
+        var takesTeamCards: Bool? = nil
+        var online: Bool? = nil
+
+        var isTeammates: Bool { teammate == true }
     }
     let paused: Bool
-    let agents: [Agent]
+    /// Every agent the Mac listed: yours, then teammates' (lane DB2).
+    let all: [Agent]
+    /// Your agents: what Give to, Auto and a capture's suggestions offer, as they always did.
+    var agents: [Agent] { all.filter { !$0.isTeammates } }
+    /// Teammates' agents, for cards in the shared binders each takes.
+    var teammates: [Agent] { all.filter(\.isTeammates) }
     /// What Auto can hand over now, to an iPhone that lists MomentPayload.autoFeature; nil from any other Mac.
     var auto: Auto? = nil
+
+    private enum CodingKeys: String, CodingKey {
+        case paused, all = "agents", auto
+    }
+
+    init(paused: Bool, agents: [Agent], auto: Auto? = nil) {
+        self.paused = paused
+        self.all = agents
+        self.auto = auto
+    }
 
     /// list_agents' `auto` object. Its own type, every field Optional, as the list is read with snake-case keys
     /// (MacConnection.decode), which AutoReach's own keys don't take: a Mac that sends something odd here never stops the
@@ -227,6 +254,31 @@ struct NoteSummary: Decodable, Identifiable, Hashable {
     let updated: String
     let binder: String
     let preview: String
+    /// The folder it's in ("DevOps/Pipelines", "" at the top of its binder). Nil from a Mac before folders.
+    var folder: String? = nil
+    /// Distill is on for it (lane DS1): only from a Mac that lists LinkFeatures.distill, and only when it's on.
+    var distill: Bool? = nil
+}
+
+/// A folder in a binder, as list_folders gives it, from a Mac that lists LinkFeatures.folders.
+struct FolderInfo: Decodable, Identifiable, Hashable {
+    let id: String
+    let name: String
+    /// "Ops/DevOps": where it is in its binder.
+    let path: String
+    let binder: String
+    let binderId: String
+    /// "" at the top of the binder.
+    let parentId: String
+    let notes: Int
+    let meetings: Int
+    let folders: Int
+}
+
+/// Into a folder, on a binder's notes.
+struct FolderLink: Hashable {
+    let binder: BinderInfo
+    let folder: FolderInfo
 }
 
 struct Note: Decodable {
@@ -241,6 +293,8 @@ struct Note: Decodable {
     let madeBy: String?
     let editedBy: String?
     let editedAt: String?
+    /// Distill is on for it (lane DS1): its work shows under it. Nil from a Mac before Distill, and for every other note.
+    var distill: Bool? = nil
 
     var agentMark: AgentMark { AgentMark(madeBy: madeBy, editedBy: editedBy, editedAt: editedAt.flatMap { Date(iso: $0) }) }
 }

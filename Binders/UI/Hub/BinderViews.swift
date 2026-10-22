@@ -35,6 +35,11 @@ struct BinderPage: View {
     /// What goes here is text until you click it, choose its button with the keyboard, or choose What Goes Here… in the
     /// menu, as the name is.
     @State private var describing = false
+    /// Tidy into Folders, open.
+    @State private var tidying = false
+    /// What Tidy just did, said for a few seconds with Undo.
+    @State private var tidied: String?
+    @Environment(\.undoManager) private var undoManager
 
     private var binder: BinderRecord? {
         binders.first { $0.id == binderID } ?? binders.first(where: \.isDefault)
@@ -48,9 +53,15 @@ struct BinderPage: View {
         }
     }
 
+    /// The folder the page is in, when it's one of this binder's; nil at the top.
+    private func folder(in binder: BinderRecord) -> UUID? {
+        Store.shared.shownFolder(navigation.folderID, in: binder.id)
+    }
+
     private func content(_ binder: BinderRecord) -> some View {
         @Bindable var binder = binder
         let counts = Store.shared.counts(in: binder.id)
+        let folderID = folder(in: binder)
         let conversations = Store.shared.conversationCount(in: binder.id, includingTrivial: true)
         // Only binders the iPhone's conversations have gone into get their tab.
         let tabs = BinderTab.allCases.filter { $0 != .conversations || conversations > 0 || tab == .conversations }
@@ -115,6 +126,15 @@ struct BinderPage: View {
                             .help("Its notes and meetings sync to the team, including ones you add later, with the files attached to those notes. Captures, notes from what you said to yourself, to-dos, cards and the audio Binders records stay on this Mac.")
                     }
                     Menu {
+                        Button(folderID == nil ? "New Folder…" : "New Folder Here…") { FolderPrompts.shared.create(in: binder.id, parent: folderID) }
+                        if !binder.isTeamCopy {
+                            Button("Tidy into Folders…") {
+                                guard Store.shared.allowsSave() else { return }
+                                tidying = true
+                            }
+                            .help("Make a folder for each prefix your titles share, such as “DevOps | …”, and take it off the titles")
+                        }
+                        Divider()
                         if !binder.isTeamCopy {
                             Button("Rename…") { renaming = true }
                             if !binder.isDefault {
@@ -142,6 +162,23 @@ struct BinderPage: View {
                 if !binder.isDefault, !binder.isTeamCopy {
                     WhatGoesHereField(binder: binder, editing: $describing)
                 }
+                // Inside a folder: where you are, a path to click back up.
+                if folderID != nil {
+                    FolderPathBar(binder: binder, folderID: folderID) { navigation.folderID = $0 }
+                        .padding(.top, 2)
+                }
+                if let tidied {
+                    HStack(spacing: 8) {
+                        Label(tidied, systemImage: "folder").font(.callout).foregroundStyle(.secondary)
+                        Button("Undo") {
+                            undoManager?.undo()
+                            self.tidied = nil
+                        }
+                        .controlSize(.small)
+                        .help("Put the titles, links and notes back as they were (⌘Z)")
+                    }
+                    .transition(.opacity)
+                }
             }
             .padding(.horizontal, 24)
             .padding(.top, 24)
@@ -166,10 +203,10 @@ struct BinderPage: View {
                         tab = .notes
                     })
                 case .board: BoardView(binder: binder)
-                case .meetings: MeetingsView(binderID: binder.id)
-                case .conversations: MeetingsView(binderID: binder.id, conversations: true).id("conversations-\(binder.id)")
-                case .notes: NotesView(binderID: binder.id)
-                case .knowledge: KnowledgeView(binderID: binder.id)
+                case .meetings: MeetingsView(binderID: binder.id, folderID: folderID)
+                case .conversations: MeetingsView(binderID: binder.id, conversations: true, folderID: folderID).id("conversations-\(binder.id)")
+                case .notes: NotesView(binderID: binder.id, folderID: folderID)
+                case .knowledge: KnowledgeView(binderID: binder.id, folderID: folderID)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -179,8 +216,22 @@ struct BinderPage: View {
         .onAppear {
             settings.currentBinderID = binder.id
             consumePendingTab()
+            consumePendingTidy()
         }
         .onChange(of: navigation.pendingBinderTab) { consumePendingTab() }
+        .onChange(of: navigation.pendingTidy) { consumePendingTidy() }
+        // Into a folder from the sidebar or the path: its notes, unless a page that shows folders is open.
+        .onChange(of: navigation.folderID) { _, now in
+            if now != nil, tab == .overview || tab == .board { tab = .notes }
+        }
+        .sheet(isPresented: $tidying) {
+            TidyFoldersSheet(binder: binder, undoManager: undoManager) { line in
+                withAnimation { tidied = line }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
+                    if tidied == line { withAnimation { tidied = nil } }
+                }
+            }
+        }
         .confirmationDialog("Delete “\(binder.name)”?", isPresented: $confirmDelete) {
             Button("Delete Binder", role: .destructive) {
                 let general = Store.shared.defaultBinder()
@@ -196,7 +247,9 @@ struct BinderPage: View {
     /// What deleting a binder does with what's in it: it all moves to General and takes on General's sharing, said before
     /// it happens. Captures and notes made from what you said stay on this Mac either way.
     private func deleteMessage(_ binder: BinderRecord, counts: (meetings: Int, notes: Int)) -> String {
+        let folders = Store.shared.folders(in: binder.id).count
         let moved = "Its \(counts.meetings) \(counts.meetings == 1 ? "meeting" : "meetings") and \(counts.notes) \(counts.notes == 1 ? "note" : "notes") move to General."
+            + (folders == 0 ? "" : " \(folders == 1 ? "Its folder goes" : "Its \(folders) folders go") with it, and what was in \(folders == 1 ? "it" : "them") goes to the top of General.")
         guard team.isConfigured else { return moved }
         let generalShared = binders.first(where: \.isDefault)?.sharedWithTeam ?? false
         switch (binder.sharedWithTeam, generalShared) {
@@ -221,6 +274,12 @@ struct BinderPage: View {
         tab = pending
         navigation.pendingBinderTab = nil
     }
+
+    private func consumePendingTidy() {
+        guard navigation.pendingTidy else { return }
+        navigation.pendingTidy = false
+        tidying = true
+    }
 }
 
 /// The binder at a glance: counts, every open to-do from its meetings and notes, recent items, and who comes up in it.
@@ -228,46 +287,45 @@ struct BinderOverview: View {
     @Environment(KnowledgeService.self) private var knowledge
     @Environment(CommitmentService.self) private var commitmentService
     @Environment(HubNavigation.self) private var navigation
-    @Query private var commitments: [CommitmentRecord]
     let binder: BinderRecord
     let openMeeting: (UUID) -> Void
     let openNote: (UUID) -> Void
-    @Query private var meetings: [MeetingRecord]
-    @Query private var notes: [NoteItem]
+    /// Its counts, latest items and to-dos, read when it opens and after a save that could change them (lane DB10).
+    @State private var data = BinderOverviewData()
     @State private var people: [KnowledgeEntity] = []
+    /// For the self-tests: told when a binder's Overview shows.
+    @MainActor static var appeared: ((UUID) -> Void)?
 
     init(binder: BinderRecord, openMeeting: @escaping (UUID) -> Void, openNote: @escaping (UUID) -> Void) {
         self.binder = binder
         self.openMeeting = openMeeting
         self.openNote = openNote
-        let id = binder.id
-        _meetings = Query(filter: #Predicate<MeetingRecord> { $0.binderID == id }, sort: [SortDescriptor(\MeetingRecord.createdAt, order: .reverse)])
-        _notes = Query(filter: #Predicate<NoteItem> { $0.binderID == id }, sort: [SortDescriptor(\NoteItem.updatedAt, order: .reverse)])
-        _commitments = Query(filter: #Predicate<CommitmentRecord> { $0.binderID == id }, sort: [SortDescriptor(\CommitmentRecord.createdAt, order: .reverse)])
     }
 
-    private var tasks: [TaskEntry] {
-        TaskCollector.collect(meetings: Array(meetings.prefix(60)), notes: Array(notes.prefix(120)), commitments: Array(commitments.prefix(100)),
-                              openMeeting: { openMeeting($0.id) }, openNote: { openNote($0.id) },
-                              commitmentActions: CommitmentActions(toggle: { commitmentService.toggle($0) },
-                                                                   dismiss: { commitmentService.setStatus($0, "dismissed") },
-                                                                   open: { record in
-                                                                       navigation.pendingWritingSearch = record.quote ?? record.task
-                                                                       navigation.selection = .writing
-                                                                   }))
+    private var actions: TaskActions {
+        TaskActions(openMeeting: { openMeeting($0.id) }, openNote: { openNote($0.id) },
+                    commitments: CommitmentActions(toggle: { commitmentService.toggle($0) },
+                                                   dismiss: { commitmentService.setStatus($0, "dismissed") },
+                                                   open: { record in
+                                                       navigation.pendingWritingSearch = record.quote ?? record.task
+                                                       navigation.selection = .writing
+                                                   }))
     }
 
     var body: some View {
-        let tasks = tasks
-        let open = tasks.filter { !$0.done }.count
+        let tasks = data.tasks
+        let open = data.openCount
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 HStack(spacing: 12) {
-                    StatCard(title: "Meetings", value: "\(meetings.filter { !$0.isConversation }.count)", symbol: "person.2.wave.2")
-                    StatCard(title: "Notes", value: "\(notes.count)", symbol: "note.text")
+                    StatCard(title: "Meetings", value: "\(data.meetingCount)", symbol: "person.2.wave.2")
+                    StatCard(title: "Notes", value: "\(data.noteCount)", symbol: "note.text")
                     StatCard(title: "Open to-dos", value: "\(open)", symbol: "checklist")
                     StatCard(title: "People & topics", value: "\(people.count)", symbol: "point.3.connected.trianglepath.dotted")
                 }
+
+                // Lane DS1: every note here with Distill on, with how its work is going.
+                WorkListSection(binder: binder, openNote: openNote)
 
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(alignment: .firstTextBaseline) {
@@ -281,10 +339,10 @@ struct BinderOverview: View {
                 .paperCard(padding: 16)
 
                 HStack(alignment: .top, spacing: 16) {
-                    recentList(title: "Recent meetings", empty: "No meetings yet.", items: meetings.filter { !$0.isConversation }.prefix(6).map { meeting in
+                    recentList(title: "Recent meetings", empty: "No meetings yet.", items: data.recentMeetings.map { meeting in
                         (meeting.id, meeting.title, meeting.createdAt.formatted(date: .abbreviated, time: .shortened) + " · \(max(1, Int((meeting.duration / 60).rounded()))) min", { openMeeting(meeting.id) })
                     })
-                    recentList(title: "Recent notes", empty: "No notes yet.", items: notes.prefix(6).map { note in
+                    recentList(title: "Recent notes", empty: "No notes yet.", items: data.recentNotes.map { note in
                         (note.id, note.title, note.updatedAt.formatted(.relative(presentation: .named)), { openNote(note.id) })
                     })
                 }
@@ -311,6 +369,15 @@ struct BinderOverview: View {
             }
             .padding(24)
             .frame(maxWidth: 1000, alignment: .leading)
+        }
+        .onAppear {
+            data.start(binder: binder.id, actions)
+            Self.appeared?(binder.id)
+        }
+        .onDisappear { data.stop() }
+        .onChange(of: binder.id) {
+            data.start(binder: binder.id, actions)
+            Self.appeared?(binder.id)
         }
         .task(id: "\(binder.id)|\(knowledge.revision)") {
             people = await knowledge.store.entities(limit: 18, binder: binder.id.uuidString)

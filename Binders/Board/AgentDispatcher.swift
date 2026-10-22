@@ -49,6 +49,9 @@ final class AgentDispatcher {
     private var deferred: [UUID: (reason: AgentWake.Reason, tapped: Bool)] = [:]
     /// The Claude Code session of each card's run, as its hooks name it.
     @ObservationIgnored private var sessions: [UUID: UUID] = [:]
+    /// How each card's Claude Code run was started: limited to Binders' tools or not, why, and whether it's the one start
+    /// again without the limit after a refusal (`ClaudeCodeManaged`).
+    @ObservationIgnored private var launches: [UUID: (onlyBinders: Bool, reason: AgentWake.Reason, again: Bool)] = [:]
     /// Runs whose last word is on their card (by session, lowercased), from a hook or from the run's end, so nothing says
     /// it twice; kept half a day.
     @ObservationIgnored private var runReports: [String: Date] = [:]
@@ -73,6 +76,37 @@ final class AgentDispatcher {
     @ObservationIgnored private var statusTimer: Timer?
     /// How a status address is asked. The self-tests answer in its place.
     @ObservationIgnored var fetch: @Sendable (URLRequest) async throws -> (Data, URLResponse) = { try await URLSession.shared.data(for: $0) }
+    /// What Binders tells the agent holding a card about the spec it came from (a section that changed after the card
+    /// was made, `tell`), by card, oldest first, until a wake carries them.
+    private(set) var notices: [UUID: [SectionNotice]] = [:]
+    /// Whether the agent may read teammates' items, as Settings → MCP lets its tool: a teammate's changed lines reach only
+    /// such an agent. The self-tests answer in its place.
+    @ObservationIgnored var readsTeam: @MainActor (AgentProfile) -> Bool = { AgentBriefing.reads(for: $0.name).team }
+    /// Cards a run's end moved to Blocked: the stop rang already, or you stopped it yourself, so Distill doesn't ring for
+    /// them again (`takeSaidBlocked`).
+    @ObservationIgnored private var blockedAtRunEnd: Set<UUID> = []
+
+    /// A section's change, as Binders tells the agent holding the card: its line (changed lines and all) and whose change
+    /// it was (`mark`), so each agent woken hears only what it may (`DistilledFrom.forAgent`). No mark: Binders' own words,
+    /// told as they are (a change passed on once you looked).
+    struct SectionNotice: Equatable {
+        var line: String
+        var mark: SectionChangeMark?
+
+        func text(readsTeam: Bool) -> String? {
+            guard let mark else { return line }
+            return DistilledFrom.forAgent(line, mark: mark, readsTeam: readsTeam)
+        }
+    }
+
+    /// A run's end moves the card to Blocked, and its stop rings (or you stopped it yourself).
+    func saidBlocked(_ card: UUID) { blockedAtRunEnd.insert(card) }
+
+    /// Whether a run's end moved the card to Blocked since Distill last asked: then the board already said it.
+    func takeSaidBlocked(_ card: UUID) -> Bool { blockedAtRunEnd.remove(card) != nil }
+    /// Teammates' cards (lane DB2) that wait for your Give to: meant for one of your agents whose Take cards from
+    /// teammates, or start switch, is off.
+    private(set) var waitingForYou: Set<UUID> = []
 
     /// A run is stopped after this long.
     static let runLimit: TimeInterval = 2 * 3_600
@@ -109,8 +143,15 @@ final class AgentDispatcher {
     /// Binders itself is a comment by a person named Binders: it's never yours, so it wakes no one. `wake` narrows what a
     /// phone's comment may wake (`CommentWake`). A comment that comes while a stronger wake gathers (an answer, a
     /// send-back, made ready) keeps that wake's reason, and both sets of words go with it.
+    /// `cause`: whose change it is. Yours (made on this Mac) wakes as it always did; a teammate's, from the team database,
+    /// or an agent's placing under Agents may place work items, wakes the agent only as its switches say
+    /// (`TeamWakeRule`), and otherwise the card waits for your Give to.
     func noticed(_ card: TaskCard, _ kind: TaskEvent.Kind, by actor: BoardActor, from: BoardColumn?, to: BoardColumn?,
-                 wake: CommentWake = .asTheBoardSays) {
+                 wake: CommentWake = .asTheBoardSays, cause: TeamWakeCause = .yours) {
+        // Done: the cards that waited for it may be ready for their agents now.
+        if to == .done, from != .done, let board {
+            for other in board.waiting(on: card) { waitEnded(on: other) }
+        }
         let yours = !actor.isAgent && !(kind == .comment && actor.name == BoardService.binders.name)
         let commented = yours && kind == .comment
         guard let reason = AgentWake.reason(kind: kind.rawValue, from: from, to: to, column: card.column, byPerson: yours),
@@ -123,6 +164,10 @@ final class AgentDispatcher {
         }
         guard registry.wakeable(agent) else {
             if commented { noteUnsent(card) }
+            return
+        }
+        if cause != .yours, let waits = waitsForYou(card, agent: agent, cause: cause, reason: reason) {
+            if reason != .ready { refuse(card.id, waits) }
             return
         }
         let id = card.id
@@ -166,6 +211,30 @@ final class AgentDispatcher {
         refusals[id] = outcomes[id]?.at
     }
 
+    /// Whether a change that wasn't yours may wake `agent` (TeamWakeRule): nil when it may; else why the card waits for
+    /// your Give to, which a card made ready for it says once, on its timeline.
+    private func waitsForYou(_ card: TaskCard, agent: AgentProfile, cause: TeamWakeCause, reason: AgentWake.Reason) -> String? {
+        guard case .waits(let line) = TeamWakeRule.verdict(cause, agent: agent.name, takesTeammatesCards: agent.takesTeammatesCards,
+                                                           startsOnItsOwn: registry.startsOnItsOwn(agent)) else { return nil }
+        guard reason == .ready || reason == .manual else { return line }
+        waitingForYou.insert(card.id)
+        record(card.id, ok: false, line)
+        if let board, !board.timeline(card.id).contains(where: { $0.author == BoardService.binders.name && $0.text == line }) {
+            board.note(card, text: line, toTeam: true)
+        }
+        return line
+    }
+
+    /// A teammate's card that waits for your Give to: still in Ready, meant for one of your agents, by a person.
+    func waitsForYourGiveTo(_ card: TaskCard) -> Bool {
+        guard waitingForYou.contains(card.id) else { return false }
+        guard card.column == .ready, !card.meantForByAgent, let meant = card.meantFor, registry.agent(named: meant) != nil else {
+            waitingForYou.remove(card.id)
+            return false
+        }
+        return true
+    }
+
     /// What a hand-off did: woke the agent (a run started, or the card was sent or posted), or why not, in the words the
     /// card's line already uses. A web hook or a Shortcut that fails after its receipt says so on the card later.
     enum HandOff: Equatable {
@@ -178,7 +247,13 @@ final class AgentDispatcher {
     @discardableResult
     func handOff(_ card: TaskCard) -> HandOff {
         guard card.column == .ready, let agent = target(for: card, reason: .ready) else { return .notWoken("It isn't in Ready for an agent that takes it.") }
+        // Your tap: a teammate's card that waited for it waits no longer.
+        waitingForYou.remove(card.id)
         guard registry.wakeable(agent) else { return .notWoken(registry.paused ? "Agents are paused." : "\(agent.name) can't be woken now.") }
+        if let waiting = waitsLine(card, agent: agent) {
+            record(card.id, ok: false, waiting)
+            return .notWoken(waiting)
+        }
         pending[card.id]?.cancel()
         pending[card.id] = nil
         pendingReasons[card.id] = nil
@@ -248,6 +323,8 @@ final class AgentDispatcher {
     /// (`CardConversation.unheardComments`).
     private func hasUnheardComments(_ card: TaskCard, _ agent: AgentProfile) -> Bool {
         guard let board else { return false }
+        // A notice about its spec is for it as your comment would be.
+        if notices[card.id] != nil { return true }
         return !CardConversation.unheardComments(board.timeline(card.id).map(\.conversation), agent: agent.name, failureLines: Self.failureLines).isEmpty
     }
 
@@ -266,6 +343,12 @@ final class AgentDispatcher {
         pendingReasons[id] = nil
         guard let board, let card = board.card(id), let reason = dueReason(card, asked), let agent = target(for: card, reason: reason),
               registry.wakeable(agent) else { return .notWoken("It isn't waiting for an agent that can be woken now.") }
+        // A card that still waits for others isn't handed over: its agent couldn't take it. It's woken once they're done.
+        // One the agent holds already goes on.
+        if reason == .ready || reason == .manual, !Self.holds(agent, card), let waiting = waitsLine(card, agent: agent) {
+            record(id, ok: false, waiting)
+            return .notWoken(waiting)
+        }
         if runs[id]?.isRunning == true || isCLIRunGoing(id) {
             // Its run is ending (or still going): woken again once it has, if the card still wants it then.
             keepForLater(id, reason, tapped)
@@ -325,8 +408,68 @@ final class AgentDispatcher {
         if registry.changedOutside.contains(agent.id) { return "\(agent.name) was changed outside Binders. Open it in Settings → Agents and save it." }
         if let why = registry.held[agent.id] { return why }
         if agent.wake == .board { return "\(agent.name) checks the board itself." }
+        if !Self.holds(agent, card), let waiting = waitsLine(card, agent: agent) { return waiting + " You can take it yourself." }
         fire(card.id, reason: card.column == .ready ? .ready : .manual, tapped: true)
         return nil
+    }
+
+    // MARK: Cards that wait for others
+
+    /// What a card still waits for, said as why its agent isn't woken: "Waits for “A”. Binders wakes Claude Code once
+    /// it's done." Nil when it waits for nothing that's open.
+    func waitsLine(_ card: TaskCard, agent: AgentProfile) -> String? {
+        guard let board, let line = CardWaits.line(board.openWaits(of: card)) else { return nil }
+        let open = board.openWaits(of: card).count
+        return "\(line). Binders wakes \(agent.name) once \(open == 1 ? "it's" : "they're") done."
+    }
+
+    /// One of the cards this one waited for is done, or gone: when that was its last wait and it's in Ready for an agent
+    /// you meant it for, a note by Binders says so and the agent is woken for it, as for a card you made ready.
+    func waitEnded(on card: TaskCard) {
+        guard let board, card.column == .ready, !card.waitsFor.isEmpty, board.openWaits(of: card).isEmpty,
+              let agent = target(for: card, reason: .ready) else { return }
+        let finished = board.waits(of: card).map { "“\($0.title)”" }
+        let what = finished.count == 1 ? "\(finished[0]) is done" : finished.isEmpty ? "What it waited for is gone" : "What it waited for is done"
+        board.note(card, text: "\(what), so this card is ready for \(agent.name).", toTeam: true)
+        guard registry.wakeable(agent) else { return }
+        // On the team's board, a card a teammate gave it, or an agent placed, wakes it only as its switches say.
+        if let team = board.team, team.covers(card), let given = board.timeline(card.id).last(where: { $0.kind == .assigned }) {
+            let cause = team.cause(of: given, incoming: false)
+            if cause != .yours, waitsForYou(card, agent: agent, cause: cause, reason: .ready) != nil { return }
+        }
+        let id = card.id
+        pending[id]?.cancel()
+        pendingReasons[id] = .ready
+        gathering.insert(id)
+        pending[id] = Task { [weak self] in
+            try? await Task.sleep(for: Self.editDelay)
+            guard !Task.isCancelled else { return }
+            self?.gathering.remove(id)
+            self?.fire(id, reason: .ready, tapped: false)
+        }
+    }
+
+    // MARK: Telling the agent about its spec
+
+    /// Tells the agent holding the card what changed in the spec it came from (`notice`, a section's change), the way your
+    /// comment reaches it: woken now, gathered for the moment edits wait, within its hourly cap and after a run that's
+    /// going, with what of it the agent woken may hear in what the wake carries. Held by no agent in progress, the notice
+    /// waits for the card's next wake. Notices not yet carried go together, the last few.
+    func tell(_ card: TaskCard, notice: SectionNotice) {
+        let id = card.id
+        notices[id, default: []].append(notice)
+        if let kept = notices[id], kept.count > 5 { notices[id] = Array(kept.suffix(5)) }
+        guard let agent = target(for: card, reason: .commented), registry.wakeable(agent) else { return }
+        let fires = pendingReasons[id].flatMap { $0 == .commented ? nil : $0 } ?? .commented
+        pending[id]?.cancel()
+        pendingReasons[id] = fires
+        gathering.insert(id)
+        pending[id] = Task { [weak self] in
+            try? await Task.sleep(for: Self.editDelay)
+            guard !Task.isCancelled else { return }
+            self?.gathering.remove(id)
+            self?.fire(id, reason: fires, tapped: false)
+        }
     }
 
     func isWorking(on card: UUID) -> Bool { working.contains(card) }
@@ -356,11 +499,13 @@ final class AgentDispatcher {
 
     /// The card is gone: nothing more for it.
     func forget(_ card: UUID) {
+        waitingForYou.remove(card)
         pending[card]?.cancel()
         pending[card] = nil
         pendingReasons[card] = nil
         gathering.remove(card)
         notSent[card] = nil
+        notices[card] = nil
         refusals[card] = nil
         asked[card] = nil
         stop(card)
@@ -370,6 +515,14 @@ final class AgentDispatcher {
 
     @discardableResult
     private func wake(_ agent: AgentProfile, card: TaskCard, reason: AgentWake.Reason) -> HandOff {
+        let handed = wakeCarrying(agent, card: card, reason: reason)
+        // Carried: the notice about its spec went with this wake.
+        if handed == .woke { notices[card.id] = nil }
+        return handed
+    }
+
+    @discardableResult
+    private func wakeCarrying(_ agent: AgentProfile, card: TaskCard, reason: AgentWake.Reason) -> HandOff {
         let words = wakeWords(for: agent, on: card)
         let payload = AgentWakePayload(event: reason.rawValue, agent: agent.name, card: card.id, title: card.title, details: card.details,
                                        binder: Store.shared.binder(card.binderID)?.name ?? "", column: card.column, due: card.dueAt,
@@ -517,7 +670,8 @@ final class AgentDispatcher {
     /// it act for you, its prompt has it ask your approval before it sends, posts, buys or deletes anything. `note` goes
     /// before its receipt: why a run started rather than a post to your open session.
     @discardableResult
-    private func wakeClaude(_ agent: AgentProfile, _ wake: ClaudeCodeWake, card: TaskCard, reason: AgentWake.Reason, before note: String = "") -> HandOff {
+    private func wakeClaude(_ agent: AgentProfile, _ wake: ClaudeCodeWake, card: TaskCard, reason: AgentWake.Reason, before note: String = "",
+                            again: Bool = false) -> HandOff {
         let id = card.id
         // Paths as written in agents.json may start with "~", which nothing below would expand.
         var wake = wake
@@ -532,12 +686,14 @@ final class AgentDispatcher {
         }
         let worktree = wake.worksInFolder ? repository : ClaudeCodeLaunch.worktree(repository: repository, card: id)
         let session = UUID()
+        // Limited to Binders' tools, unless this Mac's Claude Code is managed in a way that refuses that.
+        let onlyBinders = !again && Self.asksOnlyBinders
         // Your team's shared folder and other runs' logs are as private to it as Binders' own data.
         let launch = ClaudeCodeLaunch.make(card: id, reason: reason, boardName: agent.name, wake: wake, binders: MCPHost.executable,
                                            dataFolder: AppPaths.support.path, home: NSHomeDirectory(),
                                            alsoPrivate: [Self.logs.path] + [AppSettings.shared.teamFolderPath].compactMap { $0 },
                                            worktreeExists: !wake.worksInFolder && FileManager.default.fileExists(atPath: worktree), session: session,
-                                           draftsFirst: agent.draftsFirst)
+                                           draftsFirst: agent.draftsFirst, strictMCP: onlyBinders)
         let log = Self.logFile(for: id, suffix: "jsonl")
         let run = UUID()
         do {
@@ -550,6 +706,7 @@ final class AgentDispatcher {
             }
             started(id, process, run: run)
             sessions[id] = session
+            launches[id] = (onlyBinders, reason, again)
             if wake.worksInFolder { inFolderRuns[id] = repository } else { inFolderRuns[id] = nil }
             receipt(card, agent: agent, note + "Started Claude Code in \(worktree)\(wake.worksInFolder ? ", the folder itself" : "") (\(wake.safeMode), \(Self.describe(reason))). To look in: claude --resume \(session.uuidString.lowercased()) there.",
                     log: log)
@@ -577,6 +734,7 @@ final class AgentDispatcher {
         runIDs[id] = nil
         working.remove(id)
         let stoppedByYou = stopping.remove(id) != nil
+        let launched = launches.removeValue(forKey: id)
         // The run is over: what its hooks said stands, and a hook that reports after this is one too many.
         let session = sessions.removeValue(forKey: id)?.uuidString.lowercased()
         let hooksSaid = session.map { runReports[$0] != nil } ?? false
@@ -592,7 +750,17 @@ final class AgentDispatcher {
             .compactMap { $0 }.joined(separator: ", ")
         record(id, ok: status == 0, summary)
         guard case .claudeCode(let wake) = agent.wake, let board, let card = board.card(id) else { return }
-        if status != 0, !stoppedByYou, wake.safeMode == "auto", !Self.holds(agent, card) {
+        // This Mac's Claude Code, managed by an organization: a run limited to Binders' tools that it refused starts again
+        // once without that, saying why; one whose tools it kept out says so, and what to do. Never more than one start again.
+        let managed = stoppedByYou ? nil : ClaudeCodeManaged.finding(in: Self.startAndEnd(of: log))
+        if managed == .refusedOnlyBinders, let launched, launched.onlyBinders, !launched.again {
+            AppDefaults.store.set(Date(), forKey: Self.refusedOnlyBindersKey)
+            record(id, ok: false, "Claude Code wouldn't start limited to Binders' tools")
+            wakeClaude(agent, wake, card: card, reason: launched.reason, before: ClaudeCodeManaged.startedAgainLine + " ", again: true)
+            return
+        }
+        if managed != nil { board.comment(card, text: ClaudeCodeManaged.keptOutLine, by: BoardService.binders) }
+        if managed == nil, status != 0, !stoppedByYou, wake.safeMode == "auto", !Self.holds(agent, card) {
             // Stopped before it took the card, in auto mode: Claude Code may not offer that mode on this sign-in or
             // version. Say so on the card rather than leave it looking untouched.
             board.comment(card, text: Self.autoModeStopped(status: status, said: Self.lastError(in: log)), by: BoardService.binders)
@@ -603,6 +771,7 @@ final class AgentDispatcher {
             let why = stoppedByYou ? "You stopped its run before it finished."
                 : status == 0 ? "Its run ended before it finished." : "Its run stopped (exit \(status)) before it finished."
             let said = hooksSaid ? "" : result.text.map { " It said: \(AgentRunReport.trimmed($0, limit: 300))" } ?? ""
+            saidBlocked(card.id)
             try? board.move(card, to: .blocked, by: BoardActor(name: holder, kind: .agent), note: why + said)
             if !stoppedByYou { MacNotifications.shared.post(status: .stopped, on: card, by: agent.name, summary: why) }
         } else if status != 0, !stoppedByYou, card.assignee == nil || !card.assigneeIsAgent {
@@ -829,6 +998,12 @@ final class AgentDispatcher {
         let events = board?.timeline(card.id) ?? []
         let words = CardConversation.wakeWords(events.map(\.conversation), agent: agent.name, failureLines: Self.failureLines)
         let texts = words.words.map { events[$0].text }
+        // What changed in its spec goes after your words, as one of them: only what this agent may hear of each change.
+        let told = (notices[card.id] ?? []).compactMap { $0.text(readsTeam: readsTeam(agent)) }
+        if !told.isEmpty {
+            let yours = words.joined ? texts : events.lastIndex { CardConversation.isYours($0.conversation) }.map { [events[$0].text] } ?? []
+            return (AgentWakePayload.answer(yours + told), true)
+        }
         return (words.joined ? AgentWakePayload.answer(texts) : texts.last ?? "", words.joined)
     }
 
@@ -853,6 +1028,40 @@ final class AgentDispatcher {
         let stamp = Date().formatted(.iso8601.year().month().day().time(includingFractionalSeconds: false))
             .replacingOccurrences(of: ":", with: "").replacingOccurrences(of: "-", with: "")
         return logs.appendingPathComponent("\(card.uuidString.prefix(8).lowercased())-\(stamp).\(suffix)")
+    }
+
+    // MARK: Claude Code managed by an organization
+
+    /// Where this Mac's Claude Code finds its organization's managed settings; in a throwaway folder, one under it. Binders
+    /// only looks: nothing there is ever written.
+    static var managedFolder: String { AgentPlaces.managedClaudeFolder }
+    /// When a run here was refused for being limited to Binders' tools: for a week after, runs start without that limit,
+    /// as they do where the organization's managed-mcp.json is. Then they ask for it again, in case the organization's
+    /// settings changed.
+    static let refusedOnlyBindersKey = "claudeCodeRefusedOnlyBinders"
+
+    /// Whether a run asks for only Binders' tools: not where the organization's managed-mcp.json is, nor for a week after a
+    /// run here was refused for it.
+    static var asksOnlyBinders: Bool {
+        if FileManager.default.fileExists(atPath: (managedFolder as NSString).appendingPathComponent(ClaudeCodeManaged.mcpFile)) { return false }
+        if let refused = AppDefaults.store.object(forKey: refusedOnlyBindersKey) as? Date, Date().timeIntervalSince(refused) < 7 * 86_400 { return false }
+        return true
+    }
+
+    /// Whether an organization manages this Mac's Claude Code: its managed MCP config or settings are here, or a run was
+    /// refused for being limited to Binders' tools.
+    static var claudeCodeIsManaged: Bool {
+        [ClaudeCodeManaged.mcpFile, ClaudeCodeManaged.settingsFile].contains { FileManager.default.fileExists(atPath: (managedFolder as NSString).appendingPathComponent($0)) }
+            || !asksOnlyBinders
+    }
+
+    /// The start and the end of a run's log: what Claude Code printed as it started (where a managed Claude Code says what
+    /// it refused or left out), and how the run ended.
+    static func startAndEnd(of log: URL) -> String {
+        guard let handle = try? FileHandle(forReadingFrom: log) else { return "" }
+        defer { try? handle.close() }
+        let start = (try? handle.read(upToCount: 64 * 1024)).map { String(decoding: $0, as: UTF8.self) } ?? ""
+        return start + "\n" + (CLIRuns.tail(log, bytes: 64 * 1024) ?? "")
     }
 
     /// What a Claude run said last (its result line in stream-json), what it cost and how many turns it took.
@@ -1156,6 +1365,7 @@ extension AgentDispatcher {
                         why = "Its run stopped (exit \(status ?? 0)) before it finished" + (out.failure.map { ": " + Self.sentence($0) } ?? ".")
                     }
                     let saidLine = wordsSaid ? "" : words.map { " It said: \(AgentRunReport.trimmed($0, limit: 300))" } ?? ""
+                    self.saidBlocked(card.id)
                     try? board.move(card, to: .blocked, by: actor, note: why + saidLine)
                     if !stoppedByYou { MacNotifications.shared.post(status: .stopped, on: card, by: runRecord.agentName, summary: why) }
                 } else if !stoppedByYou, card.column == .ready || card.column == .backlog,

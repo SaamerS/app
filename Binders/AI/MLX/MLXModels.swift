@@ -27,9 +27,18 @@ final class MLXModels {
         Suggestion(id: "mlx-community/gemma-4-26b-a4b-it-4bit", name: "Gemma 4 26B", detail: "The best of these, and still quick: for 48 GB or more.", gigabytes: 15.4, memoryGB: 48),
     ]
 
+    /// The model suggested for Distill, beside a quicker language model (lane DS3): a dense 27B that reads specs and lists
+    /// their work best of those measured, too slow for cleaning up dictation. 16.1 GB, Apache 2.0.
+    static let distillSuggestion = Suggestion(id: "mlx-community/Qwen3.8-27B-4bit", name: "Qwen 3.8 27B",
+                                              detail: "The best at turning notes into work items, slower: for 48 GB or more.",
+                                              gigabytes: 16.1, memoryGB: 48)
+
     /// For meaning-based search in Knowledge.
     static let embeddingSuggestion = Suggestion(id: "mlx-community/embeddinggemma-300m-4bit", name: "EmbeddingGemma 300M",
                                                 detail: "For search by meaning in Knowledge.", gigabytes: 0.2, memoryGB: 8)
+
+    /// Every model Binders suggests somewhere, for its name and size.
+    static var known: [Suggestion] { suggestions + [distillSuggestion, embeddingSuggestion] }
 
     /// The model suggested for this Mac's memory.
     static var suggested: Suggestion {

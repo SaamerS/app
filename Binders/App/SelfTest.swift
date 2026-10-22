@@ -16,6 +16,10 @@ import BindersKit
 ///     Binders --selftest-notes <meeting id> [--save]
 ///     Binders --selftest-rescue <meeting id> --file recording.wav [--offset seconds]
 ///     Binders --selftest-conversation   (in a throwaway BINDERS_DATA_DIR)
+///     Binders --selftest-teamdb-schema | -cases | -live | -outbox | -security | -vectors | -boards | -agents | -team | -notes | -move
+///                                       | -meetings | -knowledge | -todos | -update | -reads | -move-folders | -reach | -open-perf
+///                                       | -join-copies
+///                                                                           (each with a throwaway Postgres)
 enum SelfTest {
     static func start(arguments: [String]) {
         Task { @MainActor in
@@ -450,6 +454,11 @@ enum SelfTest {
             return await pagesSelfTest(directory: URL(fileURLWithPath: directory))
         }
 
+        if let directory = value("--selftest-window-fit") {
+            // The main window keeps its size with a note, a meeting and a capture far longer than it. Seeds the demo data.
+            return await windowFitSelfTest(directory: URL(fileURLWithPath: directory))
+        }
+
         if let directory = value("--selftest-settings") {
             // Settings in six pages: each part on one page, and a link to a part landing on its section. Seeds the demo data.
             return await settingsSelfTest(directory: URL(fileURLWithPath: directory))
@@ -822,6 +831,10 @@ enum SelfTest {
             // A folder after the flag gets a drawing of a Claude Code agent's settings, posting to your open session.
             return await agentSessionsSelfTest(drawingTo: value("--selftest-agent-sessions").flatMap { $0.hasPrefix("-") ? nil : URL(fileURLWithPath: $0) })
         }
+        if args.contains("--selftest-claude-managed") {
+            // A Claude Code that an organization manages, with a stand-in claude, in a throwaway BINDERS_DATA_DIR (lane RF1).
+            return await claudeManagedSelfTest()
+        }
         if args.contains("--selftest-cli-agents") {
             // Codex, OpenCode and GitHub Copilot CLI as agents, with stand-ins for the tools, in a throwaway BINDERS_DATA_DIR.
             // A folder after the flag gets a drawing of each one's settings.
@@ -829,6 +842,31 @@ enum SelfTest {
         }
         if args.contains("--selftest-moment") {
             return await momentSelfTest()
+        }
+        if args.contains("--selftest-distill") {
+            // Distill (lane DS1), with a stand-in model, the router's stand-in decision model and stand-in agents.
+            return await distillSelfTest()
+        }
+        if args.contains("--selftest-distill-more") {
+            // Distill finished (lane RF2): what of a section's change reaches an agent, and Distill's smaller gaps.
+            return await distillMoreSelfTest()
+        }
+        if args.contains("--selftest-distill-long") {
+            // Distill on a long note (lane DS2): read in parts, asked again for a list, thinking left out, with stand-ins.
+            return await distillLongSelfTest()
+        }
+        if args.contains("--selftest-distill-schema") {
+            // Distill's reply held to its JSON schema (lane DS3): Ollama's format, response_format, xgrammar, with stand-ins.
+            return await distillSchemaSelfTest()
+        }
+        if let directory = value("--selftest-distill-draw") {
+            // Drawings of Distill's Work bar, panel, review sheet, report, Work list, history and a distilled card.
+            return await distillDrawSelfTest(to: URL(fileURLWithPath: directory, isDirectory: true))
+        }
+        if args.contains("--selftest-distill-bench") {
+            // Distill's prompt and reading, measured on the bench's spec notes with a real model: the one in Settings → AI,
+            // or an OpenAI-compatible server given with --model-url and --model.
+            return await distillBenchSelfTest(url: value("--model-url"), model: value("--model"), rounds: value("--rounds").flatMap(Int.init) ?? 1)
         }
         if args.contains("--selftest-router") {
             // The card router with a stand-in decision backend, in a throwaway BINDERS_DATA_DIR: no model needed.
@@ -1061,6 +1099,17 @@ enum SelfTest {
             return failures == 0 ? 0 : 1
         }
 
+        if args.contains("--selftest-folders") {
+            // Folders inside binders: making, moving, templates, Tidy into Folders; the pages drawn into a folder, if given.
+            return await foldersSelfTest(drawingTo: value("--selftest-folders").flatMap { $0.hasPrefix("-") ? nil : URL(fileURLWithPath: $0) })
+        }
+        if args.contains("--selftest-folders-mcp") {
+            return await foldersMCPSelfTest()
+        }
+        if args.contains("--selftest-folders-team") {
+            return await foldersTeamSelfTest()
+        }
+
         if args.contains("--selftest-templates") {
             // Note templates in a throwaway data folder: the built-in ones, filling one in, saving your own, replacing one.
             guard AppPaths.isDemo else {
@@ -1240,6 +1289,25 @@ open reports/import.html
                 print("NO_TEAM_SPACE: \(error.localizedDescription)")
                 return 1
             }
+        }
+
+        if args.contains("--selftest-team-database-off") {
+            // The team database held back behind its default (lane RF1): off, then on. A folder gets Settings → Team drawn both ways.
+            return await teamDatabaseOffSelfTest(drawingTo: value("--selftest-team-database-off").flatMap { $0.hasPrefix("-") ? nil : URL(fileURLWithPath: $0) })
+        }
+
+        if let step = value("--selftest-join-copies-mac") {
+            // One of the other Macs of `--selftest-teamdb-join-copies` (lane DB9), started by it in a folder of its own.
+            return await joinCopiesMac(step)
+        }
+
+        if let flag = args.first(where: { $0.hasPrefix("--selftest-teamdb") }) {
+            // The team database against a throwaway Postgres of its own, in a throwaway BINDERS_DATA_DIR
+            // (SelfTestTeamDatabase.swift); its default on, as it's held back from 0.10.0 behind it (TeamDatabaseFeature).
+            AppDefaults.store.set(true, forKey: TeamDatabaseFeature.key)
+            // A folder after the flag: where `-team` draws Settings → Team (lane DB7).
+            teamDrawings = value(flag).flatMap { $0.hasPrefix("-") ? nil : URL(fileURLWithPath: $0) }
+            return await teamDatabaseSelfTest(flag)
         }
 
         if args.contains("--selftest-team") {
@@ -1950,7 +2018,7 @@ open reports/import.html
         // `--keep` opens a folder from an earlier run as it is, to draw more of it.
         let seeded = keep ? true : await DemoData.seed(knowledge: controller.knowledge)
         guard seeded, let harbor = Store.shared.binders().first(where: { $0.name == DemoData.binderName }) else { return 1 }
-        if empty { controller.board.cards(in: harbor.id).forEach(controller.board.delete) }
+        if empty { controller.board.cards(in: harbor.id).forEach { controller.board.delete($0) } }
         let manager = FileManager.default, inbox = InboxCommands.directory
         try? manager.createDirectory(at: inbox, withIntermediateDirectories: true)
         try? manager.createDirectory(at: directory, withIntermediateDirectories: true)

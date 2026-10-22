@@ -38,8 +38,8 @@ final class AskRun: Identifiable {
 
     /// Answers it from the binders, showing how it goes, and returns the answer.
     @discardableResult
-    func run(with knowledge: KnowledgeService, searchQuery: String? = nil, binder: UUID? = nil) async -> KnowledgeService.Answer {
-        let answer = await knowledge.ask(question, searchQuery: searchQuery, binder: binder, progress: { [weak self] progress in
+    func run(with knowledge: KnowledgeService, searchQuery: String? = nil, binder: UUID? = nil, sources: Set<String>? = nil) async -> KnowledgeService.Answer {
+        let answer = await knowledge.ask(question, searchQuery: searchQuery, binder: binder, sources: sources, progress: { [weak self] progress in
             self?.show(progress)
         })
         finish(answer)

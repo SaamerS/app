@@ -38,7 +38,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
             }
         }
 
-        /// Its parts that show: the iPhone's only once it's in use or previewed.
+        /// Its parts that show.
         @MainActor var visiblePages: [SettingsPage] {
             let visible = SettingsPage.visible
             return pages.filter(visible.contains)
@@ -74,12 +74,9 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         Group.allCases.first { $0.pages.contains(self) } ?? .general
     }
 
-    /// The parts that show. The iPhone's stays hidden until the iPhone app ships, unless it's already in use or the preview
-    /// is on (`defaults write io.binders.mac phoneLinkPreview -bool YES`).
-    @MainActor static var visible: [SettingsPage] {
-        let showPhone = AppSettings.shared.phoneLink || AppDefaults.store.bool(forKey: "phoneLinkPreview")
-        return allCases.filter { $0 != .phone || showPhone }
-    }
+    /// The parts that show: all of them. The iPhone's was held back until Binders for iPhone shipped; from 0.10.0 it shows
+    /// on every Mac.
+    @MainActor static var visible: [SettingsPage] { allCases }
 
     var title: String {
         switch self {
@@ -121,7 +118,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
     }
 
     /// One line under the part's name: what it decides.
-    var summary: String {
+    @MainActor var summary: String {
         switch self {
         case .general: "Appearance, sounds, the Flow bar and updates."
         case .shortcuts: "The keys that start dictation and everything else."
@@ -135,7 +132,9 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         case .mcp: "Let Claude Code, Claude Desktop and other AI tools search, ask and add to your knowledge base."
         case .agents: "Agents that take cards from your boards: how Binders hands one over, and how it hears back."
         case .phone: "Pair your iPhone with Binders on this Mac, at home or anywhere through your VPN."
-        case .team: "Sharing binders through a folder you already sync."
+        // The team database is held back from 0.10.0 behind its default (TeamDatabaseFeature): unnamed while it's off. On,
+        // it says how this Mac shares (lane DB7).
+        case .team: TeamDatabaseFeature.subtitle(TeamDatabaseFeature.way)
         case .privacy: "What is kept, for how long, and permissions."
         }
     }
@@ -312,6 +311,8 @@ struct SettingsHeading: View {
     let part: SettingsPage
     /// The name of the group of settings it heads, if it has one.
     var group: String? = nil
+    /// The line under the part's name, when its page works it out as it draws (Team's); else the part's own.
+    var summary: String? = nil
 
     /// The form's coordinate space, which the headings report their place in.
     static let space = "settingsForm"
@@ -326,7 +327,7 @@ struct SettingsHeading: View {
                 } icon: {
                     Image(systemName: part.symbol).font(.system(size: 14, weight: .semibold)).foregroundStyle(.tintText)
                 }
-                Text(part.summary)
+                Text(summary ?? part.summary)
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -685,6 +686,9 @@ private struct AISettings: View {
             }
         }
         .task(id: "\(settings.llmProvider.rawValue)|\(settings.ollamaURL)|\(settings.openAIBaseURL)") { await loadModels() }
+
+        // Distill may read with a model of its own (lane DS3): a slower one that lists work better.
+        DistillModelSection()
 
         // The decision model runs inside Binders or in a server on this Mac, so it's here whatever the language model's
         // provider.
@@ -1141,13 +1145,33 @@ private struct WritingCaptureSettings: View {
 private struct TeamSettings: View {
     @Environment(AppSettings.self) private var settings
     @Environment(TeamSyncService.self) private var team
+    @Environment(DictationController.self) private var controller
     @State private var confirmLeave = false
     @State private var teamError: String?
+    /// Move This Team to a Database… (lane DB3).
+    @State private var moving = false
+    /// Join a Team… and Set Up a Team… (lane DB7), Set Up a Team Database… from it, and where to go once a sheet closes.
+    @State private var joining = false
+    @State private var choosingSetUp = false
+    @State private var settingUpDatabase = false
+    @State private var next: TeamNextStep?
+    /// What came of joining or setting up a team here.
+    @State private var said: String?
+    /// The team database, held back from 0.10.0 behind its default (TeamDatabaseFeature), read as it changes.
+    @AppStorage(TeamDatabaseFeature.key, store: AppDefaults.store) private var teamDatabaseOn = false
 
     var body: some View {
         @Bindable var settings = settings
+        // How this Mac shares, read with the default so the page follows it (lane DB7).
+        let way = teamDatabaseOn ? TeamDatabaseFeature.way(hasFolder: team.folderURL != nil) : .folderOnly
         Section {
             TextField("Your name", text: $settings.teamMemberName, prompt: Text(NSFullUserName()))
+            // An invite opened on this Mac (a link, or a file from Finder): it asks before it joins, and while team
+            // databases are off, whether to turn them on (lane DB7). A Mac on a team database has its team.
+            if way != .database, let invite = controller.teamBoard.pendingInvite {
+                TeamInviteQuestion(invite: invite, featureOn: teamDatabaseOn, folderTeam: team.folderURL != nil,
+                                   said: { said = $0; teamError = nil }, failed: { teamError = $0 }, move: { moving = true })
+            }
             if let folder = team.folderURL {
                 LabeledContent("Team space") {
                     HStack {
@@ -1166,36 +1190,108 @@ private struct TeamSettings: View {
                 Text("Sharing is per binder: flip the switch on a binder and everything in it, including what you add later, syncs to the team.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
+                LabeledContent("Folders") {
+                    Text(folderLine).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
                 LabeledContent("Sync") {
                     Text(teamSyncSummary).monospacedDigit().foregroundStyle(.secondary)
                 }
                 if let error = team.status.error {
                     StatusLabel(error, .problem).font(.caption)
                 }
+                // A teammate moved the team to a team database (lane DB3). Held back from 0.10.0 with the team database.
+                if teamDatabaseOn, let moved = team.status.moved {
+                    StatusLabel(moved.line, .needsYou).font(.caption).fixedSize(horizontal: false, vertical: true)
+                }
                 HStack {
                     Button("Sync now") { Task { await team.syncNow() } }
+                    if teamDatabaseOn {
+                        Button("Move This Team to a Database…") { moving = true }
+                            .help("Everything the team folder shares goes into a team database once, and this Mac stops syncing the folder")
+                            .fitProbe("team.database")
+                    }
                     Spacer()
                     Button("Leave team space…", role: .destructive) { confirmLeave = true }
                 }
+            } else if way == .either {
+                // No team yet, with team databases on (lane DB7): joining first, then setting one up, the database
+                // first in each; a shared folder is the second way in both.
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Button("Join a Team…") { joining = true }
+                            .buttonStyle(.borderedProminent)
+                            .fitProbe("team.join")
+                        Button("Set Up a Team…") { choosingSetUp = true }
+                            .fitProbe("team.setUp")
+                    }
+                    Text("Join with the invite a teammate sent you, or set up a team and invite them.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if let teamError {
+                    StatusLabel(teamError, .problem).font(.caption)
+                }
             } else {
+                // A Mac shares one way: a team folder, or a team database (lane DB2), while the team database is on.
+                let database = way == .database
                 HStack {
                     Button("Create team space…") { chooseTeamFolder(create: true) }
                     Button("Join team space…") { chooseTeamFolder(create: false) }
+                }
+                .disabled(database)
+                if database {
+                    Text("This Mac shares through a team database. A Mac shares one way: leave the team database first to use a team folder.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 if let teamError {
                     StatusLabel(teamError, .problem).font(.caption)
                 }
             }
+            if let said { StatusLabel(said, .done).font(.caption).fixedSize(horizontal: false, vertical: true) }
         } header: {
-            SettingsHeading(part: .team)
+            SettingsHeading(part: .team, summary: TeamDatabaseFeature.subtitle(way))
         } footer: {
-            Text("Share meetings and notes with your team through a folder synced by OneDrive, Dropbox, Google Drive or iCloud Drive. There's no server. Only the notes and meetings in binders you share leave this Mac, with the files attached to those notes; captures and the audio Binders records never do. They're stored as Markdown, so the folder also opens as an Obsidian vault.")
+            // What's true for the way this Mac shares (lane DB7): the folder's words, the database's, or both.
+            Text(TeamDatabaseFeature.footer(way))
+                .fitProbe("team.footer.\(way.rawValue)")
         }
+        .sheet(isPresented: $moving) { TeamMoveSheet() }
+        .sheet(isPresented: $joining, onDismiss: goOn) {
+            TeamJoinSheet(joined: { said = $0; teamError = nil }, throughFolder: { next = .joinFolder })
+        }
+        .sheet(isPresented: $choosingSetUp, onDismiss: goOn) { TeamSetUpChoiceSheet { next = $0 } }
+        .sheet(isPresented: $settingUpDatabase) { TeamDatabaseSetUpSheet { said = $0; teamError = nil } }
         .confirmationDialog("Leave the team space?", isPresented: $confirmLeave) {
             Button("Leave", role: .destructive) { Task { await team.leave() } }
         } message: {
             Text("Teammates' meetings and notes are removed from this Mac. What you already shared stays in the team folder.")
         }
+        // Held back from 0.10.0 behind its default (TeamDatabaseFeature): only the shared-folder way while it's off. On,
+        // with no team yet, joining and setting up lead above (lane DB7); in a team folder or on a team database, its part.
+        if way == .folder || way == .database {
+            TeamDatabaseSection()
+                .fitProbe("team.database")
+        }
+    }
+
+    /// Where a sheet that just closed goes on to: Set Up a Team Database…, or a shared folder to create or join.
+    private func goOn() {
+        guard let step = next else { return }
+        next = nil
+        switch step {
+        case .database: settingUpDatabase = true
+        case .createFolder: chooseTeamFolder(create: true)
+        case .joinFolder: chooseTeamFolder(create: false)
+        }
+    }
+
+    /// Whether note files go into their folders' subfolders of the team folder yet, and what it waits for.
+    private var folderLine: String {
+        let status = team.status
+        if status.filesMove { return "Notes in folders are in the same subfolders of Notes, so the team folder reads as Binders does, in Obsidian too." }
+        let names = status.waitingForFolders
+        let who = names.isEmpty ? "" : " Waiting for \(names.formatted(.list(type: .and))) to update Binders."
+        let files = status.unreadableMembers > 0 ? " Waiting for a teammate's file in the team folder to finish downloading." : ""
+        return "Each note's folder is kept in its file for now, and its file stays where it is. Files go into their folders' subfolders once everyone's Binders knows folders.\(who)\(files)"
     }
 
     private var teamSyncSummary: String {

@@ -36,4 +36,24 @@ final class NoteTemplateTests: XCTestCase {
         XCTAssertTrue(NotePrompts.digestUserPrompt(date: nil, text: note).contains("**How things are going**"))
         XCTAssertFalse(NotePrompts.digestUserPrompt(date: nil, text: "Just a thought about pricing.").contains("sections"))
     }
+
+    /// A template's file can name a folder for its notes; that front matter isn't part of the note.
+    func testATemplateCanNameAFolder() {
+        let social = NoteTemplate.parse(name: "Social post", file: "---\nfolder: \"Social posts\"\n---\n# Social post\n\nWhat it says")
+        XCTAssertEqual(social.folder, "Social posts")
+        XCTAssertEqual(social.body, "# Social post\n\nWhat it says")
+        XCTAssertEqual(NoteTemplate.parse(name: "Nested", file: "---\nbinders_folder: Marketing / Social posts\n---\nBody").folder,
+                       "Marketing/Social posts", "the team copy's key, and a path")
+        let plain = NoteTemplate.parse(name: "Plain", file: "# Weekly review\n")
+        XCTAssertNil(plain.folder)
+        XCTAssertEqual(plain.body, "# Weekly review\n")
+        let tagged = NoteTemplate.parse(name: "Tagged", file: "---\ntags: [ops]\nfolder: Ops\n---\n# Incident")
+        XCTAssertEqual(tagged.folder, "Ops")
+        XCTAssertEqual(tagged.body, "---\ntags: [ops]\n---\n# Incident", "other front matter stays in the note")
+        XCTAssertNil(NoteTemplate(name: "Top", body: "x", folder: " / ").folder, "the top is no folder")
+        XCTAssertEqual(NoteTemplate.parse(name: "Social post", file: social.fileText), social, "its file reads back the same")
+        XCTAssertEqual(plain.fileText, plain.body)
+        XCTAssertTrue(NoteTemplate.builtIn.allSatisfy { $0.folder == nil })
+    }
 }
+

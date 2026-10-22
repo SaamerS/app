@@ -501,6 +501,8 @@ final class LinkServer {
         for entity in entities {
             switch entity {
             case "NoteItem": kinds.formUnion(["notes", "todos"])
+            // A folder made, renamed, moved or deleted changes what a binder's notes show: nothing new on the wire.
+            case "FolderRecord": kinds.insert("notes")
             case "MeetingRecord": kinds.formUnion(["meetings", "todos"])
             case "CommitmentRecord": kinds.insert("todos")
             case "BinderRecord": kinds.insert("binders")
@@ -543,7 +545,7 @@ final class LinkServer {
     static let features = [ConversationPayload.feature, ConversationSuggestion.feature, LinkFeatures.warm, CaptureOutcome.feature, MomentPayload.feature,
                            LinkFeatures.dedupe, LinkFeatures.askProgress, LinkFeatures.approvals, MomentPayload.addsFeature, LinkFeatures.giveTo,
                            LinkFeatures.addresses, MomentPayload.agreedFeature, LinkFeatures.commentWakes, MomentPayload.autoFeature,
-                           ConversationPayload.soloFeature]
+                           ConversationPayload.soloFeature, LinkFeatures.folders, LinkFeatures.distill, LinkFeatures.teamAgents]
 
     /// What became of what the phone sent, for the ids it asks after (at most 50); ones this Mac doesn't know are left out.
     fileprivate func outcomes(_ ids: [String]) -> [[String: Any]] {
@@ -646,7 +648,7 @@ final class LinkServer {
     /// `momentAuto`: whether it has Auto (`MomentPayload.autoFeature`): list_agents then says what Auto can hand over now,
     /// from the router's own decision model, and to which agents.
     fileprivate func runTool(_ message: [String: Any], askProgress: MCPServer.AskProgressSink? = nil, doing: Bool, momentAgreed: Bool = false,
-                             asksFirst: Bool = false, momentAuto: Bool = false, soloAuto: Bool = false) async -> [String: Any]? {
+                             asksFirst: Bool = false, momentAuto: Bool = false, soloAuto: Bool = false, teamAgents: Bool = false) async -> [String: Any]? {
         guard let controller else { return MCPCore.failure(id: message["id"], code: -32603, message: "Binders is shutting down") }
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
         return await MCPCore.handle(message, serverName: "binders", serverVersion: version, instructions: MCPServer.instructions,
@@ -656,7 +658,7 @@ final class LinkServer {
             return try await MCPServer.call(name, arguments, knowledge: controller.knowledge, write: MCPServer.writeInApp(controller: controller, arguments: arguments),
                                             actor: .you, askProgress: askProgress, doing: doing, momentAgreed: momentAgreed, momentAuto: momentAuto,
                                             soloAuto: soloAuto,
-                                            decisionModels: controller.router.models, commentWake: asksFirst ? .only(to) : .none)
+                                            decisionModels: controller.router.models, commentWake: asksFirst ? .only(to) : .none, teamAgents: teamAgents)
         })
     }
 
@@ -1280,7 +1282,7 @@ private final class LinkSession {
             let progress = AskProgressRelay(message, to: self)
             let result = await server.runTool(message, askProgress: progress.map { relay in { relay.send($0, sources: $1, text: $2) } },
                                               doing: readsDoing, momentAgreed: readsMomentAgreed, asksFirst: readsCommentsAskFirst, momentAuto: readsMomentAuto,
-                                              soloAuto: readsSoloAuto)
+                                              soloAuto: readsSoloAuto, teamAgents: reads.contains(LinkFeatures.teamAgents))
             progress?.finish()
             reply(result)
         }

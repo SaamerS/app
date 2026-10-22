@@ -325,21 +325,62 @@ struct NotesView: View {
     @Environment(\.undoManager) private var undoManager
     @ReducedMotion private var reduceMotion
     @Query private var notes: [NoteItem]
-    @State private var selection: UUID?
+    /// The binder's folders, for the ones in the folder you're in and for which notes are where.
+    @Query private var folders: [FolderRecord]
+    /// The notes chosen in the list: one, which opens beside it, or several (⌘-click, ⇧-click, ⌘A), to move or delete
+    /// together.
+    @State private var selection: Set<UUID> = []
     /// A note just made, whose editor takes the cursor.
     @State private var focusID: UUID?
     /// A heading or block to show in a note, from a link to it.
     @State private var reveal: (note: UUID, place: EditorReveal)?
     @State private var noteToDelete: NoteItem?
+    /// Several notes to delete, waiting for the one yes they all need.
+    @State private var notesToDelete: [NoteItem] = []
+    /// Stop Distilling… on a note whose cards are still open asks first, about that note.
+    @State private var noteToStop: NoteItem?
     /// Show only notes with this status, or this #tag.
     @State private var statusFilter: String?
     @State private var tagFilter: String?
     let binderID: UUID?
+    /// The folder you're in, in that binder; nil at its top.
+    let folderID: UUID?
+    /// For self-tests: the notes to select as the list opens, as ⌘-click would.
+    @MainActor static var selectOnOpen: Set<UUID>?
 
-    private var shown: [NoteItem] {
-        notes.filter { note in
+    /// The one note selected, open beside the list; nil for none or several.
+    private var single: UUID? { selection.count == 1 ? selection.first : nil }
+
+    /// The notes selected, in the list's order.
+    private var chosen: [NoteItem] { shown.filter { selection.contains($0.id) } }
+
+    /// The notes in the folder you're in (at the top, those in no folder of the binder's), or every note when this isn't
+    /// one binder's list.
+    private var here: [NoteItem] {
+        guard let binderID else { return notes }
+        let known = Set(folders.map(\.id))
+        // Its binder checked too: a note just moved to another binder leaves at once, before the list is read again.
+        return notes.filter { note in note.binderID == binderID && note.folderID.flatMap { known.contains($0) ? $0 : nil } == folderID }
+    }
+
+    private var shown: [NoteItem] { filtered(here) }
+
+    /// The notes here that the status and tag filters let through.
+    private func filtered(_ here: [NoteItem]) -> [NoteItem] {
+        here.filter { note in
             (statusFilter == nil || note.status == statusFilter) && (tagFilter.map { NoteTagCache.tags(of: note).contains($0) } ?? true)
         }
+    }
+
+    /// The folders in the folder you're in, by name, with how many notes each holds.
+    private var subfolders: [(folder: FolderRecord, notes: Int)] {
+        guard binderID != nil else { return [] }
+        let nodes = FolderTree.untangled(folders.map(\.node))
+        let parents = Dictionary(nodes.map { ($0.id, $0.parentID) }, uniquingKeysWith: { first, _ in first })
+        let counts = notes.reduce(into: [UUID: Int]()) { counts, note in if let id = note.folderID { counts[id, default: 0] += 1 } }
+        return folders.filter { (parents[$0.id] ?? nil) == folderID }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            .map { ($0, counts[$0.id] ?? 0) }
     }
 
     /// The tags in these notes, most used first.
@@ -348,57 +389,98 @@ struct NotesView: View {
         return counts.sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }.prefix(30).map(\.key)
     }
 
-    /// The notes in one binder, or every note when `binderID` is nil.
-    init(binderID: UUID? = nil) {
+    /// The notes in one binder, in the folder you're in, or every note when `binderID` is nil.
+    init(binderID: UUID? = nil, folderID: UUID? = nil) {
         self.binderID = binderID
+        self.folderID = folderID
         if let binderID {
             _notes = Query(filter: #Predicate<NoteItem> { $0.binderID == binderID }, sort: [SortDescriptor(\NoteItem.updatedAt, order: .reverse)])
+            _folders = Query(filter: #Predicate<FolderRecord> { $0.binderID == binderID })
         } else {
             _notes = Query(sort: [SortDescriptor(\NoteItem.updatedAt, order: .reverse)])
+            _folders = Query(filter: #Predicate<FolderRecord> { _ in false })
         }
     }
 
     var body: some View {
         content
             .onAppear {
-                navigation.currentNoteID = selection
+                navigation.currentNoteID = single
                 consumePendingNote()
+                if let ids = Self.selectOnOpen { selection = ids }
             }
             .onChange(of: navigation.pendingNoteID) { consumePendingNote() }
-            .onChange(of: NoteTrash.shared.restored) { _, id in if let id { selection = id } }
+            // Gone to the folder of a note asked for: it opens there. Into another folder: the note open from the last one
+            // closes, as it isn't in this list.
+            .onChange(of: folderID) {
+                if navigation.pendingNoteID != nil {
+                    consumePendingNote()
+                } else {
+                    selection = selection.filter { id in here.contains { $0.id == id } }
+                }
+            }
+            .onChange(of: NoteTrash.shared.restoredNotes) { _, ids in if !ids.isEmpty { selection = ids } }
             // Not on appearing: then it would see the selection from before a new note's, and the new note would open
             // without the cursor in it.
-            .onChange(of: selection) { _, now in
-                if now != focusID { focusID = nil }
-                navigation.currentNoteID = now
+            .onChange(of: selection) { _, _ in
+                if single != focusID { focusID = nil }
+                navigation.currentNoteID = single
             }
             .onDisappear { navigation.currentNoteID = nil }
             .onReceive(NotificationCenter.default.publisher(for: TeamSyncService.itemsWillBeRemoved)) { notification in
-                // A teammate removed the open note: close it before sync deletes it.
-                if let ids = notification.userInfo?["ids"] as? Set<UUID>, let selection, ids.contains(selection) { self.selection = nil }
+                // A teammate removed a selected note: let it go before sync deletes it.
+                if let ids = notification.userInfo?["ids"] as? Set<UUID> { selection.subtract(ids) }
             }
     }
 
+    /// In the folder you're in, or the one its template names.
     private func newNote(from template: NoteTemplate?) {
         guard Store.shared.allowsSave() else { return }
         let binder = Store.shared.binder(binderID ?? AppSettings.shared.currentBinderID) ?? Store.shared.defaultBinder()
-        let note = TemplateStore.newNote(from: template, in: binder)
+        let note = TemplateStore.newNote(from: template, in: binder, folder: binder.id == binderID ? folderID : nil)
+        // One its template filed elsewhere opens there, so it shows in the list.
+        if binderID != nil, Store.shared.shownFolder(note.folderID, in: binder.id) != folderID {
+            navigation.folderID = Store.shared.shownFolder(note.folderID, in: binder.id)
+        }
         focusID = note.id
-        selection = note.id
+        selection = [note.id]
     }
 
     private func consumePendingNote() {
         guard let pending = navigation.pendingNoteID else { return }
+        // A note opened from a link or a search shows in its own folder.
+        if binderID != nil, let note = notes.first(where: { $0.id == pending }) {
+            let known = Set(folders.map(\.id))
+            let its = note.folderID.flatMap { known.contains($0) ? $0 : nil }
+            if its != folderID {
+                navigation.folderID = its
+                return
+            }
+        }
         if navigation.pendingNoteIsNew { focusID = pending }
         navigation.pendingNoteIsNew = false
         reveal = navigation.pendingNotePlace.map { (pending, EditorReveal(place: $0)) }
         navigation.pendingNotePlace = nil
-        selection = pending
+        selection = [pending]
         navigation.pendingNoteID = nil
     }
 
+    /// The notes list's width: narrower on a narrow page, so the note beside it keeps its room.
+    static func listWidth(onPage width: CGFloat) -> CGFloat { width < 700 ? 220 : 260 }
+
     private var content: some View {
-        HStack(spacing: 0) {
+        GeometryReader { proxy in
+            list(width: Self.listWidth(onPage: proxy.size.width))
+        }
+    }
+
+    private func list(width: CGFloat) -> some View {
+        // Worked out once each time the list draws (lane DB10), rather than once for each place that shows them.
+        let here = self.here
+        let shown = filtered(here)
+        let subfolders = self.subfolders
+        let chosen = shown.filter { selection.contains($0.id) }
+        return HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
                     Text("Notes").font(BindersTheme.columnTitle).foregroundStyle(.sectionInk)
@@ -428,14 +510,27 @@ struct NotesView: View {
                     Menu {
                         Section("From a template") {
                             ForEach(TemplateStore.all) { template in
-                                Button(template.name) { newNote(from: template) }
+                                // One that files its notes in a folder says which.
+                                Button(template.folder.map { "\(template.name) · in \($0)" } ?? template.name) { newNote(from: template) }
                             }
                         }
                         Divider()
-                        if let note = notes.first(where: { $0.id == selection }) {
+                        if let binderID {
+                            Button(folderID == nil ? "New Folder…" : "New Folder Here…") { FolderPrompts.shared.create(in: binderID, parent: folderID) }
+                            Divider()
+                        }
+                        if let note = notes.first(where: { $0.id == single }) {
                             Button("Save “\(note.title)” as a Template") {
                                 MarkdownEditor.flushAll()
                                 TemplateStore.save(note)
+                            }
+                            // From inside a folder, a template can file its notes there too.
+                            let folder = Store.shared.folderPath(Store.shared.shownFolder(note.folderID, in: note.binderID))
+                            if !folder.isEmpty {
+                                Button("Save “\(note.title)” as a Template for “\(folder)”") {
+                                    MarkdownEditor.flushAll()
+                                    TemplateStore.save(note, folder: folder)
+                                }
                             }
                         }
                         Button("Show Templates Folder") { TemplateStore.showFolder() }
@@ -461,24 +556,44 @@ struct NotesView: View {
                     .padding(.horizontal, 16)
                     .padding(.bottom, 6)
                 }
-                List(shown, selection: $selection) { note in
-                    NoteRow(note: note)
-                    .tag(note.id)
-                    // Two fingers to the left on the trackpad.
-                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                        Button(role: .destructive) { requestDelete(note) } label: { Label("Delete", systemImage: "trash") }
+                List(selection: $selection) {
+                    // The folders in the folder you're in: click to go in, drop a note on one to move it in.
+                    if !subfolders.isEmpty {
+                        Section {
+                            ForEach(subfolders, id: \.folder.id) { entry in
+                                FolderListRow(folder: entry.folder, count: entry.notes) { navigation.folderID = entry.folder.id }
+                            }
+                        }
+                    }
+                    ForEach(shown) { note in
+                        NoteRow(note: note)
+                            .tag(note.id)
+                            // Onto a folder, here or in the sidebar, or onto a binder: with every note selected beside it.
+                            .draggable(dragged(note))
+                            // Two fingers to the left on the trackpad.
+                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                Button(role: .destructive) { requestDelete([note]) } label: { Label("Delete", systemImage: "trash") }
+                            }
                     }
                 }
                 .scrollContentBackground(.hidden)
-                // ⌫ or ⌦ on the selected note, or right-click. Undo puts it back; a team note asks first.
-                .onDeleteCommand { if let note = notes.first(where: { $0.id == selection }) { requestDelete(note) } }
+                .overlay {
+                    if binderID != nil, folderID != nil, here.isEmpty, subfolders.isEmpty {
+                        ContentUnavailableView("Nothing in this folder yet", systemImage: "folder",
+                                               description: Text("New notes you make here go in it. Drag notes onto it, or use Move to on a note."))
+                    }
+                }
+                // ⌫ or ⌦ on the selected notes, or right-click. Undo puts a note back; a team note, or several, ask first.
+                .onDeleteCommand { requestDelete(chosen) }
                 .onKeyPress(.deleteForward) {
-                    guard let note = notes.first(where: { $0.id == selection }) else { return .ignored }
-                    requestDelete(note)
+                    guard !chosen.isEmpty else { return .ignored }
+                    requestDelete(chosen)
                     return .handled
                 }
                 .contextMenu(forSelectionType: UUID.self) { ids in
-                    if let id = ids.first, let note = notes.first(where: { $0.id == id }) {
+                    if ids.count > 1 {
+                        severalItems(shown.filter { ids.contains($0.id) })
+                    } else if let id = ids.first, let note = notes.first(where: { $0.id == id }) {
                         Button("Open in Its Own Window") { NotePopouts.shared.open(note) }
                         Button("Fold into a Bubble") { NotePopouts.shared.open(note, collapsed: true) }
                         Button("Put on Board") {
@@ -489,28 +604,47 @@ struct NotesView: View {
                             let name = Store.shared.binder(card.binderID)?.name
                             controller.flowBar.toast(name.map { "Added to the \($0) board" } ?? "Added to the board", symbol: "checkmark.circle")
                         }
+                        if let noteBinder = note.binderID {
+                            Menu("Move to") {
+                                MoveToFolderItems(binderID: noteBinder, current: Store.shared.shownFolder(note.folderID, in: noteBinder)) { target in
+                                    move([note], toFolder: target, in: noteBinder)
+                                }
+                            }
+                        }
+                        // Lane DS1: off for every note until you turn it on.
+                        DistillToggleItems(note: note) { noteToStop = $0 }
                         Divider()
-                        Button(sharedWithTeam(note) ? "Delete for Everyone…" : "Delete", role: .destructive) { requestDelete(note) }
+                        Button(sharedWithTeam(note) ? "Delete for Everyone…" : "Delete", role: .destructive) { requestDelete([note]) }
                     }
                 } primaryAction: { ids in
                     // A double-click opens the note in a window of its own.
-                    if let id = ids.first, let note = notes.first(where: { $0.id == id }) { NotePopouts.shared.open(note) }
+                    if ids.count == 1, let id = ids.first, let note = notes.first(where: { $0.id == id }) { NotePopouts.shared.open(note) }
                 }
                 .confirmationDialog(deleteTitle, isPresented: Binding(get: { noteToDelete != nil }, set: { if !$0 { noteToDelete = nil } }),
                                     presenting: noteToDelete) { note in
-                    Button(sharedWithTeam(note) ? "Delete for Everyone" : "Delete", role: .destructive) { delete(note) }
+                    Button(sharedWithTeam(note) ? "Delete for Everyone" : "Delete", role: .destructive) { delete([note]) }
                         .keyboardShortcut(.defaultAction)
                     Button("Cancel", role: .cancel) {}
                 } message: { note in
                     Text(sharedWithTeam(note) ? "It's removed for everyone on the team. This can't be undone." : "This can't be undone.")
                 }
+                // Several at once ask once, for all of them, saying which can come back.
+                .confirmationDialog("Delete \(notesToDelete.count) notes?", isPresented: Binding(get: { !notesToDelete.isEmpty }, set: { if !$0 { notesToDelete = [] } })) {
+                    Button(deleteSeveralTitle(notesToDelete), role: .destructive) { delete(notesToDelete) }
+                        .keyboardShortcut(.defaultAction)
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text(deleteSeveralMessage(notesToDelete))
+                }
+                .confirmsStopDistilling($noteToStop, controller: controller)
                 if let deleted = NoteTrash.shared.last {
+                    let count = NoteTrash.shared.lastDeleted.count
                     HStack(spacing: 8) {
                         Image(systemName: "trash").foregroundStyle(.secondary)
-                        Text("Deleted “\(deleted.title)”").lineLimit(1).truncationMode(.middle)
+                        Text(count > 1 ? "Deleted \(count) notes" : "Deleted “\(deleted.title)”").lineLimit(1).truncationMode(.middle)
                         Spacer(minLength: 4)
-                        Button("Undo") { NoteTrash.shared.restore(deleted, undoManager: undoManager) }
-                            .help("Put the note back (⌘Z)")
+                        Button("Undo") { NoteTrash.shared.restore(NoteTrash.shared.lastDeleted, undoManager: undoManager) }
+                            .help(count > 1 ? "Put the notes back (⌘Z)" : "Put the note back (⌘Z)")
                     }
                     .font(.callout)
                     .padding(.horizontal, 12)
@@ -528,13 +662,15 @@ struct NotesView: View {
                 .themedLink()
                 .padding(12)
             }
-            .frame(width: 260)
+            .frame(width: width)
             .animation(.easeOut(duration: 0.2), value: NoteTrash.shared.last?.id)
             Divider()
-            if let note = notes.first(where: { $0.id == selection }) {
+            if selection.count > 1 {
+                several(chosen)
+            } else if let note = notes.first(where: { $0.id == single }) {
                 // A fresh editor per note: reusing one would take the switch for an edit and move the note to the top.
                 NoteEditor(note: note, focused: note.id == focusID, reveal: reveal?.note == note.id ? reveal?.place : nil) {
-                    selection = neighbour(of: note)?.id
+                    selection = neighbour(of: [note]).map { [$0.id] } ?? []
                 }
                     .id(note.id)
             } else {
@@ -551,15 +687,16 @@ struct NotesView: View {
     }
 
     private func sharedWithTeam(_ note: NoteItem) -> Bool {
-        team.isConfigured && (note.sharedWithTeam || note.isTeamCopy)
+        (team.isConfigured && (note.sharedWithTeam || note.isTeamCopy)) || TeamNotes.current?.covers(note) == true
     }
 
-    /// The note below this one in the list, or above it at the end, so deleting several in a row is ⌫ ⏎ ⌫ ⏎.
-    private func neighbour(of note: NoteItem) -> NoteItem? {
+    /// The note below these in the list, or above them at the end, so deleting several in a row is ⌫ ⏎ ⌫ ⏎.
+    private func neighbour(of going: [NoteItem]) -> NoteItem? {
         let list = shown
-        guard let index = list.firstIndex(where: { $0.id == note.id }) else { return nil }
-        if list.indices.contains(index + 1) { return list[index + 1] }
-        return index > 0 ? list[index - 1] : nil
+        let ids = Set(going.map(\.id))
+        guard let last = list.lastIndex(where: { ids.contains($0.id) }) else { return nil }
+        if let below = list[(last + 1)...].first(where: { !ids.contains($0.id) }) { return below }
+        return list[..<last].last { !ids.contains($0.id) }
     }
 
     private func filterChip(_ label: String, clear: @escaping () -> Void) -> some View {
@@ -579,19 +716,107 @@ struct NotesView: View {
     }
 
     /// A note of your own goes at once, and Undo brings it back; one shared with the team is deleted for everyone, so
-    /// that asks first.
-    private func requestDelete(_ note: NoteItem) {
-        if sharedWithTeam(note) { noteToDelete = note } else { delete(note) }
+    /// that asks first. Several ask once, for all of them.
+    private func requestDelete(_ going: [NoteItem]) {
+        guard !going.isEmpty else { return }
+        if going.count > 1 {
+            notesToDelete = going
+        } else if let note = going.first {
+            if sharedWithTeam(note) { noteToDelete = note } else { delete([note]) }
+        }
     }
 
-    private func delete(_ note: NoteItem) {
-        if selection == note.id { selection = neighbour(of: note)?.id }
-        if sharedWithTeam(note) { NoteEditor.remove(note) } else { NoteTrash.shared.delete(note, undoManager: undoManager) }
+    /// Each by its own rule: one shared with the team goes for everyone; the rest together, which one Undo puts back.
+    private func delete(_ going: [NoteItem]) {
+        let ids = Set(going.map(\.id))
+        if !selection.isDisjoint(with: ids) { selection = neighbour(of: going).map { [$0.id] } ?? [] }
+        let forEveryone = going.filter(sharedWithTeam)
+        forEveryone.forEach(NoteEditor.remove)
+        NoteTrash.shared.delete(going.filter { !sharedWithTeam($0) }, undoManager: undoManager)
+    }
+
+    /// "Delete 5 Notes", "Delete 5 Notes, 2 for Everyone", "Delete 5 Notes for Everyone".
+    private func deleteSeveralTitle(_ going: [NoteItem]) -> String {
+        let shared = going.filter(sharedWithTeam).count
+        if shared == 0 { return "Delete \(going.count) Notes" }
+        return shared == going.count ? "Delete \(going.count) Notes for Everyone" : "Delete \(going.count) Notes, \(shared) for Everyone"
+    }
+
+    /// "2 of them are shared with your team: they're removed for everyone, which can't be undone. Undo puts the other 3
+    /// back."
+    private func deleteSeveralMessage(_ going: [NoteItem]) -> String {
+        let shared = going.filter(sharedWithTeam).count
+        let mine = going.count - shared
+        if shared == 0 { return "Undo puts them back." }
+        let them = shared == going.count ? "They're shared with your team" : shared == 1 ? "1 of them is shared with your team" : "\(shared) of them are shared with your team"
+        return them + ": " + (shared == 1 && shared != going.count ? "it's" : "they're") + " removed for everyone, which can't be undone."
+            + (mine == 0 ? "" : mine == 1 ? " Undo puts the other one back." : " Undo puts the other \(mine) back.")
+    }
+
+    // MARK: Several notes
+
+    /// What dragging a note carries: the note, or, when it's one of several selected, all of them.
+    private func dragged(_ note: NoteItem) -> String {
+        guard selection.count > 1, selection.contains(note.id) else { return DraggedItem.note(note.id).string }
+        return DraggedItem.payload(chosen.map { .note($0.id) })
+    }
+
+    /// Moves notes into a folder in `binderID` (nil: its top), each by its own rules, as one change one Undo puts back,
+    /// and says what happened.
+    private func move(_ moving: [NoteItem], toFolder target: UUID?, in binderID: UUID) {
+        guard Store.shared.allowsSave() else { return }
+        MarkdownEditor.flushAll()
+        let outcome = NoteMoves.move(moving, toFolder: target, in: binderID, undoManager: undoManager)
+        said(outcome, of: moving, place: FolderPrompts.place(binderID: Store.shared.folder(target)?.binderID ?? binderID, folder: target))
+    }
+
+    private func move(_ moving: [NoteItem], to binder: BinderRecord) {
+        guard Store.shared.allowsSave() else { return }
+        MarkdownEditor.flushAll()
+        let outcome = NoteMoves.move(moving, to: binder, undoManager: undoManager)
+        said(outcome, of: moving, place: binder.name)
+    }
+
+    /// "Moved 4 notes to Work › DevOps." and why any stayed. Notes that left this list leave the selection.
+    private func said(_ outcome: NoteMoves.Outcome, of moving: [NoteItem], place: String) {
+        selection = selection.filter { id in here.contains { $0.id == id } }
+        let why = outcome.stayed.count > 1 ? "\(outcome.stayed.count) are teammates' notes, which stay in their binders." : outcome.stayed.first?.why
+        guard let line = outcome.line(asked: moving.count, noun: ("note", "notes"), place: place, whyStayed: why) else { return }
+        controller.flowBar.toast(line, symbol: outcome.stayed.isEmpty ? "folder" : BindersTheme.problemSymbol, duration: 4)
+    }
+
+    /// The menu items for several notes at once, in the list's menu.
+    private func severalItems(_ moving: [NoteItem]) -> some View {
+        SeveralMenuItems(count: moving.count, noun: "Notes", binderID: binderID, folderID: folderID,
+                         toFolder: { target in if let binderID { move(moving, toFolder: target, in: binderID) } },
+                         toBinder: { move(moving, to: $0) }, delete: { requestDelete(moving) })
+    }
+
+    /// Beside the list with several notes selected: how many, what to do with them all, and what stays as it is.
+    private func several(_ moving: [NoteItem]) -> some View {
+        let teammates = moving.filter(\.isTeamCopy).count
+        let fromSpeech = moving.filter(\.staysUnshared).count
+        var rules: [String] = []
+        if teammates > 0 {
+            rules.append(teammates == 1 ? "1 is a teammate's note: it stays in their binder, in any folder you choose."
+                         : "\(teammates) are teammates' notes: they stay in their binders, in any folder you choose.")
+        }
+        if fromSpeech > 0 {
+            rules.append(fromSpeech == 1 ? "1 was made from what you said: it stays on this Mac, even in a shared binder."
+                         : "\(fromSpeech) were made from what you said: they stay on this Mac, even in a shared binder.")
+        }
+        return SeveralSelectedPanel(heading: "\(moving.count) notes selected", titles: moving.map(\.title), rules: rules, probe: "notes.several") {
+            SeveralButtons(count: moving.count, noun: "notes", binderID: binderID, folderID: folderID,
+                           toFolder: { target in if let binderID { move(moving, toFolder: target, in: binderID) } },
+                           toBinder: { move(moving, to: $0) }, delete: { requestDelete(moving) })
+        }
     }
 }
 
 /// The edge between a page and a side panel: drag it to resize the panel, or all the way across to hide it.
 struct PanelEdge: View {
+    /// How wide the edge is, which the page leaves it.
+    static let thickness: CGFloat = 7
     @Binding var width: Double
     @Binding var visible: Bool
     var minimum: Double = 220
@@ -604,9 +829,9 @@ struct PanelEdge: View {
     var body: some View {
         ZStack {
             Rectangle().fill(BindersTheme.line).frame(width: 1).opacity(visible ? 1 : 0)
-            Color.clear.frame(width: 7).contentShape(Rectangle())
+            Color.clear.frame(width: Self.thickness).contentShape(Rectangle())
         }
-        .frame(width: 7)
+        .frame(width: Self.thickness)
         .onHover { inside in
             if inside, !hovering { NSCursor.resizeLeftRight.push() } else if !inside, hovering { NSCursor.pop() }
             hovering = inside
@@ -695,110 +920,278 @@ struct NoteEditor: View {
     @State private var renameNotice: String?
     /// Put on Board: the card it made, and where, for a few seconds.
     @State private var boardNotice: (card: TaskCard, line: String)?
+    /// For a Distill note, what the column beside it shows: its Work, or the digest and properties.
+    @AppStorage("notesSidePanel", store: AppDefaults.store) private var sidePanel = "work"
+    @State private var noteToStop: NoteItem?
 
     private var digesting: Bool { knowledge.digestingNoteIDs.contains(note.id) }
     private var digestStale: Bool { !note.digest.isEmpty && note.digestHash != KnowledgeService.noteContentHash(note.text) }
 
+    /// For the window-fit self-test: Put on Board's notice on this note as it opens, as if the button had been pressed.
+    @MainActor static var noticeOnOpen: (note: UUID, card: TaskCard, line: String)?
+
+    /// What the note keeps for itself before the digest goes beside it, and the narrowest the digest goes before it hides.
+    static let noteRoom: CGFloat = 340
+    static let columnSmallest: CGFloat = 220
+
+    /// The digest column's width beside a note `width` points wide: the width you gave it, narrower when that would
+    /// squeeze the note, and nil when there's no room for it at all.
+    static func columnWidth(beside width: CGFloat, wanted: Double) -> CGFloat? {
+        let room = width - noteRoom - PanelEdge.thickness
+        guard room >= columnSmallest else { return nil }
+        return min(max(CGFloat(wanted), columnSmallest), room)
+    }
+
     var body: some View {
-        VStack(spacing: 0) {
-            if !note.agentMark.isEmpty {
-                AgentNoteBanner(note: note, seeChanges: {
-                    MarkdownEditor.flushAll()
-                    historyFrom = note.editedAt
-                    showingHistory = true
-                }, madeMine: { knowledge.correctionsChanged() })
-                .padding(.horizontal, 24)
-                .padding(.top, 16)
-            }
-            if note.isTeamCopy {
-                Label("\(note.teamAuthorName ?? "A teammate") shared this note. Your edits sync to everyone on the team.", systemImage: "person.2")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+        // The digest beside the note narrows as the window does, then hides, and comes back when there's room. Your
+        // choice to show it or not stays as it is.
+        GeometryReader { proxy in
+            let column = Self.columnWidth(beside: proxy.size.width, wanted: digestWidth)
+            VStack(spacing: 0) {
+                if !note.agentMark.isEmpty {
+                    AgentNoteBanner(note: note, seeChanges: {
+                        MarkdownEditor.flushAll()
+                        historyFrom = note.editedAt
+                        showingHistory = true
+                    }, madeMine: { knowledge.correctionsChanged() })
                     .padding(.horizontal, 24)
                     .padding(.top, 16)
-            }
-            HStack(spacing: 0) {
-                // The note page: a sheet, light paper in the light appearance and a dark page in the dark.
-                MarkdownNoteEditor(text: $note.text, fontSize: 15, placeholder: "Write, or hold fn to dictate.",
-                                   links: LinkTargets.forNote(note) { renamed($0) }, focused: focused, reveal: reveal, accessories: AnyView(noteButtons),
-                                   paper: true)
-                    .paperSheet()
-                    .padding([.leading, .vertical], 14)
-                    .padding(.trailing, 4)
-                    .onChange(of: note.text) { previous, _ in
-                        note.updatedAt = Date()
-                        NoteHistory.changed(note.id, previous: previous)
-                    }
-                // Drag the edge to make the digest wider or narrower; most of the way closed, it hides. Dragged out again,
-                // it comes back.
-                PanelEdge(width: $digestWidth, visible: $digestVisible)
-                if digestVisible {
-                    digestColumn.frame(width: digestWidth)
                 }
-            }
-            HStack {
-                Text("\(note.text.wordCount) words").font(.caption).monospacedDigit().foregroundStyle(.secondary)
-                if let renameNotice {
-                    Label(renameNotice, systemImage: "link")
-                        .font(.caption)
+                if note.isTeamCopy {
+                    Label("\(note.teamAuthorName ?? "A teammate") shared this note. Your edits sync to everyone on the team.", systemImage: "person.2")
+                        .font(.callout)
                         .foregroundStyle(.secondary)
-                        .padding(.leading, 8)
-                        .transition(.opacity)
-                        .help("They follow the note's new title. Undo, with the cursor in the note, puts them back.")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 24)
+                        .padding(.top, 16)
                 }
-                if !note.isTeamCopy, let binder = Store.shared.binder(note.binderID) {
-                    Menu {
-                        MoveToBinderItems(current: note.binderID) { target in
-                            MarkdownEditor.flushAll()
-                            Store.shared.move(note, to: target)
-                            team.scheduleSync(after: 0.5)
+                // Lane DB3: who else has this shared note open now ("Dana is in this note").
+                if let here = controller.teamBoard.notes.presenceLine(note.id) {
+                    Label(here, systemImage: "person.wave.2")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 24)
+                        .padding(.top, note.isTeamCopy ? 4 : 16)
+                        .accessibilityLabel(here)
+                }
+                if note.distill {
+                    // Lane DS1: how the work distilled from it is going, under its title.
+                    WorkBar(note: note, panelShown: Binding(get: { digestVisible && sidePanel == "work" && column != nil }, set: { shown in
+                        sidePanel = shown ? "work" : "digest"
+                        if shown { digestVisible = true }
+                    }), panelRoom: column != nil)
+                    .padding(.horizontal, 14)
+                    .padding(.top, 12)
+                }
+                HStack(spacing: 0) {
+                    // The note page: a sheet, light paper in the light appearance and a dark page in the dark.
+                    MarkdownNoteEditor(text: $note.text, fontSize: 15, placeholder: "Write, or hold fn to dictate.",
+                                       links: LinkTargets.forNote(note) { renamed($0) }, focused: focused, reveal: reveal,
+                                       accessories: AnyView(NoteToolbarButtons(note: note, digestVisible: $digestVisible, room: column != nil)),
+                                       paper: true, headingTip: note.distill ? { [controller, note] heading in controller.distill.headingTip(heading, in: note) } : nil)
+                        .paperSheet()
+                        .padding([.leading, .vertical], 14)
+                        .padding(.trailing, 4)
+                        .onChange(of: note.text) { previous, _ in
+                            note.updatedAt = Date()
+                            NoteHistory.changed(note.id, previous: previous)
+                            // A note shared through a team database: the typing goes to the team once it pauses.
+                            controller.teamBoard.notes.typed(note.id)
                         }
-                    } label: {
-                        // Made from what you said, it's on this Mac only, though its binder is shared.
-                        let shared = binder.sharedWithTeam && !note.staysUnshared
-                        Label(shared ? "\(binder.name) · shared" : binder.sharedWithTeam ? "\(binder.name) · on this Mac only" : binder.name,
-                              systemImage: shared ? "person.2" : "books.vertical")
+                    if let column {
+                        // Drag the edge to make the digest wider or narrower; most of the way closed, it hides. Dragged out
+                        // again, it comes back.
+                        PanelEdge(width: Binding(get: { Double(column) }, set: { digestWidth = $0 }), visible: $digestVisible)
+                        if digestVisible {
+                            digestColumn.frame(width: column).fitProbe("note.column")
+                        }
                     }
+                }
+                bottomBar
+            }
+        }
+        .sheet(isPresented: $showingHistory) { NoteHistorySheet(note: note, changesFrom: historyFrom) }
+        // Leaving a Distill note: the sections your typing changed are looked at now, for the cards made from them.
+        .onDisappear {
+            if note.distill { controller.distill.settleNow(note.id) }
+            // Leaving the note ends your editing session in it: what it made is kept as a version.
+            NoteHistory.endSession(note.id)
+            controller.teamBoard.notes.closed(note.id)
+        }
+        // The team sees who's in a shared note (lane DB3).
+        .onAppear {
+            controller.teamBoard.notes.opened(note.id)
+            if let notice = Self.noticeOnOpen, notice.note == note.id { boardNotice = (notice.card, notice.line) }
+        }
+        .confirmationDialog("Delete this note for everyone on the team?", isPresented: $confirmDelete) {
+            Button("Delete for Everyone", role: .destructive, action: delete)
+        }
+    }
+
+    /// How wide the binder and folder's name goes in the bottom row: whole, as it always was; at most a few words wide; or
+    /// as narrow as the row needs.
+    private enum PlaceWidth { case whole, capped, shrinks }
+
+    /// Under the note: how long it is, where it is, and what to do with it. As room runs out, where it is truncates in the
+    /// middle, then the buttons show their icons, their words kept for the help and VoiceOver.
+    private var bottomBar: some View {
+        ViewThatFits(in: .horizontal) {
+            bottomRow(words: true, place: .whole)
+            bottomRow(words: true, place: .capped)
+            bottomRow(words: false, place: .shrinks)
+        }
+        .padding(12)
+    }
+
+    private func bottomRow(words: Bool, place: PlaceWidth) -> some View {
+        HStack {
+            Text("\(note.text.wordCount) words").font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                .fixedSize()
+                .fitProbe("note.bottom.first")
+            if let renameNotice {
+                Label(renameNotice, systemImage: "link")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .padding(.leading, 8)
+                    .transition(.opacity)
+                    .help("They follow the note's new title. Undo, with the cursor in the note, puts them back.")
+            }
+            if let binder = Store.shared.binder(note.binderID) {
+                placeMenu(binder, width: place)
+                    .padding(.leading, 8)
+                    .help(note.staysUnshared ? "Which binder and folder this note is in. Made from what you said, it stays on this Mac, even in a shared binder."
+                          : "Which binder and folder this note is in. Sharing follows the binder.")
+            }
+            Spacer(minLength: 0)
+            if let boardNotice {
+                // What was done, with the way to it. Short of room, its tick says it, and its words are its help.
+                Group {
+                    if words {
+                        Label(boardNotice.line, systemImage: "checkmark.circle")
+                            .lineLimit(1)
+                            .modifier(IdealWidthCap(cap: 120))
+                    } else {
+                        Image(systemName: "checkmark.circle")
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .help(boardNotice.line)
+                .accessibilityLabel(boardNotice.line)
+                .transition(.opacity)
+                .fitProbe("note.notice")
+                Button("Open") { HubWindowController.shared.navigation.open(card: boardNotice.card) }
                     .controlSize(.small)
                     .fixedSize()
-                    .padding(.leading, 8)
-                    .help(note.staysUnshared ? "Which binder this note is in. Made from what you said, it stays on this Mac, even in a shared binder."
-                          : "Which binder this note is in. Sharing follows the binder.")
-                }
-                Spacer()
-                if let boardNotice {
-                    // What was done, with the way to it.
-                    Label(boardNotice.line, systemImage: "checkmark.circle")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .transition(.opacity)
-                    Button("Open") { HubWindowController.shared.navigation.open(card: boardNotice.card) }
-                        .controlSize(.small)
-                        .help("Open the card on its board")
-                }
-                Button { putOnBoard() } label: { Label("Put on Board", systemImage: "rectangle.split.3x1") }
+                    .help("Open the card on its board")
+            }
+            // The buttons keep their size: where the note is and a passing notice share what's left, truncating.
+            Group {
+                Button { putOnBoard() } label: { face("Put on Board", symbol: "rectangle.split.3x1", words: words) }
                     .help("A card on this binder's board with the note's title, its first lines and a link back to the note")
+                    .accessibilityLabel("Put on Board")
+                Menu {
+                    DistillToggleItems(note: note) { noteToStop = $0 }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("More for this note: Distill This Note")
+                .accessibilityLabel("More")
                 Button {
                     MarkdownEditor.flushAll()
                     historyFrom = nil
                     showingHistory = true
-                } label: { Label("History", systemImage: "clock.arrow.circlepath") }
+                } label: { face("History", symbol: "clock.arrow.circlepath", words: words) }
                     .help("Earlier versions of this note, to read or put back")
-                Button("Copy") {
+                    .accessibilityLabel("History")
+                Button {
                     MarkdownEditor.flushAll()
                     TextInserter.copyToClipboard(note.text)
+                } label: { face("Copy", symbol: "doc.on.doc", words: words, icon: false) }
+                    .help("Copy the note as Markdown")
+                    .accessibilityLabel("Copy")
+                Button(role: .destructive) {
+                    if (team.isConfigured && (note.sharedWithTeam || note.isTeamCopy)) || TeamNotes.current?.covers(note) == true { confirmDelete = true } else { delete() }
+                } label: { face("Delete", symbol: "trash", words: words, icon: false) }
+                    .help("Delete this note")
+                    .accessibilityLabel("Delete")
+                    .fitProbe("note.bottom.last")
+            }
+            .modifier(BottomRowButtons(words: words))
+        }
+        .confirmsStopDistilling($noteToStop, controller: controller)
+        .fitProbe(words ? "note.bottom.labels" : "note.bottom.icons")
+    }
+
+    /// A bottom-row button's face: its words (with its icon, for those that have one there), or its icon alone.
+    @ViewBuilder
+    private func face(_ title: String, symbol: String, words: Bool, icon: Bool = true) -> some View {
+        if !words {
+            Image(systemName: symbol)
+        } else if icon {
+            Label(title, systemImage: symbol)
+        } else {
+            Text(title)
+        }
+    }
+
+    /// Which binder and folder the note is in, and sharing, as a menu that moves it. Whole, it's the pop-up it always was;
+    /// short of room, its words truncate in the middle, so the binder's name and the folder it's in still show.
+    @ViewBuilder
+    private func placeMenu(_ binder: BinderRecord, width: PlaceWidth) -> some View {
+        // Made from what you said, it's on this Mac only, though its binder is shared.
+        let shared = binder.sharedWithTeam && !note.staysUnshared
+        let place = ([binder.name] + Store.shared.folderNames(Store.shared.shownFolder(note.folderID, in: binder.id))).joined(separator: " › ")
+        let title = shared ? "\(place) · shared" : binder.sharedWithTeam ? "\(place) · on this Mac only" : place
+        let symbol = shared ? "person.2" : "books.vertical"
+        if width == .whole {
+            Menu { placeItems(binder) } label: { Label(title, systemImage: symbol) }
+                .controlSize(.small)
+                .fixedSize()
+        } else {
+            Menu { placeItems(binder) } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: symbol).imageScale(.small)
+                    Text(title).lineLimit(1).truncationMode(.middle)
+                    Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold)).foregroundStyle(.secondary)
                 }
-                Button("Delete", role: .destructive) {
-                    if team.isConfigured, note.sharedWithTeam || note.isTeamCopy { confirmDelete = true } else { delete() }
+                .font(.system(size: NSFont.smallSystemFontSize))
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(RoundedRectangle(cornerRadius: 5, style: .continuous).fill(BindersTheme.ink.opacity(0.06)))
+                .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(BindersTheme.line))
+                .contentShape(Rectangle())
+                .modifier(IdealWidthCap(cap: width == .capped ? 180 : nil))
+            }
+            // A borderless menu draws no label of its own making: the plain button style draws this one, words and all.
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
+            .accessibilityLabel("In \(title)")
+        }
+    }
+
+    @ViewBuilder
+    private func placeItems(_ binder: BinderRecord) -> some View {
+        // A teammate's note stays in their binder; within it, any folder.
+        if !note.isTeamCopy {
+            Section("Binder") {
+                MoveToBinderItems(current: note.binderID) { target in
+                    MarkdownEditor.flushAll()
+                    NoteMoves.move([note], to: target, undoManager: undoManager)
                 }
             }
-            .padding(12)
         }
-        .sheet(isPresented: $showingHistory) { NoteHistorySheet(note: note, changesFrom: historyFrom) }
-        .confirmationDialog("Delete this note for everyone on the team?", isPresented: $confirmDelete) {
-            Button("Delete for Everyone", role: .destructive, action: delete)
+        Section("Folder in \(binder.name)") {
+            MoveToFolderItems(binderID: binder.id, current: Store.shared.shownFolder(note.folderID, in: binder.id)) { target in
+                MarkdownEditor.flushAll()
+                NoteMoves.move([note], toFolder: target, in: binder.id, undoManager: undoManager)
+            }
         }
     }
 
@@ -826,28 +1219,31 @@ struct NoteEditor: View {
         }
     }
 
-    /// At the top right of the note: the digest beside it, shown or not, and popping the note out.
-    private var noteButtons: some View {
-        HStack(spacing: 4) {
-            Toggle(isOn: $digestVisible) {
-                Image(systemName: "sidebar.right").frame(width: 24, height: 20)
-                    .foregroundStyle(digestVisible ? AnyShapeStyle(.tintText) : AnyShapeStyle(.secondary))
+    /// Beside the note: for a Distill note, its Work or its digest and properties; for any other, the digest and properties.
+    @ViewBuilder
+    private var digestColumn: some View {
+        if note.distill {
+            VStack(alignment: .leading, spacing: 10) {
+                Picker("Beside the note", selection: $sidePanel) {
+                    Text("Work").tag("work")
+                    Text("Digest").tag("digest")
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .padding([.horizontal, .top], 16)
+                if sidePanel == "work" {
+                    ScrollView { WorkPanel(note: note).padding(.horizontal, 16).padding(.bottom, 16) }
+                } else {
+                    digestAndProperties
+                }
             }
-            .toggleStyle(.button)
-            .help(digestVisible ? "Hide the digest and properties" : "Show the digest and properties beside the note")
-            .accessibilityLabel("Digest")
-            Button { NotePopouts.shared.open(note) } label: {
-                Label("Pop Out", systemImage: "macwindow.on.rectangle").labelStyle(.titleAndIcon).font(.callout)
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .help("Open this note in a small window that stays in front of everything and folds into a bubble. Or double-click it in the list.")
-            .padding(.leading, 4)
+        } else {
+            digestAndProperties
         }
     }
 
     /// The model's short take on the note, kept next to it and searchable in Knowledge.
-    private var digestColumn: some View {
+    private var digestAndProperties: some View {
         VStack(alignment: .leading, spacing: 10) {
             NotePropertiesPanel(note: note)
             Divider().padding(.vertical, 4)
@@ -945,7 +1341,7 @@ struct NoteEditor: View {
 
     private func delete() {
         onDelete()
-        if team.isConfigured, note.sharedWithTeam || note.isTeamCopy {
+        if (team.isConfigured && (note.sharedWithTeam || note.isTeamCopy)) || TeamNotes.current?.covers(note) == true {
             Self.remove(note)
         } else {
             NoteTrash.shared.delete(note, undoManager: undoManager)
@@ -958,5 +1354,54 @@ struct NoteEditor: View {
         NotePopouts.shared.close(note.id)
         // Let the editor leave the hierarchy before the model is deleted.
         DispatchQueue.main.async { Store.shared.delete(note) }
+    }
+}
+
+/// At the top right of a note on its page: the digest beside it, shown or not, and popping the note out. Short of room,
+/// Pop Out shows its icon only; with no room for the digest at all, its button says so and waits.
+private struct NoteToolbarButtons: View {
+    @Environment(\.toolbarIconsOnly) private var iconsOnly
+    let note: NoteItem
+    @Binding var digestVisible: Bool
+    /// Room for the digest beside the note, at this width.
+    let room: Bool
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Toggle(isOn: Binding(get: { digestVisible && room }, set: { digestVisible = $0 })) {
+                Image(systemName: "sidebar.right").frame(width: 24, height: 20)
+                    .foregroundStyle(digestVisible && room ? AnyShapeStyle(.tintText) : AnyShapeStyle(.secondary))
+            }
+            .toggleStyle(.button)
+            .disabled(!room)
+            .help(!room ? "No room for the digest beside the note at this width. Make the window wider and it comes back."
+                  : digestVisible ? "Hide the digest and properties" : "Show the digest and properties beside the note")
+            .accessibilityLabel("Digest")
+            Button { NotePopouts.shared.open(note) } label: {
+                if iconsOnly {
+                    Image(systemName: "macwindow.on.rectangle")
+                } else {
+                    Label("Pop Out", systemImage: "macwindow.on.rectangle").labelStyle(.titleAndIcon).font(.callout)
+                }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("Open this note in a small window that stays in front of everything and folds into a bubble. Or double-click it in the list.")
+            .accessibilityLabel("Pop Out")
+            .padding(.leading, 4)
+        }
+    }
+}
+
+/// The note's bottom-row buttons: bordered, as they always were, with their words; borderless icons when short of room.
+private struct BottomRowButtons: ViewModifier {
+    let words: Bool
+
+    func body(content: Content) -> some View {
+        if words {
+            content.fixedSize()
+        } else {
+            content.buttonStyle(.borderless).quietControl().fixedSize()
+        }
     }
 }

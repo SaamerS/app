@@ -70,9 +70,8 @@ enum TaskCollector {
         /// `author` is the teammate who shared it, whose "You" is them; nil for your own.
         func scan(_ markdown: String, id: String, kind: TaskEntry.Kind, place: BoardTaskReference.Place, sourceID: UUID, title: String, date: Date,
                   binderID: UUID?, author: String?, write: @escaping (String) -> Void, open: @escaping () -> Void) {
-            for (index, line) in markdown.components(separatedBy: "\n").enumerated() {
-                guard let task = NotesEditing.task(from: line), !task.text.isEmpty else { continue }
-                entries.append(TaskEntry(id: "\(id):\(index)", kind: kind, ref: BoardTaskReference(place: place, id: sourceID, text: task.text).string,
+            for (index, task, ref) in lines(of: markdown, place: place, sourceID: sourceID) {
+                entries.append(TaskEntry(id: "\(id):\(index)", kind: kind, ref: ref,
                                          owner: NotesEditing.owner(task.owner, author: author, reader: reader), text: task.text, done: task.done,
                                          sourceID: sourceID, sourceTitle: title, sourceDate: date, binderID: binderID,
                                          toggle: { write(NotesEditing.toggleCheckbox(in: markdown, line: index)) }, open: open))
@@ -93,6 +92,29 @@ enum TaskCollector {
         }
         return entries
     }
+
+    /// The to-do lines of a text, with their references, kept for the texts read lately (lane DB10): a binder's Overview
+    /// collects again after every save, and each line is read with regular expressions.
+    private static func lines(of markdown: String, place: BoardTaskReference.Place, sourceID: UUID) -> [(Int, TaskLine, String)] {
+        let key = ScanKey(markdown: markdown, place: place.rawValue, source: sourceID)
+        if let known = scanned[key] { return known }
+        var found: [(Int, TaskLine, String)] = []
+        for (index, line) in markdown.components(separatedBy: "\n").enumerated() {
+            guard let task = NotesEditing.task(from: line), !task.text.isEmpty else { continue }
+            found.append((index, task, BoardTaskReference(place: place, id: sourceID, text: task.text).string))
+        }
+        if scanned.count >= 4000 { scanned.removeAll() }
+        scanned[key] = found
+        return found
+    }
+
+    private struct ScanKey: Hashable {
+        var markdown: String
+        var place: String
+        var source: UUID
+    }
+
+    private static var scanned: [ScanKey: [(Int, TaskLine, String)]] = [:]
 }
 
 /// Open to-dos with their owners, grouped by where they came from and filterable by person; done ones fold away underneath.
@@ -188,29 +210,34 @@ struct TaskBoard: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            ForEach(groups) { group in
-                VStack(alignment: .leading, spacing: 7) {
-                    HStack(spacing: 6) {
-                        // An agent's to-do wears its sparkle, in lavender.
-                        if group.byAgent {
-                            Image(systemName: BindersTheme.agentSymbol).font(.caption).foregroundStyle(BindersTheme.agent)
-                        } else {
-                            Image(systemName: group.kind == .meeting ? "person.2.wave.2" : (group.kind == .commitment ? "hand.raised" : "note.text"))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+            // Drawn as they scroll into view (lane DB10): a binder's Overview can list hundreds.
+            if !groups.isEmpty {
+                LazyVStack(alignment: .leading, spacing: 14) {
+                    ForEach(groups) { group in
+                        VStack(alignment: .leading, spacing: 7) {
+                            HStack(spacing: 6) {
+                                // An agent's to-do wears its sparkle, in lavender.
+                                if group.byAgent {
+                                    Image(systemName: BindersTheme.agentSymbol).font(.caption).foregroundStyle(BindersTheme.agent)
+                                } else {
+                                    Image(systemName: group.kind == .meeting ? "person.2.wave.2" : (group.kind == .commitment ? "hand.raised" : "note.text"))
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Button(group.title, action: group.open)
+                                    .themedLink()
+                                    .font(.callout.weight(.medium))
+                                    .lineLimit(1)
+                                Text(group.date, format: .relative(presentation: .named)).font(BindersTheme.time()).foregroundStyle(.secondary)
+                                Spacer(minLength: 0)
+                                // Its binder's chip slides in as a new to-do files in.
+                                if let name = binderName?(group.binderID) { Badge(text: name).filingChip() }
+                            }
+                            ForEach(group.tasks) { row($0, card: cards[$0.ref]).transition(.filed) }
                         }
-                        Button(group.title, action: group.open)
-                            .themedLink()
-                            .font(.callout.weight(.medium))
-                            .lineLimit(1)
-                        Text(group.date, format: .relative(presentation: .named)).font(BindersTheme.time()).foregroundStyle(.secondary)
-                        Spacer(minLength: 0)
-                        // Its binder's chip slides in as a new to-do files in.
-                        if let name = binderName?(group.binderID) { Badge(text: name).filingChip() }
+                        .transition(.filed)
                     }
-                    ForEach(group.tasks) { row($0, card: cards[$0.ref]).transition(.filed) }
                 }
-                .transition(.filed)
             }
             if let limit, openTasks.count > limit {
                 Text("and \(openTasks.count - limit) more").font(.caption).foregroundStyle(.secondary)

@@ -255,7 +255,7 @@ struct BinderDetailView: View {
             case .todos: TodoBoard(binder: binder.name, allowsAdding: true)
             case .board: CardBoardView(binder: binder.name)
             case .meetings: MeetingsList(binder: binder.name)
-            case .notes: NotesList(binder: binder.name)
+            case .notes: NotesList(binder: binder.name, binderInfo: binder)
             }
         }
         // The binder's sections float at the top while its lists scroll under them.
@@ -266,8 +266,13 @@ struct BinderDetailView: View {
         .padding(.horizontal)
         .padding(.bottom, 6)))
         .navigationTitle(binder.name)
+        // Into one of its folders, on a Mac that has them.
+        .navigationDestination(for: FolderLink.self) { FolderNotesView(link: $0) }
         // So the tabs' Dictate files into this binder, as its own button does.
-        .onAppear { PhoneNavigation.shared.binderInView = binder.name }
+        .onAppear {
+            PhoneNavigation.shared.binderInView = binder.name
+            PhoneNavigation.shared.folderInView = nil
+        }
         .onDisappear { if PhoneNavigation.shared.binderInView == binder.name { PhoneNavigation.shared.binderInView = nil } }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {

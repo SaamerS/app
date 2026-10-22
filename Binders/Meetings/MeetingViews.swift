@@ -240,32 +240,80 @@ struct MeetingsView: View {
     @Environment(MeetingService.self) private var service
     @Environment(HubNavigation.self) private var navigation
     @Environment(AppSettings.self) private var settings
+    @Environment(DictationController.self) private var controller
+    @Environment(TeamSyncService.self) private var team
     @Environment(\.binderTint) private var binderTint
+    @Environment(\.undoManager) private var undoManager
+    @ReducedMotion private var reduceMotion
     @Query private var meetings: [MeetingRecord]
-    @State private var selection: UUID?
+    /// The binder's folders, for the ones in the folder you're in and for which meetings are where.
+    @Query private var folders: [FolderRecord]
+    /// The ones chosen in the list: one, which opens beside it, or several (⌘-click, ⇧-click, ⌘A), to move or delete
+    /// together.
+    @State private var selection: Set<UUID> = []
     @State private var search = ""
     @State private var importing = false
     /// Conversations kept out of sight as small talk, shown on request for a week before they go.
     @State private var showsTrivial = false
+    /// What ⌫ or Delete… chose, waiting for the one yes they all need.
+    @State private var toDelete: [MeetingRecord] = []
     let binderID: UUID?
     /// The iPhone's conversations instead of meetings.
     let showsConversations: Bool
+    /// The folder you're in, in that binder; nil at its top.
+    let folderID: UUID?
+    /// For self-tests: the ones to select as the list opens, as ⌘-click would.
+    @MainActor static var selectOnOpen: Set<UUID>?
 
-    /// The meetings in one binder, or every meeting when `binderID` is nil; or the conversations the iPhone heard.
-    init(binderID: UUID? = nil, conversations: Bool = false) {
+    /// The meetings in one binder, in the folder you're in, or every meeting when `binderID` is nil; or the
+    /// conversations the iPhone heard.
+    init(binderID: UUID? = nil, conversations: Bool = false, folderID: UUID? = nil) {
         self.binderID = binderID
+        self.folderID = folderID
         showsConversations = conversations
         let kind = conversations ? MeetingRecord.conversationKind : "meeting"
         if let binderID {
             _meetings = Query(filter: #Predicate<MeetingRecord> { $0.binderID == binderID && $0.kind == kind },
                               sort: [SortDescriptor(\MeetingRecord.createdAt, order: .reverse)])
+            _folders = Query(filter: #Predicate<FolderRecord> { $0.binderID == binderID })
         } else {
             _meetings = Query(filter: #Predicate<MeetingRecord> { $0.kind == kind }, sort: [SortDescriptor(\MeetingRecord.createdAt, order: .reverse)])
+            _folders = Query(filter: #Predicate<FolderRecord> { _ in false })
         }
     }
 
-    private var shown: [MeetingRecord] { showsTrivial ? meetings : meetings.filter { $0.status != "trivial" } }
-    private var trivialCount: Int { meetings.filter { $0.status == "trivial" }.count }
+    /// The one selected, open beside the list; nil for none or several.
+    private var single: UUID? { selection.count == 1 ? selection.first : nil }
+
+    /// The ones selected that the list shows, in its order.
+    private var chosen: [MeetingRecord] { filtered.filter { selection.contains($0.id) } }
+
+    /// What the list holds, in words.
+    private var noun: (one: String, many: String) { showsConversations ? ("capture", "captures") : ("meeting", "meetings") }
+
+    /// The meetings in the folder you're in (at the top, those in no folder of the binder's).
+    private var here: [MeetingRecord] {
+        guard let binderID else { return meetings }
+        let known = Set(folders.map(\.id))
+        // Its binder checked too: one just moved to another binder leaves at once, before the list is read again.
+        return meetings.filter { meeting in meeting.binderID == binderID && meeting.folderID.flatMap { known.contains($0) ? $0 : nil } == folderID }
+    }
+
+    /// The folders in the folder you're in, with how many of this list's kind each holds.
+    private var subfolders: [(folder: FolderRecord, count: Int)] {
+        guard binderID != nil else { return [] }
+        let nodes = FolderTree.untangled(folders.map(\.node))
+        let parents = Dictionary(nodes.map { ($0.id, $0.parentID) }, uniquingKeysWith: { first, _ in first })
+        let counts = meetings.reduce(into: [UUID: Int]()) { counts, meeting in
+            if let id = meeting.folderID, meeting.status != "trivial" { counts[id, default: 0] += 1 }
+        }
+        return folders.filter { (parents[$0.id] ?? nil) == folderID }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            .map { ($0, counts[$0.id] ?? 0) }
+    }
+
+    private var shown: [MeetingRecord] { showsTrivial ? here : here.filter { $0.status != "trivial" } }
+    private var trivialCount: Int { here.filter { $0.status == "trivial" }.count }
 
     private var filtered: [MeetingRecord] {
         let query = search.trimmed
@@ -276,7 +324,79 @@ struct MeetingsView: View {
         }
     }
 
+    /// The list's width: narrower on a narrow page, so the meeting beside it keeps its room.
+    static func listWidth(onPage width: CGFloat) -> CGFloat { width < 800 ? 230 : 290 }
+
     var body: some View {
+        GeometryReader { proxy in
+            page(listWidth: Self.listWidth(onPage: proxy.size.width))
+        }
+        .fileImporter(isPresented: $importing, allowedContentTypes: showsConversations ? [UTType(exportedAs: BindersTransfer.typeIdentifier)] : [.audio, .movie],
+                      allowsMultipleSelection: showsConversations) { result in
+            guard case .success(let urls) = result, let url = urls.first else { return }
+            if showsConversations {
+                // Opened from inside a folder, what's kept goes in it.
+                urls.forEach { BindersFiles.open($0, controller: controller, folder: binderID == nil ? nil : folderID) }
+                return
+            }
+            Task {
+                let scoped = url.startAccessingSecurityScopedResource()
+                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                if let record = await service.importRecording(url) {
+                    fileHere(record.id)
+                    selection = [record.id]
+                }
+            }
+        }
+        .dropDestination(for: URL.self) { urls, _ in
+            guard !showsConversations else { return false }
+            let files = urls.filter { url in
+                let type = UTType(filenameExtension: url.pathExtension) ?? .data
+                return url.isFileURL && (type.conforms(to: .audio) || type.conforms(to: .movie))
+            }
+            guard !files.isEmpty else { return false }
+            Task {
+                for url in files {
+                    if let record = await service.importRecording(url) {
+                        fileHere(record.id)
+                        selection = [record.id]
+                    }
+                }
+            }
+            return true
+        }
+        .onAppear {
+            if let ids = Self.selectOnOpen {
+                selection = ids
+            } else if !takePending(), selection.isEmpty {
+                let first = showsConversations ? shown.first?.id : (service.recordingMeetingID ?? shown.first?.id)
+                selection = first.map { [$0] } ?? []
+            }
+        }
+        .onChange(of: navigation.pendingMeetingID) { _ = takePending() }
+        // Gone to the folder of a meeting asked for: it opens there. Into another folder: its first.
+        .onChange(of: folderID) {
+            guard !takePending() else { return }
+            let kept = selection.filter { id in here.contains { $0.id == id } }
+            selection = kept.isEmpty ? (shown.first.map { [$0.id] } ?? []) : kept
+        }
+        .onReceive(NotificationCenter.default.publisher(for: TeamSyncService.itemsWillBeRemoved)) { notification in
+            // A teammate stopped sharing a selected meeting: let it go before sync deletes it.
+            if let ids = notification.userInfo?["ids"] as? Set<UUID> { selection.subtract(ids) }
+        }
+        .onChange(of: meetings.map(\.id)) {
+            // One discarded after processing (nothing was said), deleted or moved away disappears from under the selection.
+            let present = Set(meetings.map(\.id))
+            if !selection.isSubset(of: present) { selection.formIntersection(present) }
+        }
+        // Undo of a delete: what came back is selected, when it's this list's.
+        .onChange(of: MeetingTrash.shared.restoredMeetings) { _, ids in
+            let mine = ids.filter { id in Store.shared.meeting(id).map { $0.isConversation == showsConversations && (binderID == nil || $0.binderID == binderID) } == true }
+            if !mine.isEmpty { selection = mine }
+        }
+    }
+
+    private func page(listWidth: CGFloat) -> some View {
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 10) {
                 if showsConversations {
@@ -289,7 +409,9 @@ struct MeetingsView: View {
                         Label("Open a Binders File…", systemImage: "square.and.arrow.down").frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.bordered)
-                    .help("Captures your iPhone shared by AirDrop or saved to Files. A capture already here isn't kept twice.")
+                    .help(binderID != nil && folderID != nil
+                          ? "Captures your iPhone shared by AirDrop or saved to Files go in this folder. A capture already here isn't kept twice."
+                          : "Captures your iPhone shared by AirDrop or saved to Files. A capture already here isn't kept twice.")
                     if trivialCount > 0 || showsTrivial {
                         Toggle("Show small talk (\(trivialCount))", isOn: $showsTrivial)
                             .toggleStyle(.checkbox)
@@ -301,7 +423,10 @@ struct MeetingsView: View {
                     Button {
                         Task {
                             await service.toggle()
-                            if let id = service.recordingMeetingID { selection = id }
+                            if let id = service.recordingMeetingID {
+                                fileHere(id)
+                                selection = [id]
+                            }
                         }
                     } label: {
                         Label(service.isRecording ? "Stop recording" : "Record meeting",
@@ -319,26 +444,72 @@ struct MeetingsView: View {
                     .help("Transcribe an audio or video file into a new meeting. You can also drop a file anywhere on this page.")
                 }
                 TextField("Search", text: $search).textFieldStyle(.roundedBorder)
-                List(filtered, selection: $selection) { meeting in
-                    MeetingRow(meeting: meeting, busy: service.busyMeetingIDs.contains(meeting.id),
-                               recording: service.recordingMeetingID == meeting.id, showsSharing: settings.teamFolderPath != nil)
-                        .tag(meeting.id)
+                List(selection: $selection) {
+                    // The folders in the folder you're in: click to go in, drop a meeting on one to move it in.
+                    if !subfolders.isEmpty, search.trimmed.isEmpty {
+                        Section {
+                            ForEach(subfolders, id: \.folder.id) { entry in
+                                FolderListRow(folder: entry.folder, count: entry.count) { navigation.folderID = entry.folder.id }
+                            }
+                        }
+                    }
+                    ForEach(filtered) { meeting in
+                        MeetingRow(meeting: meeting, busy: service.busyMeetingIDs.contains(meeting.id),
+                                   // A teammate's being recorded on their Mac shows as recording too (lane DB4).
+                                   recording: service.recordingMeetingID == meeting.id || (meeting.isTeamCopy && meeting.status == "recording"),
+                                   showsSharing: settings.teamFolderPath != nil)
+                            .tag(meeting.id)
+                            // Onto a folder, here or in the sidebar, or onto a binder: with every one selected beside it.
+                            .draggableItems(dragged(meeting))
+                    }
                 }
                 .listStyle(.inset)
                 .scrollContentBackground(.hidden)
+                .overlay {
+                    if binderID != nil, folderID != nil, here.isEmpty, subfolders.isEmpty {
+                        ContentUnavailableView(showsConversations ? "No captures in this folder" : "No meetings in this folder", systemImage: "folder",
+                                               description: Text("Drag one onto the folder, or choose Move to Folder in its menu."))
+                    }
+                }
+                // ⌫ or ⌦ on the selected ones, or Delete… in the menu: one question for all of them.
+                .onDeleteCommand { requestDelete(chosen) }
+                .onKeyPress(.deleteForward) {
+                    guard !chosen.isEmpty else { return .ignored }
+                    requestDelete(chosen)
+                    return .handled
+                }
+                .contextMenu(forSelectionType: UUID.self) { ids in
+                    if ids.count > 1 {
+                        severalItems(filtered.filter { ids.contains($0.id) })
+                    } else if let id = ids.first, let meeting = meetings.first(where: { $0.id == id }), !meeting.isTeamCopy, let binderID = meeting.binderID {
+                        Menu("Move to Folder") {
+                            MoveToFolderItems(binderID: binderID, current: Store.shared.shownFolder(meeting.folderID, in: binderID)) { target in
+                                move([meeting], toFolder: target, in: binderID)
+                            }
+                        }
+                    }
+                }
+                .confirmationDialog(deleteTitle(toDelete), isPresented: Binding(get: { !toDelete.isEmpty }, set: { if !$0 { toDelete = [] } })) {
+                    Button(deleteButton(toDelete), role: .destructive) { delete(toDelete) }
+                        .keyboardShortcut(.defaultAction)
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text(deleteMessage(toDelete))
+                }
+                undoBar
             }
             .padding(.top, 24)
             .padding(.horizontal, 12)
-            .frame(width: 290)
+            .frame(width: listWidth)
+            .animation(.easeOut(duration: 0.2), value: MeetingTrash.shared.last?.id)
 
             Divider()
 
-            if let meeting = meetings.first(where: { $0.id == selection }) {
-                MeetingDetailView(meeting: meeting) {
-                    selection = nil
-                    DispatchQueue.main.async { Store.shared.deleteMeeting(meeting) }
-                }
-                .id(meeting.id)
+            if selection.count > 1 {
+                several(chosen)
+            } else if let meeting = meetings.first(where: { $0.id == single }) {
+                MeetingDetailView(meeting: meeting) { delete([meeting]) }
+                    .id(meeting.id)
             } else if showsConversations {
                 ContentUnavailableView {
                     Label("Captures", systemImage: "bubble.left.and.bubble.right")
@@ -355,65 +526,216 @@ struct MeetingsView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .fileImporter(isPresented: $importing, allowedContentTypes: showsConversations ? [UTType(exportedAs: BindersTransfer.typeIdentifier)] : [.audio, .movie],
-                      allowsMultipleSelection: showsConversations) { result in
-            guard case .success(let urls) = result, let url = urls.first else { return }
-            if showsConversations {
-                if let controller = HubWindowController.shared.controller { urls.forEach { BindersFiles.open($0, controller: controller) } }
-                return
+    }
+
+    /// For a few seconds after a delete: what went, and Undo.
+    @ViewBuilder
+    private var undoBar: some View {
+        let trash = MeetingTrash.shared
+        if let deleted = trash.last, trash.lastDeleted.allSatisfy({ $0.isConversation == showsConversations }) {
+            let count = trash.lastDeleted.count
+            HStack(spacing: 8) {
+                Image(systemName: "trash").foregroundStyle(.secondary)
+                Text(count > 1 ? "Deleted \(count) \(noun.many)" : "Deleted “\(deleted.title)”").lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 4)
+                Button("Undo") { trash.restore(trash.lastDeleted, undoManager: undoManager) }
+                    .help(count > 1 ? "Put the \(noun.many) back (⌘Z)" : "Put the \(noun.one) back (⌘Z)")
             }
-            Task {
-                let scoped = url.startAccessingSecurityScopedResource()
-                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-                if let record = await service.importRecording(url) { selection = record.id }
-            }
+            .font(.callout)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(BindersTheme.surface))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(BindersTheme.line))
+            .padding(.bottom, 8)
+            // It rises into place; under Reduce Motion it fades in.
+            .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
         }
-        .dropDestination(for: URL.self) { urls, _ in
-            guard !showsConversations else { return false }
-            let files = urls.filter { url in
-                let type = UTType(filenameExtension: url.pathExtension) ?? .data
-                return url.isFileURL && (type.conforms(to: .audio) || type.conforms(to: .movie))
-            }
-            guard !files.isEmpty else { return false }
-            Task {
-                for url in files {
-                    if let record = await service.importRecording(url) { selection = record.id }
-                }
-            }
-            return true
-        }
-        .onAppear {
-            if !takePending(), selection == nil {
-                selection = showsConversations ? shown.first?.id : (service.recordingMeetingID ?? meetings.first?.id)
-            }
-        }
-        .onChange(of: navigation.pendingMeetingID) { _ = takePending() }
-        .onReceive(NotificationCenter.default.publisher(for: TeamSyncService.itemsWillBeRemoved)) { notification in
-            // A teammate stopped sharing the open meeting: close it before sync deletes it.
-            if let ids = notification.userInfo?["ids"] as? Set<UUID>, let selection, ids.contains(selection) { self.selection = nil }
-        }
-        .onChange(of: meetings.map(\.id)) {
-            // A meeting discarded after processing (nothing was said) disappears from under the selection.
-            if let selection, !meetings.contains(where: { $0.id == selection }) { self.selection = nil }
-        }
+    }
+
+    /// A meeting recorded or imported from inside a folder goes in it.
+    private func fileHere(_ id: UUID) {
+        guard let folderID, let record = meetings.first(where: { $0.id == id }) ?? Store.shared.meeting(id),
+              record.binderID == binderID, record.folderID == nil else { return }
+        try? Store.shared.move(record, toFolder: folderID)
     }
 
     /// Opens the meeting or conversation something asked for, when it's one of this list's; the other list takes the rest.
     private func takePending() -> Bool {
         guard let pending = navigation.pendingMeetingID else { return false }
+        // One in another folder of this binder opens in its own.
+        if binderID != nil, let record = meetings.first(where: { $0.id == pending }) {
+            let known = Set(folders.map(\.id))
+            let its = record.folderID.flatMap { known.contains($0) ? $0 : nil }
+            if its != folderID {
+                navigation.folderID = its
+                return true
+            }
+        }
         guard let record = meetings.first(where: { $0.id == pending }) else {
             // Asked for before the record arrived (just recorded): meetings take it, as they always have.
             if !showsConversations, Store.shared.binderID(ofMeeting: pending) == nil {
-                selection = pending
+                selection = [pending]
                 navigation.pendingMeetingID = nil
                 return true
             }
             return false
         }
         if record.status == "trivial" { showsTrivial = true }
-        selection = pending
+        selection = [pending]
         navigation.pendingMeetingID = nil
         return true
+    }
+
+    // MARK: Several at once
+
+    /// What dragging one carries: it, or, when it's one of several selected, all of them (those that can't go stay, and
+    /// say why). A teammate's alone is theirs to move.
+    private func dragged(_ meeting: MeetingRecord) -> String? {
+        if selection.count > 1, selection.contains(meeting.id) { return DraggedItem.payload(chosen.map { .meeting($0.id) }) }
+        return meeting.isTeamCopy ? nil : DraggedItem.meeting(meeting.id).string
+    }
+
+    /// Moves them into a folder in `binderID` (nil: its top), each by its own rules, as one change one Undo puts back,
+    /// and says what happened.
+    private func move(_ moving: [MeetingRecord], toFolder target: UUID?, in binderID: UUID) {
+        guard Store.shared.allowsSave() else { return }
+        let outcome = MeetingMoves.move(moving, toFolder: target, in: binderID, undoManager: undoManager)
+        said(outcome, of: moving, place: FolderPrompts.place(binderID: Store.shared.folder(target)?.binderID ?? binderID, folder: target), into: nil)
+    }
+
+    private func move(_ moving: [MeetingRecord], to binder: BinderRecord) {
+        guard Store.shared.allowsSave() else { return }
+        let outcome = MeetingMoves.move(moving, to: binder, undoManager: undoManager)
+        said(outcome, of: moving, place: binder.name, into: binder)
+    }
+
+    /// "Moved 4 meetings to Work › DevOps." and why any stayed; for captures put in a shared binder, whether the team has
+    /// them now. Those that left this list leave the selection.
+    private func said(_ outcome: MoveOutcome, of moving: [MeetingRecord], place: String, into binder: BinderRecord?) {
+        selection = selection.filter { id in here.contains { $0.id == id } }
+        let sharing = binder.flatMap { MeetingMoves.captureSharing(outcome.moved, in: $0) }
+        let why = [sharing, MeetingMoves.whyStayed(outcome.stayed)].compactMap { $0 }
+        guard let line = outcome.line(asked: moving.count, noun: noun, place: place, whyStayed: why.isEmpty ? nil : why.joined(separator: " ")) else { return }
+        controller.flowBar.toast(line, symbol: outcome.stayed.isEmpty ? "folder" : BindersTheme.problemSymbol, duration: outcome.stayed.isEmpty ? 4 : 6)
+    }
+
+    /// The menu items for several at once, in the list's menu.
+    private func severalItems(_ moving: [MeetingRecord]) -> some View {
+        SeveralMenuItems(count: moving.count, noun: noun.many.capitalized, binderID: binderID, folderID: folderID,
+                         toFolder: { target in if let binderID { move(moving, toFolder: target, in: binderID) } },
+                         toBinder: { move(moving, to: $0) }, delete: { requestDelete(moving) })
+    }
+
+    /// Beside the list with several selected: how many, what to do with them all, and what stays as it is.
+    private func several(_ picked: [MeetingRecord]) -> some View {
+        SeveralSelectedPanel(heading: "\(picked.count) \(noun.many) selected", titles: picked.map(\.title), rules: rules(for: picked), probe: "meetings.several") {
+            SeveralButtons(count: picked.count, noun: noun.many, binderID: binderID, folderID: folderID,
+                           toFolder: { target in if let binderID { move(picked, toFolder: target, in: binderID) } },
+                           toBinder: { move(picked, to: $0) }, delete: { requestDelete(picked) })
+        }
+    }
+
+    /// What some of them keep to, said before you act: a teammate's, one still recording or being written up, and what
+    /// moving captures into a shared binder does.
+    private func rules(for picked: [MeetingRecord]) -> [String] {
+        var rules: [String] = []
+        let theirs = picked.filter(\.isTeamCopy).count
+        if theirs > 0 {
+            rules.append(theirs == 1 ? "1 is a teammate's \(noun.one): only they can move or delete it."
+                         : "\(theirs) are teammates' \(noun.many): only they can move or delete them.")
+        }
+        if picked.contains(where: { MeetingMoves.isRecording($0) }) {
+            rules.append("1 is still recording: it stays in this binder, in any folder you choose, and isn't deleted until it stops.")
+        }
+        let writing = picked.filter { !$0.isTeamCopy && !MeetingMoves.isRecording($0)
+            && (service.busyMeetingIDs.contains($0.id) || service.chattingMeetingIDs.contains($0.id)) }.count
+        if writing > 0 {
+            rules.append(writing == 1 ? "1 is still being written up or asked about: it isn't deleted until that's done."
+                         : "\(writing) are still being written up or asked about: they aren't deleted until that's done.")
+        }
+        if showsConversations, picked.contains(where: { !$0.isTeamCopy }) {
+            let binders = Store.shared.binders()
+            if binders.contains(where: { $0.shownSharedThroughDatabase }) {
+                rules.append("Moved into a binder you share through your team database, a capture is shared with your team: its notes and transcript.")
+            } else if binders.contains(where: { $0.sharedWithTeam }) {
+                rules.append("Captures stay on this Mac, even in a binder shared with your team.")
+            }
+        }
+        return rules
+    }
+
+    // MARK: Deleting
+
+    /// One question for all of them, saying which can come back; when none can go now, why, instead.
+    private func requestDelete(_ going: [MeetingRecord]) {
+        guard !going.isEmpty, Store.shared.allowsSave() else { return }
+        guard going.contains(where: { MeetingDeletes.staysPut($0, service: service) == nil }) else {
+            NSSound.beep()
+            if let why = MeetingDeletes.whyStaying(going, service: service) { controller.flowBar.toast(why, symbol: BindersTheme.problemSymbol, duration: 5) }
+            return
+        }
+        toDelete = going
+    }
+
+    /// Each by its own rule (MeetingDeletes): one shared with the team goes for everyone; the rest together, which one Undo
+    /// puts back. What can't go now stays, and says why.
+    private func delete(_ going: [MeetingRecord]) {
+        let leaving = Set(going.filter { MeetingDeletes.staysPut($0, service: service) == nil }.map(\.id))
+        if !selection.isDisjoint(with: leaving) {
+            // Several: the one beside them opens, as in the notes list. One: none, as it always was.
+            selection = going.count > 1 ? (neighbour(of: leaving).map { [$0.id] } ?? []) : []
+        }
+        let staying = MeetingDeletes.delete(going, service: service, team: team, undoManager: undoManager)
+        if let why = MeetingDeletes.whyStaying(staying, service: service) { controller.flowBar.toast(why, symbol: BindersTheme.problemSymbol, duration: 5) }
+    }
+
+    /// The one below these in the list, or above them at the end.
+    private func neighbour(of ids: Set<UUID>) -> MeetingRecord? {
+        let list = filtered
+        guard let last = list.lastIndex(where: { ids.contains($0.id) }) else { return nil }
+        if let below = list[(last + 1)...].first(where: { !ids.contains($0.id) }) { return below }
+        return list[..<last].last { !ids.contains($0.id) }
+    }
+
+    /// One asks as its own menu does; several: "Delete 4 meetings?", counting those that can go now.
+    private func deleteTitle(_ going: [MeetingRecord]) -> String {
+        if going.count == 1, let one = going.first { return MeetingDeletes.question(one, team: team) }
+        let leaving = going.filter { MeetingDeletes.staysPut($0, service: service) == nil }.count
+        return "Delete \(leaving) \(leaving == 1 ? noun.one : noun.many)?"
+    }
+
+    /// "Delete", "Delete 4 Meetings", "Delete 4 Meetings, 2 for the Team", "Delete 4 Meetings for the Team".
+    private func deleteButton(_ going: [MeetingRecord]) -> String {
+        guard going.count > 1 else { return "Delete" }
+        let leaving = going.filter { MeetingDeletes.staysPut($0, service: service) == nil }
+        let shared = leaving.filter { MeetingDeletes.isShared($0, team: team) }.count
+        let what = "Delete \(leaving.count) \((leaving.count == 1 ? noun.one : noun.many).capitalized)"
+        if shared == 0 { return what }
+        return shared == leaving.count ? what + " for the Team" : what + ", \(shared) for the Team"
+    }
+
+    /// Which stay and why, which go for the team too (that can't be undone), and which Undo puts back.
+    private func deleteMessage(_ going: [MeetingRecord]) -> String {
+        let leaving = going.filter { MeetingDeletes.staysPut($0, service: service) == nil }
+        let shared = leaving.filter { MeetingDeletes.isShared($0, team: team) }.count
+        let mine = leaving.count - shared
+        var parts: [String] = []
+        if let why = MeetingDeletes.whyStaying(going.filter { MeetingDeletes.staysPut($0, service: service) != nil }, service: service) {
+            parts.append(why + " The rest go.")
+        }
+        if shared > 0 {
+            if leaving.count == 1 {
+                parts.append("This can't be undone.")
+            } else {
+                let them = shared == leaving.count ? "They're shared with your team" : shared == 1 ? "1 of them is shared with your team" : "\(shared) of them are shared with your team"
+                parts.append(them + ": " + (shared == 1 && shared != leaving.count ? "it's" : "they're") + " removed for the team too, which can't be undone.")
+            }
+        }
+        if mine > 0 {
+            parts.append(shared == 0 ? (leaving.count == 1 ? "Undo puts it back." : "Undo puts them back.")
+                         : mine == 1 ? "Undo puts the other one back." : "Undo puts the other \(mine) back.")
+        }
+        return parts.joined(separator: " ")
     }
 }
 
@@ -459,6 +781,7 @@ struct MeetingDetailView: View {
 
     @Environment(MeetingService.self) private var service
     @Environment(TeamSyncService.self) private var team
+    @Environment(\.undoManager) private var undoManager
     @ReducedMotion private var reduceMotion
     @Bindable var meeting: MeetingRecord
     let onDelete: () -> Void
@@ -469,6 +792,8 @@ struct MeetingDetailView: View {
     @State private var copied = false
     @State private var rescuing = false
     @State private var editingSummary = false
+    /// Moved on by Share It, so what the page says of a capture's sharing is read again (lane DB4).
+    @State private var shareTick = 0
 
     init(meeting: MeetingRecord, onDelete: @escaping () -> Void, initialTab: DetailTab = .summary) {
         _meeting = Bindable(meeting)
@@ -492,24 +817,16 @@ struct MeetingDetailView: View {
                         .font(BindersTheme.title(26))
                         .renamesLinks(of: meeting.title)
                 }
-                HStack(spacing: 10) {
-                    Text(metaLine).monospacedDigit().foregroundStyle(.secondary)
-                    Spacer()
-                    if meeting.isTeamCopy {
-                        Label("Shared by \(meeting.teamAuthorName ?? "a teammate") · read-only", systemImage: "person.2")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                    } else if let binder = Store.shared.binder(meeting.binderID), meeting.isConversation {
-                        Label(binder.sharedWithTeam ? "In \(binder.name) · not shared" : "In \(binder.name)", systemImage: "books.vertical")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .help((meeting.routingReason.map { "Filed here: \($0). " } ?? "") + "Captures stay on this Mac, even in a shared binder.")
-                    } else if let binder = Store.shared.binder(meeting.binderID) {
-                        Label(binder.sharedWithTeam ? "In \(binder.name) · shared with the team" : "In \(binder.name)",
-                              systemImage: binder.sharedWithTeam ? "person.2" : "books.vertical")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .help("Sharing follows the binder. Move the meeting to change it.")
+                // When and where on one line while they fit; short of room, where goes under when, truncated in the middle.
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 10) {
+                        Text(metaLine).monospacedDigit().foregroundStyle(.secondary)
+                        Spacer()
+                        place
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(metaLine).monospacedDigit().foregroundStyle(.secondary).lineLimit(1)
+                        place.lineLimit(1).truncationMode(.middle)
                     }
                 }
                 if !meeting.attendees.isEmpty {
@@ -538,82 +855,31 @@ struct MeetingDetailView: View {
                 }
             }
 
-            HStack(spacing: 10) {
-                Picker("", selection: $tab) {
-                    ForEach(DetailTab.allCases, id: \.self) { Text($0 == .notes && meeting.isTeamCopy ? "Notes" : $0.rawValue).tag($0) }
+            // The tabs and what to do, on one row while they fit; short of room, the buttons show their icons, then go
+            // under the tabs, then the tabs become a menu.
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) {
+                    tabs(segmented: true)
+                    Spacer()
+                    actions(words: true)
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                // Its natural width, not a range: the segmented control underneath never draws narrower than its
-                // labels, so a `.frame(maxWidth:)` let SwiftUI count it as shrinkable and report a window minimum
-                // ~40pt too small. At that minimum the page overflowed and was centred, clipping both edges.
-                .fixedSize()
-                Spacer()
-                if meeting.isConversation {
-                    Button {
-                        Task { await service.summarize(meeting, templateID: MeetingTemplate.conversation.id) }
-                    } label: {
-                        Label("Regenerate", systemImage: "arrow.clockwise")
-                    }
-                    .disabled(isBusy || editingSummary || shownSegments.isEmpty || meeting.status == "trivial")
-                } else {
-                    Menu {
-                        ForEach(MeetingTemplate.all) { template in
-                            Button {
-                                Task { await service.summarize(meeting, templateID: template.id) }
-                            } label: {
-                                if template.id == meeting.templateID {
-                                    Label(template.name, systemImage: "checkmark")
-                                } else {
-                                    Text(template.name)
-                                }
-                            }
-                        }
-                    } label: {
-                        Label("Regenerate", systemImage: "arrow.clockwise")
-                    }
-                    .fixedSize(horizontal: true, vertical: false)
-                    .disabled(isBusy || isRecording || editingSummary || shownSegments.isEmpty || meeting.isTeamCopy)
+                HStack(spacing: 10) {
+                    tabs(segmented: true)
+                    Spacer()
+                    actions(words: false)
                 }
-                Button {
-                    TextInserter.copyToClipboard(service.markdown(for: meeting))
-                    copied = true
-                } label: {
-                    Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
+                VStack(alignment: .leading, spacing: 8) {
+                    tabs(segmented: true)
+                    HStack(spacing: 10) {
+                        Spacer()
+                        actions(words: false)
+                    }
                 }
-                .fixedSize()
-                Menu {
-                    Button("Export Markdown…") { service.export(meeting) }
-                    let audio = meeting.audioURLs.filter { FileManager.default.fileExists(atPath: $0.path) }
-                    if !audio.isEmpty {
-                        Button("Show Audio in Finder") { NSWorkspace.shared.activateFileViewerSelecting(audio) }
-                    }
-                    if !meeting.isTeamCopy, !meeting.isConversation {
-                        Button("Replace My Mic Track…") { rescuing = true }
-                            .disabled(isRecording || isBusy)
-                    }
-                    if !meeting.isTeamCopy {
-                        Menu("Move to Binder") {
-                            MoveToBinderItems(current: meeting.binderID) { binder in
-                                Store.shared.move(meeting, to: binder)
-                                team.scheduleSync(after: 0.5)
-                            }
-                        }
-                        .disabled(isRecording)
-                    }
-                    Divider()
-                    if meeting.isTeamCopy {
-                        Button("Only \(meeting.teamAuthorName ?? "the author") can delete this meeting") {}
-                            .disabled(true)
-                    } else {
-                        Button("Delete \(meeting.kindName)", role: .destructive) { confirmDelete = true }
-                            .disabled(isRecording || isBusy || service.chattingMeetingIDs.contains(meeting.id))
-                    }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
+                HStack(spacing: 10) {
+                    tabs(segmented: false)
+                    Spacer(minLength: 0)
+                    actions(words: false)
                 }
-                .menuIndicator(.hidden)
-                .fixedSize(horizontal: true, vertical: false)
             }
 
             Divider()
@@ -623,14 +889,180 @@ struct MeetingDetailView: View {
         .padding(24)
         .task(id: "\(meeting.id)|\(meeting.status)|\(isBusy)") {
             segments = Store.shared.segments(for: meeting.id)
+            // A teammate's meeting being recorded on their Mac (lane DB4): its lines come in as they're written.
+            while meeting.isTeamCopy, meeting.status == "recording", !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                let now = Store.shared.segments(for: meeting.id)
+                if now.map(\.id) != segments.map(\.id) { segments = now }
+            }
         }
-        .confirmationDialog(meeting.isConversation ? "Delete this capture and its transcript?"
-                            : team.isConfigured && meeting.sharedWithTeam
-                            ? "Delete this meeting, its transcript and audio? It's also removed for your team."
-                            : "Delete this meeting, its transcript and audio?", isPresented: $confirmDelete) {
+        .confirmationDialog(MeetingDeletes.question(meeting, team: team), isPresented: $confirmDelete) {
             Button("Delete", role: .destructive, action: onDelete)
+        } message: {
+            // One shared with the team goes for everyone; your own comes back with Undo (MeetingTrash).
+            Text(MeetingDeletes.isShared(meeting, team: team) ? "This can't be undone." : "Undo puts it back.")
         }
         .sheet(isPresented: $rescuing) { MicRescueSheet(meeting: meeting) }
+    }
+
+    /// Which binder and folder it's in, and whether the team sees it.
+    @ViewBuilder
+    private var place: some View {
+        if meeting.isTeamCopy {
+            Label("Shared by \(meeting.teamAuthorName ?? "a teammate") · read-only", systemImage: "person.2")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        } else if let binder = Store.shared.binder(meeting.binderID), meeting.isConversation, binder.shownSharedThroughDatabase {
+            // Shared through a team database (lane DB4): a capture goes only when you put it here or share it.
+            let path = ([binder.name] + Store.shared.folderNames(Store.shared.shownFolder(meeting.folderID, in: binder.id))).joined(separator: " › ")
+            let shared = shareTick >= 0 && TeamContent.current?.isShared(meeting) == true
+            Label(shared ? "In \(path) · shared with the team" : "In \(path) · kept on this Mac",
+                  systemImage: shared ? "person.2" : "lock")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .help(shared ? "You put it in a binder shared with your team, so its notes and transcript are theirs to read. Its recording stays on this Mac."
+                      : "It was in this binder before the binder was shared, so it stays on this Mac. Share It with the Team, in ⋯, gives your team its notes and transcript.")
+        } else if let binder = Store.shared.binder(meeting.binderID), meeting.isConversation {
+            let path = ([binder.name] + Store.shared.folderNames(Store.shared.shownFolder(meeting.folderID, in: binder.id))).joined(separator: " › ")
+            Label(binder.sharedWithTeam ? "In \(path) · not shared" : "In \(path)", systemImage: "books.vertical")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .help((meeting.routingReason.map { "Filed here: \($0). " } ?? "") + "Captures stay on this Mac, even in a shared binder.")
+        } else if let binder = Store.shared.binder(meeting.binderID) {
+            let path = ([binder.name] + Store.shared.folderNames(Store.shared.shownFolder(meeting.folderID, in: binder.id))).joined(separator: " › ")
+            let shared = binder.sharedWithTeam || binder.shownSharedThroughDatabase
+            Label(shared ? "In \(path) · shared with the team" : "In \(path)",
+                  systemImage: shared ? "person.2" : "books.vertical")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .help("Sharing follows the binder. Move the meeting to change it.")
+        }
+    }
+
+    /// Summary, My notes, Transcript and Ask: side by side, or a menu when there's no room for that.
+    @ViewBuilder
+    private func tabs(segmented: Bool) -> some View {
+        let picker = Picker("", selection: $tab) {
+            ForEach(DetailTab.allCases, id: \.self) { Text($0 == .notes && meeting.isTeamCopy ? "Notes" : $0.rawValue).tag($0) }
+        }
+        .labelsHidden()
+        if segmented {
+            picker
+                .pickerStyle(.segmented)
+                // Its natural width, not a range: the segmented control underneath never draws narrower than its
+                // labels, so a `.frame(maxWidth:)` let SwiftUI count it as shrinkable and report a window minimum
+                // ~40pt too small. At that minimum the page overflowed and was centred, clipping both edges.
+                .fixedSize()
+                .fitProbe("meeting.tabs.first")
+        } else {
+            picker
+                .pickerStyle(.menu)
+                .fixedSize()
+                .fitProbe("meeting.tabs.first")
+        }
+    }
+
+    /// Regenerate, Copy and the rest, in ⋯: with their words, or as icons (their words kept for the help and VoiceOver).
+    @ViewBuilder
+    private func actions(words: Bool) -> some View {
+        if meeting.isConversation {
+            Button {
+                Task { await service.summarize(meeting, templateID: MeetingTemplate.conversation.id) }
+            } label: {
+                if words { Label("Regenerate", systemImage: "arrow.clockwise") } else { Image(systemName: "arrow.clockwise") }
+            }
+            .help("Write the notes again from the transcript")
+            .accessibilityLabel("Regenerate")
+            .fixedSize()
+            .disabled(isBusy || editingSummary || shownSegments.isEmpty || meeting.status == "trivial")
+        } else {
+            Menu {
+                ForEach(MeetingTemplate.all) { template in
+                    Button {
+                        Task { await service.summarize(meeting, templateID: template.id) }
+                    } label: {
+                        if template.id == meeting.templateID {
+                            Label(template.name, systemImage: "checkmark")
+                        } else {
+                            Text(template.name)
+                        }
+                    }
+                }
+            } label: {
+                if words { Label("Regenerate", systemImage: "arrow.clockwise") } else { Image(systemName: "arrow.clockwise") }
+            }
+            .help("Write the notes again from the transcript, with a template")
+            .accessibilityLabel("Regenerate")
+            .fixedSize(horizontal: true, vertical: false)
+            .disabled(isBusy || isRecording || editingSummary || shownSegments.isEmpty || meeting.isTeamCopy)
+        }
+        Button {
+            TextInserter.copyToClipboard(service.markdown(for: meeting))
+            copied = true
+        } label: {
+            if words {
+                Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
+            } else {
+                Image(systemName: copied ? "checkmark" : "doc.on.doc")
+            }
+        }
+        .help(copied ? "Copied" : "Copy the notes as Markdown")
+        .accessibilityLabel(copied ? "Copied" : "Copy")
+        .fixedSize()
+        moreMenu
+            .fitProbe("meeting.tabs.last")
+    }
+
+    /// ⋯: exporting, the audio, the mic track, sharing a capture, moving, deleting.
+    private var moreMenu: some View {
+        Menu {
+            Button("Export Markdown…") { service.export(meeting) }
+            let audio = meeting.audioURLs.filter { FileManager.default.fileExists(atPath: $0.path) }
+            if !audio.isEmpty {
+                Button("Show Audio in Finder") { NSWorkspace.shared.activateFileViewerSelecting(audio) }
+            }
+            if !meeting.isTeamCopy, !meeting.isConversation {
+                Button("Replace My Mic Track…") { rescuing = true }
+                    .disabled(isRecording || isBusy)
+            }
+            if meeting.isConversation, shareTick >= 0, TeamContent.current?.isKeptHere(meeting) == true {
+                Button("Share It with the Team") {
+                    TeamContent.current?.share(meeting)
+                    shareTick += 1
+                }
+                .help("Gives your team its notes and transcript. Its recording stays on this Mac.")
+            }
+            if !meeting.isTeamCopy {
+                // As several do (MeetingMoves): with Undo.
+                Menu("Move to Binder") {
+                    MoveToBinderItems(current: meeting.binderID) { binder in
+                        MeetingMoves.move([meeting], to: binder, undoManager: undoManager)
+                    }
+                }
+                .disabled(isRecording)
+                if let binderID = meeting.binderID {
+                    Menu("Move to Folder") {
+                        MoveToFolderItems(binderID: binderID, current: Store.shared.shownFolder(meeting.folderID, in: binderID)) { target in
+                            MeetingMoves.move([meeting], toFolder: target, in: binderID, undoManager: undoManager)
+                        }
+                    }
+                }
+            }
+            Divider()
+            if meeting.isTeamCopy {
+                Button("Only \(meeting.teamAuthorName ?? "the author") can delete this meeting") {}
+                    .disabled(true)
+            } else {
+                Button("Delete \(meeting.kindName)", role: .destructive) { confirmDelete = true }
+                    .disabled(isRecording || isBusy || service.chattingMeetingIDs.contains(meeting.id))
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+        }
+        .menuIndicator(.hidden)
+        .fixedSize(horizontal: true, vertical: false)
+        .help("More: export, move, delete")
+        .accessibilityLabel("More")
     }
 
     private var metaLine: String {

@@ -51,4 +51,13 @@ final class LinkFeaturesTests: XCTestCase {
         XCTAssertEqual(ConversationSuggestion.decodeEach(data).map(\.text), ["Book the venue"])
         XCTAssertEqual(ConversationSuggestion.decodeList(String(decoding: data, as: UTF8.self)).count, 1)
     }
+
+    /// Folders on the phone only with a Mac that lists them; a phone that lists nothing never asks for them.
+    func testFoldersAreAnnouncedBothWays() {
+        XCTAssertEqual(LinkFeatures.folders, "folders")
+        XCTAssertTrue(LinkFeatures.thisPhone.contains(LinkFeatures.folders))
+        XCTAssertFalse(LinkFeatures.firstPhone.contains(LinkFeatures.folders))
+        XCTAssertFalse(LinkFeatures.phone(nil).contains(LinkFeatures.folders))
+    }
 }
+

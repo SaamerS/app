@@ -7,14 +7,44 @@ import SwiftUI
 struct NotesList: View {
     @Environment(MacConnection.self) private var connection
     let binder: String?
+    /// The binder itself, for its folders: on a Mac that has them, the list shows the folders in `folder` (nil: the
+    /// binder's top) and the notes directly in it. On one before folders, every note in the binder, as before.
+    var binderInfo: BinderInfo? = nil
+    var folder: FolderInfo? = nil
 
     @State private var notes: [NoteSummary] = []
+    @State private var folders: [FolderInfo] = []
+    /// The binder's Distill notes and how their work is going (lane DS1).
+    @State private var work: [DistillProgress.WorkListEntry] = []
     @State private var loaded = false
     /// Nothing from the Mac yet, and no copy from last time.
     @State private var unreached = false
 
+    /// Folders show: a binder's list, on a Mac that has them.
+    private var inFolders: Bool { binderInfo != nil && connection.hasFolders }
+
     var body: some View {
         List {
+            if inFolders, let binderInfo, !folders.isEmpty {
+                Section {
+                    ForEach(folders) { folder in
+                        NavigationLink(value: FolderLink(binder: binderInfo, folder: folder)) {
+                            HStack(spacing: 12) {
+                                Image(systemName: "folder").foregroundStyle(Palette.muted)
+                                Text(folder.name).font(.headline).foregroundStyle(Palette.ink).lineLimit(1)
+                                Spacer(minLength: 4)
+                                let count = folder.notes + folder.folders
+                                if count > 0 { Text("\(count)").font(.caption.monospacedDigit()).foregroundStyle(Palette.faint) }
+                            }
+                            .padding(.vertical, 2)
+                        }
+                        .accessibilityLabel("Folder \(folder.name)")
+                    }
+                }
+                .surfaceRows()
+            }
+            // Lane DS1: the binder's Work list, from a Mac that has Distill.
+            if let binder, !work.isEmpty, connection.macFeatures.contains(LinkFeatures.distill) { BinderWorkList(binder: binder, entries: work) }
             ForEach(notes) { note in
                 NavigationLink(value: note) {
                     VStack(alignment: .leading, spacing: 4) {
@@ -23,7 +53,9 @@ struct NotesList: View {
                         if !rest.isEmpty {
                             Text(rest).font(.subheadline).foregroundStyle(Palette.muted).lineLimit(2)
                         }
-                        Text([binder == nil ? note.binder : "", note.updated.friendlyDate].filter { !$0.isEmpty }.joined(separator: " · "))
+                        // Across binders, where each one is: its binder, and its folder when it's in one.
+                        Text([binder == nil ? note.binder : "", binder == nil ? (note.folder ?? "") : "", note.updated.friendlyDate]
+                            .filter { !$0.isEmpty }.joined(separator: " · "))
                             .font(.caption.monospacedDigit()).foregroundStyle(Palette.faint)
                     }
                     .padding(.vertical, 2)
@@ -33,32 +65,95 @@ struct NotesList: View {
         }
         .listGround()
         .overlay {
-            if loaded && notes.isEmpty {
-                EmptyState("No notes yet", symbol: "note.text", description: "Notes you write or dictate show up here.")
+            if loaded && notes.isEmpty && folders.isEmpty {
+                if folder != nil {
+                    EmptyState("Nothing in this folder yet", symbol: "folder", description: "Notes you make here go in it.")
+                } else {
+                    EmptyState("No notes yet", symbol: "note.text", description: "Notes you write or dictate show up here.")
+                }
             } else if unreached {
                 WaitingForMac(what: "Your notes show here") { await load() }
             }
         }
         .refreshable { await load() }
-        .task(id: connection.revision("notes")) { await load() }
+        .task(id: "\(connection.revision("notes"))|\(connection.hasFolders)") { await load() }
+        .task(id: connection.revision("tasks") + connection.revision("notes")) {
+            if let binder { await BinderWorkList.load(binder, connection: connection, into: $work) }
+        }
     }
 
     private func load() async {
         var arguments: [String: Any] = ["limit": 50]
-        if let binder { arguments["binder"] = binder }
-        let key = "notes-\(binder ?? "all")"
+        var key = "notes-\(binder ?? "all")"
+        if inFolders, let binderInfo {
+            // By the binder's id, which a rename doesn't change; "/" is its top.
+            arguments["binder"] = binderInfo.id
+            arguments["folder"] = folder?.id ?? "/"
+            key = "notes-\(binderInfo.id)-\(folder?.id ?? "top")"
+        } else if let binder {
+            arguments["binder"] = binder
+        }
+        let foldersKey = "folders-\(binderInfo?.id ?? "")-\(folder?.id ?? "top")"
         // Last time's list straight away, while the Mac answers.
         if !loaded, notes.isEmpty, let copy = connection.cached(key, as: [NoteSummary].self) {
             notes = copy
+            if inFolders { folders = connection.cached(foldersKey, as: [FolderInfo].self) ?? [] }
             loaded = true
         }
-        let result = await connection.fetch("list_notes", arguments, cache: key, as: [NoteSummary].self)
-        if let value = result.value {
-            notes = value
-            loaded = true
+        if inFolders, let binderInfo {
+            let noteArguments = arguments, noteKey = key
+            async let noteList = connection.fetch("list_notes", noteArguments, cache: noteKey, as: [NoteSummary].self)
+            async let folderList = connection.fetch("list_folders", ["binder": binderInfo.id, "parent": folder?.id ?? "/"], cache: foldersKey,
+                                                    as: [FolderInfo].self)
+            if let value = await noteList.value {
+                notes = value
+                loaded = true
+            }
+            if let value = await folderList.value { folders = value }
+        } else {
+            let result = await connection.fetch("list_notes", arguments, cache: key, as: [NoteSummary].self)
+            if let value = result.value {
+                notes = value
+                loaded = true
+            }
+            folders = []
         }
         // Only the Mac, or last time's copy, says there are none.
         unreached = !loaded
+    }
+}
+
+/// A folder in a binder: the folders in it and its notes, and new notes made here go in it.
+struct FolderNotesView: View {
+    @Environment(MacConnection.self) private var connection
+    @Environment(\.talkControlShown) private var talkControlShown
+    let link: FolderLink
+    @State private var writing = false
+    @State private var dictating = false
+
+    var body: some View {
+        NotesList(binder: link.binder.name, binderInfo: link.binder, folder: link.folder)
+            .navigationTitle(link.folder.name)
+            .navigationBarTitleDisplayMode(.inline)
+            // So the tabs' Dictate files a note in here too.
+            .onAppear {
+                PhoneNavigation.shared.binderInView = link.binder.name
+                PhoneNavigation.shared.folderInView = link.folder
+            }
+            .onDisappear {
+                if PhoneNavigation.shared.folderInView == link.folder { PhoneNavigation.shared.folderInView = nil }
+            }
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { writing = true } label: { Image(systemName: "square.and.pencil") }
+                        .disabled(!connection.isConnected)
+                        .accessibilityLabel("New note in \(link.folder.name)")
+                }
+            }
+            .sheet(isPresented: $writing) { NewNoteSheet(binder: link.binder.name, folder: link.folder) }
+            .safeAreaInset(edge: .bottom) { if !talkControlShown { DictateButton { dictating = true } } }
+            .sheet(isPresented: $dictating) { DictationSheet(binder: link.binder.name, folder: link.folder) }
+            .binderTint(BinderTint.binder(link.binder.color ?? 0))
     }
 }
 
@@ -87,6 +182,10 @@ struct NoteDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 if let note {
+                    // Lane DS1: a Distill note's work, under its title, from a Mac that has Distill.
+                    if note.distill == true, connection.macFeatures.contains(LinkFeatures.distill) {
+                        NoteWorkSection(noteID: note.id)
+                    }
                     // An agent's words in it: whose, until it's made yours on the Mac. Lavender, with the sparkle.
                     if let line = note.agentMark.noteLine {
                         Label("\(line) Answers and corrections leave it out until you make it yours in Binders on your Mac.", systemImage: "sparkles")
@@ -237,6 +336,8 @@ struct NewNoteSheet: View {
     @Environment(\.dismiss) private var dismiss
     /// The binder it goes into; the Mac's current binder when nil.
     var binder: String? = nil
+    /// The folder in it, when it's made inside one.
+    var folder: FolderInfo? = nil
     @State private var text = ""
     @State private var saving = false
     @State private var problem: String?
@@ -258,7 +359,7 @@ struct NewNoteSheet: View {
                 .padding(.horizontal)
                 .padding(.bottom, 8)
                 .screenGround()
-                .navigationTitle(binder.map { "New note in \($0)" } ?? "New note")
+                .navigationTitle(folder.map { "New note in \($0.name)" } ?? binder.map { "New note in \($0)" } ?? "New note")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
@@ -272,7 +373,7 @@ struct NewNoteSheet: View {
                     }
                 }
                 .sheet(isPresented: $dictating) {
-                    DictationSheet(binder: binder) { words in
+                    DictationSheet(binder: binder, folder: folder) { words in
                         text += (text.isEmpty || text.hasSuffix("\n") || text.hasSuffix(" ") ? "" : " ") + words
                     }
                 }
@@ -293,7 +394,7 @@ struct NewNoteSheet: View {
         Task {
             defer { saving = false }
             // In its binder: filed, by touch.
-            if await connection.save("add_note", text: text, binder: binder) { Haptics.shared.success() }
+            if await connection.save("add_note", text: text, binder: binder, folder: folder?.id) { Haptics.shared.success() }
             dismiss()
         }
     }

@@ -88,6 +88,10 @@ struct KnowledgeView: View {
 
     /// When set, everything on the page is limited to one binder.
     var binderID: UUID? = nil
+    /// The folder you're in, in that binder: search and Ask can be limited to it and the folders inside it.
+    var folderID: UUID? = nil
+    /// Search and Ask only in that folder: on while you're in one, until you widen it.
+    @State private var onlyInFolder = true
     @Environment(KnowledgeService.self) private var knowledge
     @Environment(HubNavigation.self) private var navigation
     @State private var query = ""
@@ -115,22 +119,25 @@ struct KnowledgeView: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
-            sidebar
-                .frame(width: 250)
-            Divider()
-            VStack(alignment: .leading, spacing: 12) {
-                header
-                content
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                statusBar
+        // People & topics narrows on a narrow page, so the search beside it keeps its room.
+        GeometryReader { proxy in
+            HStack(spacing: 0) {
+                sidebar
+                    .frame(width: proxy.size.width < 700 ? 200 : 250)
+                Divider()
+                VStack(alignment: .leading, spacing: 12) {
+                    header
+                    content
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    statusBar
+                }
+                .padding(24)
             }
-            .padding(24)
         }
         .task(id: "\(knowledge.revision)|\(binderID?.uuidString ?? "")") {
             entities = await knowledge.store.entities(limit: 500, binder: binderID?.uuidString)
         }
-        .task(id: "\(query)|\(kindFilter?.rawValue ?? "all")|\(ownerFilter.rawValue)") {
+        .task(id: "\(query)|\(kindFilter?.rawValue ?? "all")|\(ownerFilter.rawValue)|\(onlyInFolder)|\(folderID?.uuidString ?? "")") {
             await runSearch()
         }
         .onAppear {
@@ -252,7 +259,8 @@ struct KnowledgeView: View {
             .padding(10)
             .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(BindersTheme.surface))
             .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(BindersTheme.line))
-            HStack {
+            // On one line while they fit; on a narrow page they carry on to the next.
+            Wrapping(spacing: 8, lineSpacing: 8) {
                 Picker("", selection: $mode) {
                     ForEach(Mode.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                 }
@@ -272,7 +280,12 @@ struct KnowledgeView: View {
                     .labelsHidden()
                     .frame(width: 150)
                 }
-                Spacer()
+                // Inside a folder: it and the folders in it, or the whole binder.
+                if let folderID, let folder = Store.shared.folder(folderID) {
+                    Toggle("Only in \(folder.name)", isOn: $onlyInFolder)
+                        .toggleStyle(.checkbox)
+                        .help("Search and Ask only the notes, meetings and captures in \(folder.name) and the folders inside it. Untick for the whole binder.")
+                }
             }
         }
     }
@@ -360,7 +373,7 @@ struct KnowledgeView: View {
         guard !Task.isCancelled else { return }
         searching = true
         // The passages with the words show at once; the search by meaning follows.
-        let results = await knowledge.search(text, kinds: kindFilter.map { [$0] }, owner: ownerFilter, binder: binderID,
+        let results = await knowledge.search(text, kinds: kindFilter.map { [$0] }, owner: ownerFilter, binder: binderID, sources: scope,
                                              onKeywordHits: { found in if !Task.isCancelled { hits = found } })
         guard !Task.isCancelled else { return }
         hits = results
@@ -373,7 +386,14 @@ struct KnowledgeView: View {
         stopAsking()
         let run = AskRun(question: question)
         self.run = run
-        asking = Task { _ = await run.run(with: knowledge, binder: binderID) }
+        let sources = scope
+        asking = Task { _ = await run.run(with: knowledge, binder: binderID, sources: sources) }
+    }
+
+    /// What search and Ask keep, inside a folder with Only in ticked: its items and those in the folders inside it.
+    private var scope: Set<String>? {
+        guard onlyInFolder, let folderID, Store.shared.folder(folderID) != nil else { return nil }
+        return Store.shared.itemIDs(inFolder: folderID)
     }
 
     private func stopAsking() {
@@ -412,6 +432,14 @@ struct KnowledgeHitRow: View {
                     HStack(spacing: 6) {
                         Text(hit.title).font(.body.weight(.medium)).lineLimit(1)
                         AgentLabel(hit.agent).font(.caption)
+                        // The folder it's in, in its binder.
+                        if let names = UUID(uuidString: hit.sourceID).flatMap({ Store.shared.folderNames(ofItem: $0) }) {
+                            Label(names.joined(separator: " › "), systemImage: "folder")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .help("In the folder \(names.joined(separator: " › "))")
+                        }
                         Spacer()
                         Text(hit.metaLine).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     }
@@ -498,6 +526,10 @@ struct KnowledgeAnswerView: View {
                             Text("[\(index + 1)]").monospacedDigit().foregroundStyle(.secondary)
                             Image(systemName: hit.kind.symbol).foregroundStyle(.secondary)
                             Text(hit.title).lineLimit(1)
+                            // The folder it's in, in its binder.
+                            if let names = UUID(uuidString: hit.sourceID).flatMap({ Store.shared.folderNames(ofItem: $0) }) {
+                                Label(names.joined(separator: " › "), systemImage: "folder").foregroundStyle(.secondary).lineLimit(1)
+                            }
                             Text(hit.metaLine).foregroundStyle(.secondary).lineLimit(1)
                             AgentLabel(hit.agent)
                             Spacer(minLength: 0)

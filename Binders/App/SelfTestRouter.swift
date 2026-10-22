@@ -1054,7 +1054,10 @@ extension SelfTest {
         defer { try? manager.removeItem(at: devicesURL) }
         let server = LinkServer(controller: controller, port: 0, pairingPort: 0, devicesURL: devicesURL)
         server.start()
-        for _ in 0..<50 where server.status != .listening { try? await Task.sleep(for: .milliseconds(100)) }
+        // Both listeners, given up to 30 seconds: on a busy Mac the pairing port can come up after the main one.
+        for _ in 0..<300 where server.status != .listening || server.boundPort == nil || server.boundPairingPort == nil {
+            try? await Task.sleep(for: .milliseconds(100))
+        }
         func pairPhone(_ name: String, features: [String]) async throws -> LinkClient {
             guard let port = server.boundPort, var pairing = await server.beginPairing(), let pairingPort = server.boundPairingPort else {
                 throw CocoaError(.featureUnsupported)

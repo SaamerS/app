@@ -237,6 +237,21 @@ final class MeetingService {
         if isRecording { await stop() } else { await start() }
     }
 
+    /// Where a new meeting goes: the current binder, in the folder the Binders window shows for it (the top when it shows
+    /// none of that binder's folders).
+    static func newPlace() -> (binder: BinderRecord, folder: UUID?) {
+        let binder = Store.shared.binder(AppSettings.shared.currentBinderID) ?? Store.shared.defaultBinder()
+        return (binder, HubWindowController.shared.navigation.folderShown(for: binder.id))
+    }
+
+    /// Files a new meeting there, shared as its binder is.
+    static func file(_ record: MeetingRecord) {
+        let place = newPlace()
+        record.binderID = place.binder.id
+        record.sharedWithTeam = place.binder.sharedWithTeam
+        record.folderID = place.folder
+    }
+
     /// Mutes the meeting mic while the user dictates, so dictation doesn't end up in the transcript.
     func setDictationActive(_ active: Bool) {
         live?.mic.isMuted = active
@@ -279,9 +294,8 @@ final class MeetingService {
         let title = event.map(\.title).flatMap { $0.trimmed.isEmpty ? nil : $0 } ?? placeholder
         let record = MeetingRecord(title: title, appName: source?.name, templateID: settings.meetingTemplateID)
         record.attendees = event?.attendees ?? []
-        let binder = Store.shared.binder(settings.currentBinderID) ?? Store.shared.defaultBinder()
-        record.binderID = binder.id
-        record.sharedWithTeam = binder.sharedWithTeam
+        // From the hotkey, the menu bar, ⌘P or binders://meeting alike: in the folder the Binders window shows.
+        Self.file(record)
         let micName = "\(record.id.uuidString)-mic.wav"
         let systemName = "\(record.id.uuidString)-system.wav"
         let micURL = AppPaths.meetings.appendingPathComponent(micName)
@@ -871,9 +885,7 @@ final class MeetingService {
         let record = MeetingRecord(title: Self.placeholderPrefix + url.deletingPathExtension().lastPathComponent, appName: "Imported file",
                                    templateID: settings.meetingTemplateID)
         record.status = "processing"
-        let binder = Store.shared.binder(settings.currentBinderID) ?? Store.shared.defaultBinder()
-        record.binderID = binder.id
-        record.sharedWithTeam = binder.sharedWithTeam
+        Self.file(record)
         Store.shared.insert(record)
         let meetingID = record.id
         busyMeetingIDs.insert(meetingID)

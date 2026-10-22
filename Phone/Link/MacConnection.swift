@@ -110,6 +110,8 @@ final class MacConnection {
     var hasOutcomes: Bool { macFeatures.contains(CaptureOutcome.feature) }
     /// The Mac reads what you say to yourself (moments).
     var takesMoments: Bool { macFeatures.contains(MomentPayload.feature) }
+    /// The Mac has folders inside binders (LinkFeatures.folders): list_folders, and `folder` on list_notes and add_note.
+    var hasFolders: Bool { macFeatures.contains(LinkFeatures.folders) }
     /// Told when something changed on the Mac that's worth asking about again: a conversation written up.
     @ObservationIgnored var onMeetingsChanged: (() -> Void)?
     /// Told when a board changed on the Mac, as when an agent asks a question.
@@ -765,10 +767,11 @@ final class MacConnection {
     }
 
     /// Saves a note ("add_note") or a to-do ("add_todo") on the Mac, or keeps it here until the Mac is back. True when it
-    /// went straight to the Mac.
+    /// went straight to the Mac. `folder`: a note's folder's id, in that binder; one that's gone when it reaches the Mac
+    /// puts the note at the binder's top.
     @discardableResult
-    func save(_ tool: String, text: String, binder: String?) async -> Bool {
-        await deliver(PendingSave(id: UUID(), tool: tool, text: text, binder: binder, created: Date()))
+    func save(_ tool: String, text: String, binder: String?, folder: String? = nil) async -> Bool {
+        await deliver(PendingSave(id: UUID(), tool: tool, text: text, binder: binder, created: Date(), folder: folder))
     }
 
     /// A conversation All-day capture heard, transcribed here, for the Mac: now, or once the Mac is back (and takes them).
@@ -1150,6 +1153,8 @@ final class MacConnection {
             } else {
                 var arguments: [String: Any] = ["text": item.text]
                 if let binder = item.binder { arguments["binder"] = binder }
+                // Its folder, only to a Mac that has folders; its id decides the binder there, a renamed one too.
+                if let folder = item.folder, hasFolders { arguments["folder"] = folder }
                 do {
                     _ = try await client.callTool(item.tool, withRequestID(arguments, of: item), timeout: LinkTimeouts.send)
                 } catch LinkClient.Failure.rejected where item.binder != nil {
@@ -1466,6 +1471,9 @@ struct PendingSave: Codable, Identifiable, Equatable {
     var agent: String? = nil
     var moment: UUID? = nil
     var fromBacklog: Bool? = nil
+    /// A note's folder's id, from a binder's folder on a Mac that has folders. Nil from builds before folders, and for
+    /// everything else.
+    var folder: String? = nil
 
     static let dictation = "dictation"
     static let conversation = "conversation"

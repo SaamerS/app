@@ -222,13 +222,17 @@ public struct AgentProfile: Codable, Equatable, Identifiable, Sendable {
     /// turn-on alert (AgentRegistry.startsOnItsOwn), so a value written in by anything else starts nothing. Keeps an
     /// agents.json from before as it was.
     public var autoStart: Bool?
+    /// "Take cards from teammates" (lane DB2): a card a teammate meant for it, on a board shared through a team database,
+    /// starts it on its own when its start switch allows too. Nil means on, the default; only false turns it off. Keeps an
+    /// agents.json from before as it was.
+    public var takesTeamCards: Bool?
 
     /// How many times an hour Binders wakes an agent unless it's told otherwise.
     public static let defaultWakesPerHour = 6
 
     public init(id: UUID = UUID(), name: String, isEnabled: Bool = true, wake: Wake, report: Report = .mcp, preset: String? = nil,
                 binders: [UUID]? = nil, wakesPerHour: Int? = nil, binderContext: Bool? = nil, mayAct: Bool? = nil,
-                vendor: String? = nil, purpose: String? = nil, kinds: [String]? = nil, autoStart: Bool? = nil) {
+                vendor: String? = nil, purpose: String? = nil, kinds: [String]? = nil, autoStart: Bool? = nil, takesTeamCards: Bool? = nil) {
         self.id = id
         self.name = name
         self.isEnabled = isEnabled
@@ -243,7 +247,11 @@ public struct AgentProfile: Codable, Equatable, Identifiable, Sendable {
         self.purpose = purpose
         self.kinds = kinds
         self.autoStart = autoStart
+        self.takesTeamCards = takesTeamCards
     }
+
+    /// Whether it takes teammates' cards: on unless you turned it off.
+    public var takesTeammatesCards: Bool { takesTeamCards != false }
 
     /// What it's for, as Binders reads it to suggest it: what you said (`purpose`), else for Claude Code or a CLI tool
     /// "code in the <folder> repository". Nil when nothing says.
@@ -1056,6 +1064,9 @@ public struct ClaudeCodeLaunch: Equatable, Sendable {
     /// - `session` is the run's session id, for `claude --resume`.
     /// - `draftsFirst`, unless you let the agent act for you (`AgentProfile.draftsFirst`): its prompt tells it to ask your
     ///   approval with request_approval before it sends, posts, buys or deletes anything outside its folder.
+    /// - `strictMCP`: the run gets only Binders' MCP server (--strict-mcp-config), none of yours. A Claude Code that an
+    ///   organization manages refuses that (`ClaudeCodeManaged`), so the dispatcher leaves it off there: the other servers
+    ///   then load beside Binders', and a hook lets the run use only Binders' board tools (`ClaudeCodeToolGuard`).
     ///
     /// Its Binders server offers the board tools only (BINDERS_TOOLS=board), for this card only (BINDERS_CARD), as this
     /// agent (BINDERS_AGENT): it gets the card, not your binders. BINDERS_RUN says Binders started it, so a server that
@@ -1063,7 +1074,7 @@ public struct ClaudeCodeLaunch: Equatable, Sendable {
     /// on the card.
     public static func make(card: UUID, reason: AgentWake.Reason, boardName: String, wake: ClaudeCodeWake, binders: String,
                             dataFolder: String, home: String, alsoPrivate: [String] = [], worktreeExists: Bool, session: UUID,
-                            draftsFirst: Bool = true) -> ClaudeCodeLaunch {
+                            draftsFirst: Bool = true, strictMCP: Bool = true) -> ClaudeCodeLaunch {
         let denied = deniedTools(dataFolder: dataFolder, home: home, alsoPrivate: alsoPrivate)
         let servers: [String: Any] = [
             "mcpServers": ["binders": ["type": "stdio", "command": binders, "args": ["--mcp"],
@@ -1076,12 +1087,12 @@ public struct ClaudeCodeLaunch: Equatable, Sendable {
             "sandbox": ["enabled": true, "failIfUnavailable": true, "allowUnsandboxedCommands": false,
                         "filesystem": ["denyRead": deniedReads(dataFolder: dataFolder, home: home, alsoPrivate: alsoPrivate)],
                         "network": ["allowedDomains": domains]],
-            "hooks": hooks(binders: binders),
+            "hooks": hooks(binders: binders, guardingTools: !strictMCP),
         ]
         var arguments = ["-p", "--permission-mode", wake.safeMode, "--permission-prompts", "none",
-                         "--output-format", "stream-json", "--verbose",
-                         "--strict-mcp-config", "--mcp-config", json(servers), "--settings", json(settings),
-                         "--allowedTools", "mcp__binders"]
+                         "--output-format", "stream-json", "--verbose"]
+        if strictMCP { arguments.append("--strict-mcp-config") }
+        arguments += ["--mcp-config", json(servers), "--settings", json(settings), "--allowedTools", "mcp__binders"]
         arguments += taskTools + ["--disallowedTools"]
         arguments += denied
         arguments += ["--session-id", session.uuidString.lowercased(), "--name", "Binders card \(short(card))"]
@@ -1105,12 +1116,17 @@ public struct ClaudeCodeLaunch: Equatable, Sendable {
     /// The run's hooks: when Claude stops, and when its session ends, `<binders> --agent-hook stop` or `session-end` reads
     /// the hook's JSON and puts a short report on the card (`AgentRunReport`). The program's path is quoted for the shell
     /// that runs a hook; the card and the agent come from the run's environment, never from the command.
-    static func hooks(binders: String) -> [String: Any] {
-        func hook(_ kind: AgentRunReport.Hook, timeout: Int) -> [[String: Any]] {
-            [["hooks": [["type": "command", "command": "\(AgentMCPEntry.quoted(binders)) --agent-hook \(kind.rawValue)", "timeout": timeout]]]]
+    /// `guardingTools`, for a run not limited to Binders' tools: before any MCP tool, `<binders> --agent-hook pre-tool`
+    /// (`ClaudeCodeToolGuard`) lets through only Binders' board tools.
+    static func hooks(binders: String, guardingTools: Bool = false) -> [String: Any] {
+        func hook(_ kind: String, timeout: Int) -> [String: Any] {
+            ["type": "command", "command": "\(AgentMCPEntry.quoted(binders)) --agent-hook \(kind)", "timeout": timeout]
         }
         // A session that's ending waits on its hooks only briefly unless they say how long they need.
-        return ["Stop": hook(.stop, timeout: 30), "SessionEnd": hook(.sessionEnd, timeout: 15)]
+        var hooks: [String: Any] = ["Stop": [["hooks": [hook(AgentRunReport.Hook.stop.rawValue, timeout: 30)]]],
+                                    "SessionEnd": [["hooks": [hook(AgentRunReport.Hook.sessionEnd.rawValue, timeout: 15)]]]]
+        if guardingTools { hooks["PreToolUse"] = [["matcher": "mcp__.*", "hooks": [hook(ClaudeCodeToolGuard.hook, timeout: 10)]]] }
+        return hooks
     }
 
     /// Claude Code's task tools, allowed so the run keeps a task list as it works (`tasks/<session>/` in its folder),

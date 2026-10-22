@@ -557,6 +557,15 @@ struct CardDetailView: View {
                     if card.meantFor?.isEmpty == false { Button("No One in Particular") { give(to: nil) } }
                 }
             }
+            // On a board shared through a team database (lane DB2): teammates' agents that take its cards, with their
+            // owners. Their owners' Macs start them; the first time, this iPhone asks.
+            if card.board != .done, let teammates = agents?.teammates.filter({ ($0.binders ?? []).contains(card.binder) }), !teammates.isEmpty {
+                Section("Teammates' Agents") {
+                    ForEach(teammates, id: \.self) { agent in
+                        Button(agent.name) { give(to: agent) }
+                    }
+                }
+            }
         } label: {
             Image(systemName: "ellipsis.circle")
         }
@@ -975,7 +984,8 @@ func handOffCheck(meantFor: String?, confirmed: Bool?, connection: MacConnection
     // A Mac from before agents (one that doesn't say what became of captures) hands nothing to anyone.
     guard connection.hasOutcomes else { return .fine }
     guard let list = connection.cached("agents", as: AgentList.self) else { return .unknown }
-    guard let agent = list.agents.first(where: { $0.name.trimmingCharacters(in: .whitespaces).localizedCaseInsensitiveCompare(name) == .orderedSame })
+    // A teammate's agent too (lane DB2): its owner's Mac starts it.
+    guard let agent = list.all.first(where: { $0.name.trimmingCharacters(in: .whitespaces).localizedCaseInsensitiveCompare(name) == .orderedSame })
     else { return .fine }
     return AgentConsents.agreed(agent) ? .fine : .ask(agent)
 }

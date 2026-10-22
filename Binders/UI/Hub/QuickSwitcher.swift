@@ -185,19 +185,36 @@ struct QuickSwitcher: View {
         binders.first { $0.id == id }?.name ?? ""
     }
 
+    /// Where a note or meeting is: its binder, and inside a folder, the folders down to it: "Work › DevOps › Pipelines".
+    static func place(binder: String, folders: [String]) -> String {
+        ([binder] + folders).filter { !$0.isEmpty }.joined(separator: " › ")
+    }
+
+    /// What ⌘O says under a note: "Note · Work › DevOps", with its matching #tags after it when they're asked for.
+    static func subtitle(of note: NoteItem, binder: String, folders: FolderLookup, tags: [String] = []) -> String {
+        (["Note", place(binder: binder, folders: folders.names(note.folderID, in: note.binderID))] + tags.map { "#\($0)" })
+            .filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+
+    /// And under a meeting or a capture: "Meeting · Work › DevOps · Oct 21, 2026", or its matching #tags instead of the date.
+    static func subtitle(of meeting: MeetingRecord, binder: String, folders: FolderLookup, tags: [String]? = nil) -> String {
+        let after = tags.map { $0.map { "#\($0)" } } ?? [meeting.createdAt.formatted(date: .abbreviated, time: .omitted)]
+        return ([meeting.kindName, place(binder: binder, folders: folders.names(meeting.folderID, in: meeting.binderID))] + after)
+            .filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+
     private var places: [SwitcherItem] {
+        let folders = FolderLookup()
         var items: [SwitcherItem] = binders.map { binder in
             SwitcherItem(id: "b:\(binder.id)", title: binder.name, subtitle: binder.archived ? "Binder · archived" : "Binder",
                          symbol: "books.vertical", date: binder.updatedAt, boost: binder.archived ? -3 : 3) { show(binder: binder.id, tab: .overview) }
         }
         items += notes.prefix(500).map { note in
-            SwitcherItem(id: "n:\(note.id)", title: note.title, subtitle: ["Note", binderName(note.binderID)].filter { !$0.isEmpty }.joined(separator: " · "),
+            SwitcherItem(id: "n:\(note.id)", title: note.title, subtitle: Self.subtitle(of: note, binder: binderName(note.binderID), folders: folders),
                          symbol: "note.text", date: note.updatedAt) { show(binder: note.binderID, tab: .notes) { $0.pendingNoteID = note.id } }
         }
         items += meetings.filter { $0.status != "trivial" }.prefix(400).map { meeting in
-            SwitcherItem(id: "m:\(meeting.id)", title: meeting.title,
-                         subtitle: [meeting.kindName, binderName(meeting.binderID), meeting.createdAt.formatted(date: .abbreviated, time: .omitted)]
-                            .filter { !$0.isEmpty }.joined(separator: " · "),
+            SwitcherItem(id: "m:\(meeting.id)", title: meeting.title, subtitle: Self.subtitle(of: meeting, binder: binderName(meeting.binderID), folders: folders),
                          symbol: meeting.symbol, date: meeting.createdAt) { show(binder: meeting.binderID, tab: .listing(meeting)) { $0.pendingMeetingID = meeting.id } }
         }
         items += cards.prefix(400).map { card in
@@ -226,20 +243,20 @@ struct QuickSwitcher: View {
     /// "#pric": notes and meetings with a tag that starts that way, in every binder, newest first.
     private func tagged(_ prefix: String) -> [SwitcherItem] {
         let wanted = prefix.lowercased()
+        let folders = FolderLookup()
         func matches(_ text: String) -> [String] { NoteTags.tags(in: text).filter { wanted.isEmpty || $0.hasPrefix(wanted) } }
         var items: [SwitcherItem] = []
         for note in notes.prefix(1000) {
             let tags = matches(note.text)
             guard !tags.isEmpty else { continue }
-            items.append(SwitcherItem(id: "n:\(note.id)", title: note.title,
-                                      subtitle: (["Note", binderName(note.binderID)] + tags.map { "#\($0)" }).filter { !$0.isEmpty }.joined(separator: " · "),
+            items.append(SwitcherItem(id: "n:\(note.id)", title: note.title, subtitle: Self.subtitle(of: note, binder: binderName(note.binderID), folders: folders, tags: tags),
                                       symbol: "note.text", date: note.updatedAt) { show(binder: note.binderID, tab: .notes) { $0.pendingNoteID = note.id } })
         }
         for meeting in meetings.filter({ $0.status != "trivial" }).prefix(500) {
             let tags = matches(meeting.summary + "\n" + meeting.userNotes)
             guard !tags.isEmpty else { continue }
             items.append(SwitcherItem(id: "m:\(meeting.id)", title: meeting.title,
-                                      subtitle: ([meeting.kindName, binderName(meeting.binderID)] + tags.map { "#\($0)" }).filter { !$0.isEmpty }.joined(separator: " · "),
+                                      subtitle: Self.subtitle(of: meeting, binder: binderName(meeting.binderID), folders: folders, tags: tags),
                                       symbol: meeting.symbol, date: meeting.createdAt) { show(binder: meeting.binderID, tab: .listing(meeting)) { $0.pendingMeetingID = meeting.id } })
         }
         return Array(items.sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }.prefix(30))
@@ -252,6 +269,19 @@ struct QuickSwitcher: View {
             .prefix(8)
         let shelf = places.filter { $0.id.hasPrefix("b:") && $0.boost > 0 }.prefix(4)
         return Array(recent) + Array(shelf)
+    }
+
+    /// ⌘P's New Note and New Note: <template>: in `binder`, in the folder its template names, else in the folder the
+    /// binder page shows for that binder (the top when it shows none), opened on its Notes page.
+    @discardableResult
+    static func newNote(from template: NoteTemplate?, in binder: BinderRecord, navigation: HubNavigation) -> NoteItem? {
+        guard Store.shared.allowsSave() else { return nil }
+        let note = TemplateStore.newNote(from: template, in: binder, folder: navigation.folderShown(for: binder.id))
+        navigation.binderID = binder.id
+        navigation.pendingBinderTab = .notes
+        navigation.pendingNoteID = note.id
+        navigation.selection = .binder
+        return note
     }
 
     /// Opens a binder's page on a tab; `then` sets what to open there.
@@ -275,28 +305,27 @@ struct QuickSwitcher: View {
         func command(_ title: String, _ symbol: String, _ subtitle: String = "", run: @escaping @MainActor () -> Void) -> SwitcherItem {
             SwitcherItem(id: "x:\(title)", title: title, subtitle: subtitle, symbol: symbol, run: run)
         }
+        // New notes go in the folder you're in, when the page shows one of this binder's.
+        let filedIn = Self.place(binder: binder.name, folders: Store.shared.folderNames(navigation.folderShown(for: binder.id)))
+        let meeting = MeetingService.newPlace()
         var items = [
-            command("New Note", "square.and.pencil", "In \(binder.name)") {
-                guard Store.shared.allowsSave() else { return }
-                let note = NoteItem()
-                note.binderID = binder.id
-                note.sharedWithTeam = binder.sharedWithTeam
-                Store.shared.insert(note)
-                show(binder: binder.id, tab: .notes) { $0.pendingNoteID = note.id }
+            command("New Note", "square.and.pencil", "In \(filedIn)") {
+                Self.newNote(from: nil, in: binder, navigation: navigation)
             },
             command("Go to Today", "sun.max", "Your day and your notes for it") { navigation.selection = .today },
             command("Open Scratchpad", "note.text.badge.plus") { ScratchpadController.shared.show() },
-            command(controller.meetings.isRecording ? "Stop Meeting Notes" : "Start Meeting Notes", "record.circle") {
+            command(controller.meetings.isRecording ? "Stop Meeting Notes" : "Start Meeting Notes", "record.circle",
+                    controller.meetings.isRecording ? "" : "In \(Self.place(binder: meeting.binder.name, folders: Store.shared.folderNames(meeting.folder)))") {
                 Task { await controller.meetings.toggle() }
             },
             command(controller.capture.isOn ? "Turn Off Writing Capture" : "Turn On Writing Capture", "pencil.line") { controller.capture.toggle() },
             command("Ask Your Work", BindersTheme.askSymbol, "Search and ask everything in Binders") { navigation.selection = .knowledge },
         ]
         items += TemplateStore.all.map { template in
-            command("New Note: \(template.name)", "doc.badge.plus", "From the template, in \(binder.name)") {
-                guard Store.shared.allowsSave() else { return }
-                let note = TemplateStore.newNote(from: template, in: binder)
-                show(binder: binder.id, tab: .notes) { $0.pendingNoteID = note.id }
+            // One that names its own folder files there.
+            let into = template.folder.map { Self.place(binder: binder.name, folders: FolderTree.components($0)) } ?? filedIn
+            return command("New Note: \(template.name)", "doc.badge.plus", "From the template, in \(into)") {
+                Self.newNote(from: template, in: binder, navigation: navigation)
             }
         }
         items += BinderTab.allCases.map { tab in

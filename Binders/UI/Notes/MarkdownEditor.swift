@@ -69,6 +69,8 @@ struct MarkdownNoteEditor: View {
     var accessories: AnyView? = nil
     /// The note page's words, for an editor on `paperSheet()`: paper ink in the light appearance, ink in the dark.
     var paper = false
+    /// What hovering a "## " heading shows (a Distill note's: who last changed its section, and its cards); nil for none.
+    var headingTip: ((String) -> String?)? = nil
     @State private var model = MarkdownEditorModel()
     /// Every note editor follows the same choice.
     @AppStorage("notesShowMarkdown", store: AppDefaults.store) private var showsMarkup = false
@@ -81,11 +83,14 @@ struct MarkdownNoteEditor: View {
                             accessories: accessories)
             Divider().opacity(0.5)
             MarkdownEditor(text: $text, model: model, fontSize: (fontSize * (zoom == 0 ? 1 : zoom)).rounded(), placeholder: placeholder, inset: inset,
-                           showsMarkup: showsMarkup, links: links, focused: focused, reveal: reveal, paper: paper)
+                           showsMarkup: showsMarkup, links: links, focused: focused, reveal: reveal, paper: paper, headingTip: headingTip)
         }
     }
 }
 
+/// The formatting toolbar. It fits the editor it's over: short of room it goes compact, then the less-used buttons
+/// (strikethrough, code, code block, numbered list, quote, attaching) move into a More menu at its end, and its
+/// accessories show their icons only.
 struct MarkdownToolbar: View {
     let model: MarkdownEditorModel
     var compact = false
@@ -94,7 +99,25 @@ struct MarkdownToolbar: View {
     var headings: [MarkdownHeading] = []
     var accessories: AnyView? = nil
 
+    /// The buttons that move into More first, as they're named in its menu and their help.
+    private static let lessUsed: [(symbol: String, help: String, command: MarkdownEditorModel.Command)] = [
+        ("strikethrough", "Strikethrough  ⌘⇧X", .strikethrough),
+        ("chevron.left.forwardslash.chevron.right", "Code  ⌘E", .inlineCode),
+        ("curlybraces", "Code block  ⌘⌥C", .codeBlock),
+        ("list.number", "Numbered list  ⌘⇧7", .numbered),
+        ("text.quote", "Quote  ⌘⇧.", .quote),
+        ("photo.on.rectangle.angled", "Add a picture, video or file. You can also drop or paste them in.", .attach),
+    ]
+
     var body: some View {
+        ViewThatFits(in: .horizontal) {
+            bar(compact: compact, more: false).fitProbe("toolbar.whole")
+            if !compact { bar(compact: true, more: false).fitProbe("toolbar.whole") }
+            bar(compact: true, more: true)
+        }
+    }
+
+    private func bar(compact: Bool, more: Bool) -> some View {
         HStack(spacing: compact ? 2 : 4) {
             Menu {
                 Button("Heading 1  ⌘⌥1") { model.perform(.heading(1)) }
@@ -108,20 +131,41 @@ struct MarkdownToolbar: View {
             .fixedSize()
             .quietControl()
             .help("Heading")
-            separator
-            button("bold", "Bold  ⌘B", .bold)
-            button("italic", "Italic  ⌘I", .italic)
-            button("strikethrough", "Strikethrough  ⌘⇧X", .strikethrough)
-            button("chevron.left.forwardslash.chevron.right", "Code  ⌘E", .inlineCode)
-            button("curlybraces", "Code block  ⌘⌥C", .codeBlock)
-            button("link", "Link  ⌘K", .link)
-            separator
-            button("list.bullet", "Bulleted list  ⌘⇧8", .bullet)
-            button("list.number", "Numbered list  ⌘⇧7", .numbered)
-            button("checklist", "Checklist  ⌘⇧L", .task)
-            button("text.quote", "Quote  ⌘⇧.", .quote)
-            separator
-            button("photo.on.rectangle.angled", "Add a picture, video or file. You can also drop or paste them in.", .attach)
+            .fitProbe("toolbar.first")
+            separator(compact)
+            button("bold", "Bold  ⌘B", .bold, compact: compact)
+            button("italic", "Italic  ⌘I", .italic, compact: compact)
+            if !more {
+                button("strikethrough", "Strikethrough  ⌘⇧X", .strikethrough, compact: compact)
+                button("chevron.left.forwardslash.chevron.right", "Code  ⌘E", .inlineCode, compact: compact)
+                button("curlybraces", "Code block  ⌘⌥C", .codeBlock, compact: compact)
+            }
+            button("link", "Link  ⌘K", .link, compact: compact)
+            separator(compact)
+            button("list.bullet", "Bulleted list  ⌘⇧8", .bullet, compact: compact)
+            if !more { button("list.number", "Numbered list  ⌘⇧7", .numbered, compact: compact) }
+            button("checklist", "Checklist  ⌘⇧L", .task, compact: compact)
+            if more {
+                Menu {
+                    ForEach(Array(Self.lessUsed.enumerated()), id: \.offset) { _, item in
+                        Button { model.perform(item.command) } label: {
+                            Label(item.command.isAttach ? "Add a Picture, Video or File…" : item.help, systemImage: item.symbol)
+                        }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis").frame(width: 20, height: 18)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .quietControl()
+                .help("More formatting: strikethrough, code, a code block, a numbered list, a quote, a picture or file")
+                .accessibilityLabel("More formatting")
+            } else {
+                button("text.quote", "Quote  ⌘⇧.", .quote, compact: compact)
+                separator(compact)
+                button("photo.on.rectangle.angled", "Add a picture, video or file. You can also drop or paste them in.", .attach, compact: compact)
+            }
             Spacer(minLength: 0)
             if !headings.isEmpty {
                 Menu {
@@ -146,9 +190,12 @@ struct MarkdownToolbar: View {
             .toggleStyle(.button)
             .help(showsMarkup ? "Hide the Markdown except on the line you're editing" : "Show the Markdown (#, **, links) everywhere")
             .accessibilityLabel("Show Markdown")
+            .fitProbe(accessories == nil ? "toolbar.last" : "toolbar.toggle")
             if let accessories {
-                separator
+                separator(compact)
                 accessories
+                    .environment(\.toolbarIconsOnly, more)
+                    .fitProbe("toolbar.last")
             }
         }
         .buttonStyle(.borderless)
@@ -158,17 +205,33 @@ struct MarkdownToolbar: View {
         .padding(.vertical, compact ? 5 : 7)
     }
 
-    private var separator: some View {
+    private func separator(_ compact: Bool) -> some View {
         Divider().frame(height: 14).padding(.horizontal, compact ? 2 : 4)
     }
 
-    private func button(_ symbol: String, _ help: String, _ command: MarkdownEditorModel.Command) -> some View {
+    private func button(_ symbol: String, _ help: String, _ command: MarkdownEditorModel.Command, compact: Bool) -> some View {
         Button { model.perform(command) } label: {
             Image(systemName: symbol).frame(width: compact ? 20 : 24, height: compact ? 18 : 20)
         }
         .help(help)
         .accessibilityLabel(help.components(separatedBy: "  ").first ?? help)
     }
+}
+
+private struct ToolbarIconsOnlyKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    /// In an editor's toolbar that's short of room: what it holds shows its icons, without words.
+    var toolbarIconsOnly: Bool {
+        get { self[ToolbarIconsOnlyKey.self] }
+        set { self[ToolbarIconsOnlyKey.self] = newValue }
+    }
+}
+
+extension MarkdownEditorModel.Command {
+    var isAttach: Bool { if case .attach = self { true } else { false } }
 }
 
 struct MarkdownEditor: NSViewRepresentable {
@@ -183,6 +246,7 @@ struct MarkdownEditor: NSViewRepresentable {
     var reveal: EditorReveal? = nil
     /// On the note page: its words, which follow the appearance as the page does.
     var paper = false
+    var headingTip: ((String) -> String?)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -199,6 +263,7 @@ struct MarkdownEditor: NSViewRepresentable {
         textView.showsMarkup = showsMarkup
         textView.styler = MarkdownStyler(fontSize: fontSize, onPaper: paper, tint: context.environment.binderTint)
         textView.styler.linkExists = links?.exists
+        textView.styler.headingTip = headingTip
         textView.styler.embedSize = { [weak textView] source, width in
             textView?.embedSize(source: source, width: width) ?? NSSize(width: 360, height: 200)
         }
@@ -254,6 +319,7 @@ struct MarkdownEditor: NSViewRepresentable {
         model.textView = textView
         textView.links = links
         textView.styler.linkExists = links?.exists
+        textView.styler.headingTip = headingTip
         textView.showsMarkup = showsMarkup
         if let reveal, reveal.id != context.coordinator.revealed {
             context.coordinator.revealed = reveal.id
@@ -265,27 +331,25 @@ struct MarkdownEditor: NSViewRepresentable {
         if textView.styler.fontSize != fontSize || textView.styler.tint != tint {
             var styler = MarkdownStyler(fontSize: fontSize, onPaper: textView.styler.onPaper, tint: tint)
             styler.linkExists = textView.styler.linkExists
+            styler.headingTip = textView.styler.headingTip
             styler.embedSize = textView.styler.embedSize
             textView.styler = styler
             textView.typingAttributes = styler.baseAttributes
             textView.restyle()
         }
-        // Only text that changed elsewhere (sync, a digest, another window) is pushed in; typing goes the other way.
-        // Typing not yet handed over doesn't count: the note hasn't changed, the editor is just ahead of it.
+        // Only text that changed elsewhere (sync, a teammate, a digest, another window) is pushed in; typing goes the other
+        // way. Typing not yet handed over doesn't count: the note hasn't changed, the editor is just ahead of it, and it's
+        // kept, merged with what changed elsewhere, then handed over (a teammate typing in the same note keeps their words,
+        // and you yours).
         let coordinator = context.coordinator
         guard !coordinator.isEditing, text != coordinator.known else { return }
+        let base = coordinator.known
         coordinator.known = text
-        coordinator.cancelPending()
-        if textView.string != text {
-            let selection = textView.selectedRange()
-            textView.string = text
-            textView.settledTitle = MarkdownSyntax.noteTitle(text)
-            // What was there to undo was typed into other text; undone now, it would land in the wrong places.
-            textView.ownUndoManager.removeAllActions()
-            textView.restyle()
-            let length = (text as NSString).length
-            textView.setSelectedRange(NSRange(location: min(selection.location, length), length: 0))
-        }
+        var current = textView.string
+        current.makeContiguousUTF8()
+        let shown = current == base ? text : TextMerge.merge(base: base, mine: current, theirs: text)
+        if shown == text { coordinator.cancelPending() } else { coordinator.textDidChange(Notification(name: NSText.didChangeNotification)) }
+        coordinator.show(shown)
     }
 
     /// The cursor at the end of the first line, once the editor is in its window.
@@ -398,7 +462,8 @@ struct MarkdownEditor: NSViewRepresentable {
             pending = nil
         }
 
-        /// Hands the typing to the note, if there's any it doesn't have.
+        /// Hands the typing to the note, if there's any it doesn't have. When the note changed elsewhere meanwhile (and this
+        /// editor hasn't shown it yet), both are kept: merged, then shown here.
         func flush() {
             cancelPending()
             guard let textView else { return }
@@ -407,10 +472,32 @@ struct MarkdownEditor: NSViewRepresentable {
             var text = textView.string
             text.makeContiguousUTF8()
             guard text != known else { return }
+            let now = parent.text
+            if now != known, now != text {
+                text = TextMerge.merge(base: known, mine: text, theirs: now)
+                show(text)
+            }
             known = text
             isEditing = true
             parent.text = text
             isEditing = false
+        }
+
+        /// Shows text that changed elsewhere, the cursor kept with the words around it.
+        func show(_ text: String) {
+            guard let textView, textView.string != text else { return }
+            let old = textView.string
+            let selection = textView.selectedRange()
+            let edits = TextEdits.utf16(from: old, to: text)
+            textView.string = text
+            textView.settledTitle = MarkdownSyntax.noteTitle(text)
+            // What was there to undo was typed into other text; undone now, it would land in the wrong places.
+            textView.ownUndoManager.removeAllActions()
+            textView.restyle()
+            let length = (text as NSString).length
+            let start = min(TextEdits.map(selection.location, through: edits), length)
+            let end = min(max(start, TextEdits.map(selection.location + selection.length, through: edits)), length)
+            textView.setSelectedRange(NSRange(location: start, length: end - start))
         }
     }
 }
@@ -438,6 +525,8 @@ struct MarkdownStyler {
     let fontSize: CGFloat
     /// Whether a [[link]]'s title is a note, meeting, person or binder; links to nothing yet look faded.
     var linkExists: ((String) -> Bool)?
+    /// What hovering a "## " heading shows, from its title; nil for none.
+    var headingTip: ((String) -> String?)?
     /// How big a picture or video is drawn, from its source and the width its caption asks for.
     var embedSize: ((String, Int?) -> NSSize)?
     /// The note page: its words, paper ink and paper's muted ones in the light appearance, the theme's in the dark.
@@ -487,6 +576,11 @@ struct MarkdownStyler {
                 let style = baseParagraph.mutableCopy() as! NSMutableParagraphStyle
                 style.paragraphSpacingBefore = fontSize * (level <= 2 ? 0.6 : 0.3)
                 storage.addAttribute(.paragraphStyle, value: style, range: target)
+                // A Distill note's section: who last changed it, and the cards made from it.
+                if level == 2, let headingTip,
+                   let tip = headingTip(MarkdownSyntax.plainTitle((storage.string as NSString).substring(with: span.range))) {
+                    storage.addAttribute(.toolTip, value: tip, range: target)
+                }
             case .codeBlock, .codeFence:
                 // The whole line, newline included, so a block's background is one piece and blank lines in it keep theirs.
                 let line = NSIntersectionRange((storage.string as NSString).lineRange(for: span.range), range)

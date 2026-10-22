@@ -114,6 +114,14 @@ final class BinderRecord {
     /// "What goes here", in your words: one line the card router reads, with the latest titles in it, to file a card or a
     /// to-do that doesn't say where it goes. Empty: the titles alone. Not synced to your team.
     var whatGoesHere: String = ""
+    /// "Agents may place work items" (lane DS1): an agent's proposal from Distill goes on this board without a person
+    /// reviewing it first, its cards meant for whom it suggests as a suggestion. Off unless you turn it on.
+    var agentsMayPlace: Bool = false
+    /// Shared through a team database (lane DB2): the database's key on this Mac (`TeamDatabaseServer.key`), so its board
+    /// goes through it. Empty for a binder that isn't.
+    var teamDatabaseKey: String = ""
+    /// Who made it in the team, by name, when it wasn't you: "From Dana". Empty otherwise.
+    var teamMadeBy: String = ""
 
     static let paletteSize = 8
 
@@ -156,6 +164,12 @@ final class NoteItem {
     /// moved, a binder shared with your team included (Store.move, TeamSyncService.setShared), and team sync never sends
     /// it. Marked on the note itself, so deleting History, where the moment is kept, doesn't unmark it.
     var staysUnshared: Bool = false
+    /// The folder it's filed in, in its binder (FolderRecord); nil at the top. One that isn't in its binder (a
+    /// teammate's that hasn't synced yet) reads as the top.
+    var folderID: UUID?
+    /// Distill is on (lane DS1): its Work bar, its whole history kept, and a row in its binder's Work list. Off until you
+    /// turn it on; `binders_distill: true` in the Markdown copy.
+    var distill: Bool = false
 
     /// An agent's words in it, until you make it yours: labelled wherever it shows, left out of answers, and a correction
     /// in it steers nothing.
@@ -178,11 +192,12 @@ final class NoteItem {
     }
 
     var properties: NoteProperties {
-        get { NoteProperties(status: status, owner: owner, due: dueAt) }
+        get { NoteProperties(status: status, owner: owner, due: dueAt, distill: distill) }
         set {
             status = newValue.status
             owner = newValue.owner
             dueAt = newValue.due
+            distill = newValue.distill
         }
     }
 
@@ -262,6 +277,11 @@ final class CommitmentRecord {
     /// Who added it when that wasn't you, as the board says who made a card: the agent or tool ("Claude Code"), or
     /// "a link" for binders://todo.
     var madeBy: String?
+    /// A teammate's, shared through a team database (lane DB4): their member id and name, and where it came from in their
+    /// words. Nil for yours. You can tick, reopen or dismiss it; the rest is theirs.
+    var teamAuthorID: String?
+    var teamAuthorName: String?
+    var teamSource: String?
 
     init(task: String, kind: String, owner: String) {
         self.id = UUID()
@@ -276,8 +296,10 @@ final class CommitmentRecord {
     var isTodo: Bool { kind == "todo" }
     var todoOrigin: TodoOrigin? { origin.flatMap(TodoOrigin.init(rawValue:)) }
 
-    /// Where it came from, where to-dos show it: "Added by Claude Code", "Added by a link", "Promised to Sam in Mail".
+    /// Where it came from, where to-dos show it: "Added by Claude Code", "Added by a link", "Promised to Sam in Mail"; a
+    /// teammate's says whose: "From Dana: Added by voice".
     var sourceTitle: String {
+        if let teamAuthorName { return TeamTodoValues.source(teamSource ?? "", maker: teamAuthorName) }
         if isTodo {
             switch todoOrigin {
             case .agent?:
@@ -332,6 +354,8 @@ final class MeetingRecord {
     var isTeamCopy: Bool = false
     var teamAuthorName: String?
     var teamAuthorID: String?
+    /// The folder it's filed in, in its binder (FolderRecord); nil at the top. A capture's too.
+    var folderID: UUID?
 
     init(title: String, appName: String?, templateID: String) {
         self.id = UUID()
@@ -457,7 +481,7 @@ final class Store {
     init(url: URL, failing: Bool = false) {
         let schema = Schema([TranscriptRecord.self, DictionaryWord.self, SnippetItem.self, NoteItem.self,
                              MeetingRecord.self, MeetingSegmentRecord.self, BinderRecord.self, WritingRecord.self,
-                             CommitmentRecord.self, TaskCard.self, TaskEvent.self])
+                             CommitmentRecord.self, TaskCard.self, TaskEvent.self, FolderRecord.self])
         let configuration = ModelConfiguration(schema: schema, url: url)
         do {
             if failing { throw CocoaError(.fileReadCorruptFile) }
@@ -520,7 +544,10 @@ final class Store {
     /// `keepingHistory` leaves a note's earlier versions for Undo; whatever's left is cleared at the next launch.
     func delete(_ model: some PersistentModel, keepingHistory: Bool = false) {
         // A deleted note's earlier versions go with it.
-        if let note = model as? NoteItem, self === Store.shared, !keepingHistory { NoteHistory.forget(note.id) }
+        if let note = model as? NoteItem, self === Store.shared, !keepingHistory {
+            NoteHistory.forget(note.id)
+            DistillStore.shared.forget(note.id)
+        }
         if let record = model as? TranscriptRecord, let url = record.audioURL {
             try? FileManager.default.removeItem(at: url)
         }
@@ -575,6 +602,14 @@ final class Store {
 
     func appendSegment(_ segment: TranscriptSegment, to meetingID: UUID) {
         context.insert(MeetingSegmentRecord(meetingID: meetingID, segment: segment))
+        segmentRevisions[meetingID, default: 0] += 1
+        save()
+    }
+
+    /// Lines added to a transcript in one save (a teammate's meeting as its lines arrive, lane DB4).
+    func appendSegments(_ segments: [TranscriptSegment], to meetingID: UUID) {
+        guard !segments.isEmpty else { return }
+        segments.forEach { context.insert(MeetingSegmentRecord(meetingID: meetingID, segment: $0)) }
         segmentRevisions[meetingID, default: 0] += 1
         save()
     }
@@ -793,12 +828,21 @@ final class Store {
         return (try? context.fetchCount(descriptor)) ?? 0
     }
 
-    /// Moves an item into a binder; your items take on the binder's sharing, except conversations, which stay yours.
+    /// Moves an item into a binder, at its top; your items take on the binder's sharing, except conversations, which stay
+    /// yours.
     func move(_ meeting: MeetingRecord, to binder: BinderRecord) {
+        let moved = meeting.binderID != binder.id
+        if moved { meeting.folderID = nil }
         meeting.binderID = binder.id
         if !meeting.isTeamCopy { meeting.sharedWithTeam = binder.sharedWithTeam && !meeting.isConversation }
+        // A capture you put in a binder shared through a team database yourself is one you share (lane DB4).
+        if moved, meeting.isConversation, !meeting.isTeamCopy { Self.capturesFiled?(meeting.id, binder.id) }
         save()
     }
+
+    /// Told when one of your captures moves into another binder, with its id and the binder (lane DB4): a person moved it,
+    /// as the router never files a capture into a binder shared through a team database.
+    static var capturesFiled: ((UUID, UUID) -> Void)?
 
     /// Conversations kept as trivial are deleted a week after they were heard; until then they can be brought back.
     func purgeTrivialConversations(olderThan days: Int = 7, now: Date = Date()) {
@@ -812,20 +856,23 @@ final class Store {
     }
 
     /// Your notes take on the binder's sharing, except one made from what you said, which stays unshared in a shared
-    /// binder too.
+    /// binder too. It goes to the binder's top.
     func move(_ note: NoteItem, to binder: BinderRecord) {
+        if note.binderID != binder.id { note.folderID = nil }
         note.binderID = binder.id
         if !note.isTeamCopy { note.sharedWithTeam = binder.sharedWithTeam && !note.staysUnshared }
         save()
     }
 
     /// Deletes a binder after moving its contents somewhere else; the default binder can't be deleted. They take on that
-    /// binder's sharing as any move does (`move`): captures and notes made from what you said stay unshared.
+    /// binder's sharing as any move does (`move`): captures and notes made from what you said stay unshared. They go to
+    /// the top of that binder, and the binder's folders go with it.
     func deleteBinder(_ binder: BinderRecord, movingItemsTo target: BinderRecord) {
         guard !binder.isDefault, binder.id != target.id else { return }
         let binderID = binder.id
         for meeting in (try? context.fetch(FetchDescriptor<MeetingRecord>(predicate: #Predicate { $0.binderID == binderID }))) ?? [] { move(meeting, to: target) }
         for note in (try? context.fetch(FetchDescriptor<NoteItem>(predicate: #Predicate { $0.binderID == binderID }))) ?? [] { move(note, to: target) }
+        for folder in folders(in: binderID) { context.delete(folder) }
         context.delete(binder)
         save()
     }

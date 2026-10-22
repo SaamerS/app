@@ -41,7 +41,12 @@ struct HomeTabs: View {
         }
         .environment(\.talkControlShown, true)
         // Inside a binder, into that binder, as its own Dictate button does without the tabs.
-        .sheet(isPresented: $dictating) { DictationSheet(binder: PhoneNavigation.shared.binderInView) }
+        .sheet(isPresented: $dictating) {
+            // And into the folder open in it; its binder, should the binder's page have let go of the name as the folder opened.
+            let folder = PhoneNavigation.shared.folderInView
+            let binder = PhoneNavigation.shared.binderInView ?? folder?.binder
+            DictationSheet(binder: binder, folder: folder.flatMap { $0.binder == binder ? $0 : nil })
+        }
         .sheet(isPresented: $asking) { if question.isEmpty { AskView() } else { AskView(question: question) } }
         // A notification tapped: Today opens what it's about.
         .onChange(of: PhoneNavigation.shared.pendingCard) { _, id in if id != nil { tab = .today } }

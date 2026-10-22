@@ -385,6 +385,16 @@ struct AgentEditor: View {
                     } footer: {
                         Text(startFooter)
                     }
+                    // Lane DB2: a teammate's card meant for it, on a board shared through your team database. Held back from
+                    // 0.10.0 with the team database (TeamDatabaseFeature).
+                    if TeamDatabaseFeature.isOn {
+                        Section {
+                            Toggle("Take cards from teammates", isOn: Binding(get: { draft.takesTeammatesCards }, set: { draft.takesTeamCards = $0 ? nil : false }))
+                                .fitProbe("agents.takeTeammatesCards")
+                        } footer: {
+                            Text("On a board shared through your team database, a card a teammate means for this agent starts it on its own when Start on cards Binders sends it is on too. Off, such a card waits for your Give to. Teammates see whether it takes their cards, never how Binders starts it.")
+                        }
+                    }
                 }
                 Section {
                     Toggle("Add context from the binder", isOn: Binding(get: { draft.addsContext }, set: { draft.binderContext = $0 ? nil : false }))
@@ -661,6 +671,11 @@ struct AgentEditor: View {
             TextField("Sites its commands may reach", text: $domains, prompt: Text("None: github.com, registry.npmjs.org…"))
             Text("Started by Binders, it runs on its own in \(claude.worksInFolder ? "the folder itself" : "a git worktree made for the card"), with its permission checks on and Binders' tools for that card only. It can't read ~/.ssh, your other keys and sign-ins (gh, npm, cloud tools and the coding tools' own), Binders' data folder or your team folder; Binders denies git push, and its commands reach only the sites you list. It runs under your own Claude Code sign-in. It reports on the card with those tools, and when it stops, what it said last goes on the card. A run that stops before it's finished leaves the card in Blocked, with why.")
                 .font(.caption).foregroundStyle(.secondary)
+            // An organization's managed settings for Claude Code on this Mac (lane RF1): what Binders does about them.
+            if AgentDispatcher.claudeCodeIsManaged {
+                Label(ClaudeCodeManaged.settingsLine, systemImage: "building.2")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         case _ where cliTool != nil:
             cliFields(cliTool ?? .codex)
         case "command":

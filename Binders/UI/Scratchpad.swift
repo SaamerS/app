@@ -13,6 +13,8 @@ final class ScratchpadController: NSObject {
     func toggle() {
         if let panel, panel.isVisible, panel.isKeyWindow {
             panel.orderOut(nil)
+            // Put away: your editing session in its note ends, kept as a version.
+            if let note { NoteHistory.endSession(note.id) }
         } else {
             show()
         }
@@ -47,6 +49,7 @@ final class ScratchpadController: NSObject {
     private func newNote() {
         MarkdownEditor.flushAll()
         let previous = note
+        if let previous { NoteHistory.endSession(previous.id) }
         note = nil
         show()
         // Delete only after the panel stopped showing it.

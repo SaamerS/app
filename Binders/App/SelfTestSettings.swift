@@ -84,8 +84,10 @@ extension SelfTest {
         let reopened = HubNavigation()
         reopened.selection = .settings
         let again = await showSettings(reopened, controller: controller, store: store, size: size, name: "settings-reopened-team", directory: directory)
-        check(Set(again.tops.keys) == Set(Group.devices.visiblePages) && (again.tops[.team].map { phoneShown ? abs($0) <= 24 || again.atEnd : $0 > 0 && $0 < 60 } ?? false),
-              "Settings opens again on the part last opened, Team, on its page")
+        // Whether the iPhone's part is above Team now, with the preview on (phoneShown was read before it was turned on).
+        let teamFirst = Group.devices.visiblePages.first == .team
+        check(Set(again.tops.keys) == Set(Group.devices.visiblePages) && (again.tops[.team].map { teamFirst ? $0 > 0 && $0 < 60 : abs($0) <= 24 || again.atEnd } ?? false),
+              "Settings opens again on the part last opened, Team, on its page (\(again.tops[.team].map { "\(Int($0)) pt from the top" } ?? "not drawn"))")
         check(store.string(forKey: "settingsPage") == SettingsPage.team.rawValue,
               "opening Settings keeps the remembered part as it was (\(store.string(forKey: "settingsPage") ?? "none"))")
 

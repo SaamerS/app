@@ -64,11 +64,20 @@ final class DictationController {
         let board = BoardService()
         board.commitments = commitments
         board.dispatcher = agents
+        board.team = teamBoard
         agents.board = board
         return board
     }()
+    /// Boards and agents on a team database (lane DB2), when Settings → Team has one.
+    @ObservationIgnored private(set) lazy var teamBoard: TeamBoard = {
+        let team = TeamBoard()
+        team.controller = self
+        return team
+    }()
     /// Wakes the agents cards are meant for (Settings → Agents).
     @ObservationIgnored private(set) lazy var agents = AgentDispatcher(registry: .shared)
+    /// Distill: notes read into work items, placed on the board by you, and their progress (lane DS1).
+    @ObservationIgnored private(set) lazy var distill = DistillService(controller: self)
     /// Binders as a server for paired phones; started by the app when the setting is on.
     @ObservationIgnored private(set) lazy var link = LinkServer(controller: self)
 
@@ -109,6 +118,7 @@ final class DictationController {
         }
         knowledge.start()
         team.start()
+        teamBoard.start()
 
         observeChanges({ AppSettings.shared.hotkeys }) { [weak self] in self?.hotkeys.updateBindings($0) }
         observeChanges({ AppSettings.shared.speechModel }) { [weak self] in self?.speech.activate($0, download: true) }
@@ -429,6 +439,16 @@ final class DictationController {
         if let request = VoiceCommands.parseCalendarAdd(instruction) {
             await addToCalendar(request, instruction: instruction, snapshot: snapshot, duration: duration, asrMillis: asrMillis,
                                 audioFileName: audioFileName, processing: id)
+            return
+        }
+
+        // "How's the checkout spec going?": a Distill note's report, from the board alone, with no model (lane DS1).
+        if snapshot.context.selectedText == nil, Store.shared.canSave, let report = DistillService.answer(instruction) {
+            AnswerPanelController.shared.show(question: instruction, answer: KnowledgeService.Answer(question: instruction, text: report, sources: []))
+            AnswerSpeaker.shared.speak(report)
+            flowBar.hide()
+            recordHistory(mode: .command, raw: instruction, final: report, snapshot: snapshot, duration: duration, asrMillis: asrMillis,
+                          llmMillis: 0, usedLLM: false, fallback: nil, audioFileName: audioFileName, status: "answered")
             return
         }
 

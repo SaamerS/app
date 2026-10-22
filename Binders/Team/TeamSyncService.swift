@@ -43,10 +43,33 @@ private struct TeamSyncState: Codable {
         var path: String?
         /// When the file was first found missing; without a deletion record it counts as deleted only after a grace period.
         var missingSince: Date?
+        /// A note's folder as both sides last agreed: its id, "" at the top of its binder. Nil in entries from before
+        /// folders, when every note was at the top.
+        var folder: String?
+    }
+
+    /// A folder in a shared binder as both sides last agreed (TeamFolderFile.syncHash), and whether that was its
+    /// deletion: a deleted folder that comes back (put back with Undo on the Mac that deleted it) is taken back, not
+    /// deleted again.
+    struct FolderEntry: Codable, Equatable {
+        var hash: String
+        var deleted: Bool?
     }
 
     var meetings: [String: Entry] = [:]
     var notes: [String: Entry] = [:]
+    /// Nil in a file from before folders, which reads as it always did.
+    var folders: [String: FolderEntry]?
+    /// Copies of a note's file set aside as old copies (StrayCopy), by path.
+    var strays: [String: StrayCopy]?
+}
+
+/// A second file of a note, word for word the same as the one kept when it was found (a move a drive passed on as a copy,
+/// then a delete it hasn't made): set aside, not a note of its own, for as long as nobody changes it. Its id, and when it
+/// was last changed, as it was then.
+private struct StrayCopy: Codable, Equatable, Sendable {
+    var id: String
+    var modified: Date
 }
 
 private struct RemoteMeeting: Sendable {
@@ -70,6 +93,8 @@ private struct ScanRequest: Sendable {
     let notePathIDs: [String: String]
     let indexMeetingMarkdown: Bool
     let idAssignmentAge: TimeInterval
+    /// Copies set aside in earlier passes, by path.
+    var strays: [String: StrayCopy] = [:]
 }
 
 /// Everything read from the team folder in one pass, gathered off the main thread.
@@ -88,7 +113,15 @@ private struct FolderScan: Sendable {
     var unreadableNotePaths: Set<String> = []
     var tombstones: [String: TeamTombstone] = [:]
     var members: [TeamMember] = []
+    /// Member files that are there but can't be read yet: each counts as a Binders that doesn't know folders.
+    var unreadableMembers = 0
     var manifest: TeamManifest?
+    /// Folders in shared binders (`_binders/folders`), deleted ones included until they're old.
+    var folders: [String: TeamFolderFile] = [:]
+    /// Folder files that are there but can't be read yet (downloading, half-written): not missing.
+    var pendingFolderIDs: Set<String> = []
+    /// Copies of notes' files set aside this pass, by path (StrayCopy).
+    var strays: [String: StrayCopy] = [:]
 }
 
 /// Shares meetings and notes with teammates through a folder synced by OneDrive, Dropbox, Google Drive or iCloud Drive.
@@ -108,6 +141,14 @@ final class TeamSyncService {
         var sharedNotes = 0
         var teamMeetings = 0
         var teamNotes = 0
+        /// Whether note files move into their folders' subfolders yet: once every member's Binders knows folders.
+        var filesMove = true
+        /// The teammates whose Binders doesn't know folders yet, by name.
+        var waitingForFolders: [String] = []
+        /// Member files that are there but can't be read yet, which hold that back too.
+        var unreadableMembers = 0
+        /// A teammate moved the team to a team database (lane DB3): what their Mac left in the folder.
+        var moved: TeamMoveMarker?
     }
 
     private struct Removals {
@@ -143,6 +184,8 @@ final class TeamSyncService {
     @ObservationIgnored private var writeError: String?
     @ObservationIgnored private var localCache: [String: (fingerprint: Int, file: TeamMeetingFile, hash: String)] = [:]
     @ObservationIgnored private var remoteCache: [String: RemoteMeeting] = [:]
+    /// This sync's word on moving note files into their folders' subfolders (TeamFeatures.filesMayMove).
+    @ObservationIgnored private var filesMayMove = false
 
     private var settings: AppSettings { AppSettings.shared }
 
@@ -294,8 +337,36 @@ final class TeamSyncService {
         for binder in store.binders(includeArchived: true) where !binder.isTeamCopy { binder.sharedWithTeam = false }
         store.save()
         await perform(removals)
-        for binder in store.binders(includeArchived: true) where binder.isTeamCopy { store.context.delete(binder) }
+        for binder in store.binders(includeArchived: true) where binder.isTeamCopy {
+            // Its folders go with it.
+            for folder in store.folders(in: binder.id) { store.context.delete(folder) }
+            store.context.delete(binder)
+        }
         store.save()
+        state = TeamSyncState()
+        localCache = [:]
+        remoteCache = [:]
+        saveState()
+        status = Status()
+    }
+
+    /// The team moved to a team database (lane DB3): one last sync, then this Mac stops syncing the folder and leaves it as
+    /// it is, a Markdown copy that still opens in Obsidian. Teammates' items stay on this Mac: they're the database's now.
+    /// A marker in the folder tells a newer Binders still on folder sync what happened (an older one never reads it); the
+    /// first Mac to move writes it.
+    func stopForMove(_ marker: TeamMoveMarker) async {
+        while syncing { try? await Task.sleep(for: .milliseconds(100)) }
+        await syncNow()
+        if let folder = folderURL {
+            let url = dataURL(folder, TeamMoveMarker.fileName, file: true)
+            if !FileManager.default.fileExists(atPath: url.path), let data = try? TeamCoding.encoder().encode(marker) {
+                try? data.write(to: url, options: .atomic)
+            }
+        }
+        pending?.cancel()
+        settings.teamFolderPath = nil
+        identityOverride = nil
+        watcher = nil
         state = TeamSyncState()
         localCache = [:]
         remoteCache = [:]
@@ -358,7 +429,7 @@ final class TeamSyncService {
     /// making it theirs counts here too. `keepingAgentEdit`, for a conflict: an agent's edit marked here stays marked when
     /// the team's version says nothing of one, as that version may still hold the agent's earlier words.
     private func take(_ item: RemoteNote, into note: NoteItem, keepingAgentEdit: Bool = false) {
-        keepVersion(of: note, before: item.note.body)
+        keepVersion(of: note, before: item.note.body, by: Self.author(of: item, replacing: note))
         note.text = item.note.body
         note.properties = item.note.properties
         var mark = TeamNoteMark(lines: item.note.extraFrontmatter)
@@ -369,9 +440,18 @@ final class TeamSyncService {
     }
 
     /// A teammate's change is about to replace a note: keep it as it was first, in the app's own history.
-    private func keepVersion(of note: NoteItem, before text: String) {
+    private func keepVersion(of note: NoteItem, before text: String, by author: NoteAuthor) {
         guard store === Store.shared else { return }
-        NoteHistory.willChange(note, to: text, always: true)
+        NoteHistory.willChange(note, to: text, always: true, by: author)
+    }
+
+    /// Who a teammate's version is by, for the note's history: the agent its file says edited it since (that
+    /// teammate's agent), else the teammate who wrote the file.
+    private static func author(of item: RemoteNote, replacing note: NoteItem) -> NoteAuthor {
+        let teammate = item.note.editedBy ?? item.note.author?.name ?? "A teammate"
+        let mark = TeamNoteMark(lines: item.note.extraFrontmatter)
+        if let agent = mark.editedBy, agent != note.editedBy || mark.editedAt != note.editedAt { return .agent(agent, owner: teammate) }
+        return .teammate(teammate)
     }
 
     private func connect(_ folder: URL) {
@@ -420,14 +500,21 @@ final class TeamSyncService {
             if let path = entry.path { notePathIDs[path] = id }
         }
         let request = ScanRequest(folder: folder, meetingCache: remoteCache, notePathIDs: notePathIDs,
-                                  indexMeetingMarkdown: needsMeetingMarkdownIndex(), idAssignmentAge: idAssignmentAge)
+                                  indexMeetingMarkdown: needsMeetingMarkdownIndex(), idAssignmentAge: idAssignmentAge,
+                                  strays: state.strays ?? [:])
         let scan = await Task.detached(priority: .utility) { TeamSyncService.scan(request) }.value
         guard folderURL == folder else { return }
+        // Only those still there and still set aside are remembered.
+        state.strays = scan.strays.isEmpty ? nil : scan.strays
         remoteCache = scan.meetingCache
 
         lastAnnouncements = []
         var removals = Removals()
-        var changed = syncMeetings(folder, scan: scan, removals: &removals)
+        // Files move into folders' subfolders only once no teammate's Binders would take a move for a second note.
+        filesMayMove = TeamFeatures.filesMayMove(members: scan.members, unreadable: scan.unreadableMembers, me: me.id)
+        // Folders first, so what notes and meetings are filed in is here.
+        var changed = syncFolders(folder, scan: scan)
+        if syncMeetings(folder, scan: scan, removals: &removals) { changed = true }
         if scan.notesFolderExists, syncNotes(folder, scan: scan, removals: &removals) { changed = true }
         if scan.notesFolderExists, store === Store.shared { syncAttachments(folder) }
         syncBinders(folder, scan: scan)
@@ -435,7 +522,9 @@ final class TeamSyncService {
         await perform(removals)
 
         var members = scan.members
-        if !members.contains(where: { $0.id == me.id && $0.name == me.name && Date().timeIntervalSince($0.lastSeen) < 6 * 3600 }) {
+        // Written again every few hours, and at once when it doesn't yet say what this build knows (folders).
+        if !members.contains(where: { $0.id == me.id && $0.name == me.name && Date().timeIntervalSince($0.lastSeen) < 6 * 3600
+                                      && Set($0.features ?? []).isSuperset(of: TeamFeatures.thisMac) }) {
             let member = publishMember(folder)
             members.removeAll { $0.id == member.id }
             members.append(member)
@@ -447,10 +536,193 @@ final class TeamSyncService {
         next.teamName = scan.manifest?.name ?? folder.lastPathComponent
         next.lastSync = Date()
         next.error = writeError
+        next.filesMove = filesMayMove
+        next.waitingForFolders = TeamFeatures.waitingForFolders(members: members, me: me.id)
+        next.unreadableMembers = scan.unreadableMembers
+        next.moved = (try? Data(contentsOf: dataURL(folder, TeamMoveMarker.fileName, file: true))).flatMap { try? TeamCoding.decoder().decode(TeamMoveMarker.self, from: $0) }
         status = next
         updateCounts()
         if let first = lastAnnouncements.first {
             flowBar?.toast(lastAnnouncements.count == 1 ? first : "\(first) and \(lastAnnouncements.count - 1) more", symbol: "person.2", duration: 4)
+        }
+    }
+
+    // MARK: Folders
+
+    /// Folders in shared binders, kept the same on everyone's Macs through `_binders/folders`. Anyone in the binder may
+    /// change one, and the change made last wins. One deleted on a teammate's Mac goes here too, and what it held moves up
+    /// to where it was. A Binders before folders never reads these files.
+    private func syncFolders(_ root: URL, scan: FolderScan) -> Bool {
+        let binders = Dictionary(store.binders(includeArchived: true).map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        // Yours while you share it; a teammate's while they do (its card is in the team folder).
+        func shared(_ binderID: UUID) -> Bool {
+            guard let binder = binders[binderID] else { return false }
+            if binder.isTeamCopy { return !scan.bindersFolderExists || scan.binders[binderID.uuidString] != nil }
+            return binder.sharedWithTeam
+        }
+        // A library that can't be read now says nothing about what was deleted here.
+        guard let fetched = try? store.context.fetch(FetchDescriptor<FolderRecord>()) else { return false }
+        var local = Dictionary(fetched.map { ($0.id.uuidString, $0) }, uniquingKeysWith: { first, _ in first })
+        // A store with no folders at all never deletes several for the team at once (its library may have been replaced).
+        let missingHere = scan.folders.filter { local[$0.key] == nil && knownFolders[$0.key] != nil && knownFolders[$0.key]?.deleted != true
+                                                && $0.value.deletedAt == nil }.count
+        let deletesHere = !(local.isEmpty && missingHere > 1)
+        var changed = false
+
+        // A teammate's new folders, first all of them and then where each goes, as one may be inside another.
+        var arrived: [(FolderRecord, TeamFolderFile)] = []
+        for (id, file) in scan.folders where local[id] == nil && (knownFolders[id] == nil || knownFolders[id]?.deleted == true) && file.deletedAt == nil {
+            guard let uuid = UUID(uuidString: id), let binderID = UUID(uuidString: file.binderID), shared(binderID) else { continue }
+            let record = FolderRecord(name: FolderTree.cleanName(file.name) ?? "Folder", binderID: binderID)
+            record.id = uuid
+            record.position = file.position ?? 0
+            record.createdAt = file.createdAt
+            record.updatedAt = file.updatedAt
+            store.context.insert(record)
+            local[id] = record
+            arrived.append((record, file))
+            changed = true
+        }
+        for (record, file) in arrived {
+            place(record, under: file.parentID)
+            knownFolders[record.id.uuidString] = .init(hash: folderHash(record))
+            if record.parentID?.uuidString != file.parentID { writeFolder(root, record) }
+        }
+        let arrivedIDs = Set(arrived.map { $0.0.id.uuidString })
+
+        for (id, file) in scan.folders where !arrivedIDs.contains(id) {
+            guard let binderID = UUID(uuidString: file.binderID), shared(binderID) else { continue }
+            guard let record = local[id] else {
+                // Deleted here since the last sync: deleted for the team, with where its things went.
+                if knownFolders[id] != nil, knownFolders[id]?.deleted != true, file.deletedAt == nil, deletesHere {
+                    writeFolder(root, deleting: file)
+                    knownFolders[id] = .init(hash: TeamFolderFile.syncHash(binderID: file.binderID, parentID: file.parentID, name: file.name,
+                                                                           position: file.position ?? 0, deleted: true), deleted: true)
+                } else if file.deletedAt != nil {
+                    knownFolders[id] = .init(hash: file.syncHash, deleted: true)
+                }
+                continue
+            }
+            // A folder never leaves its binder.
+            guard record.binderID == binderID else { continue }
+            if let deleted = file.deletedAt, file.editedBy.id == me.id, record.updatedAt > deleted {
+                // Deleted here, then put back with Undo: it's back for the team too.
+                writeFolder(root, record)
+                continue
+            }
+            if file.deletedAt != nil {
+                // Deleted on a teammate's Mac: what it held moves up to where it was, here too.
+                store.moveUp(from: record.id, to: store.shownFolder(UUID(uuidString: file.parentID ?? ""), in: binderID))
+                store.context.delete(record)
+                local[id] = nil
+                knownFolders[id] = .init(hash: file.syncHash, deleted: true)
+                lastAnnouncements.append("\(file.editedBy.name) deleted the folder “\(file.name)”; what was in it moved up")
+                changed = true
+                continue
+            }
+            let localHash = folderHash(record)
+            switch SyncDecision.decide(local: localHash, remote: file.syncHash, lastSynced: knownFolders[id]?.hash) {
+            case .upToDate:
+                knownFolders[id] = .init(hash: localHash)
+            case .pushLocal:
+                writeFolder(root, record)
+            case .pullRemote:
+                take(file, into: record, root: root)
+                knownFolders[id] = .init(hash: folderHash(record))
+                changed = true
+            case .conflict:
+                // Changed on both sides: the change made last.
+                if file.updatedAt > record.updatedAt {
+                    take(file, into: record, root: root)
+                    knownFolders[id] = .init(hash: folderHash(record))
+                    changed = true
+                } else {
+                    writeFolder(root, record)
+                }
+            }
+        }
+
+        // A folder file still downloading, or half-written, isn't missing: this Mac's copy may be older than it.
+        for (id, record) in local where scan.folders[id] == nil && !scan.pendingFolderIDs.contains(id) {
+            if shared(record.binderID) {
+                // New here, or its file went without a deletion: written (again).
+                writeFolder(root, record)
+            } else if knownFolders[id] != nil {
+                knownFolders[id] = nil
+            }
+        }
+        // Your binders you've stopped sharing take their folders with them.
+        for (id, file) in scan.folders {
+            guard let binderID = UUID(uuidString: file.binderID), let binder = binders[binderID], !binder.isTeamCopy, !binder.sharedWithTeam else { continue }
+            try? FileManager.default.removeItem(at: dataURL(root, "folders").appendingPathComponent("\(id).json"))
+            knownFolders[id] = nil
+        }
+        // What's no longer anywhere is forgotten.
+        for id in knownFolders.keys where local[id] == nil && scan.folders[id] == nil && !scan.pendingFolderIDs.contains(id) { knownFolders[id] = nil }
+        return changed
+    }
+
+    /// The folders both sides last agreed on, kept in the sync state as they change, so a folder written this pass and
+    /// deleted before the next counts as deleted here.
+    private var knownFolders: [String: TeamSyncState.FolderEntry] {
+        get { state.folders ?? [:] }
+        set { state.folders = newValue }
+    }
+
+    /// What sync compares for a folder: where it is and what it's called.
+    private func folderHash(_ record: FolderRecord) -> String {
+        TeamFolderFile.syncHash(binderID: record.binderID.uuidString, parentID: record.parentID?.uuidString, name: record.name,
+                                position: record.position, deleted: false)
+    }
+
+    /// A teammate's change to a folder: its name, and where it is, unless that would put it inside itself (two Macs each
+    /// moving one into the other), when it stays and this Mac's word goes back to the team.
+    private func take(_ file: TeamFolderFile, into record: FolderRecord, root: URL) {
+        if let name = FolderTree.cleanName(file.name) { record.name = name }
+        record.position = file.position ?? 0
+        record.updatedAt = file.updatedAt
+        place(record, under: file.parentID)
+        if record.parentID?.uuidString != file.parentID { writeFolder(root, record) }
+    }
+
+    /// Puts a folder under the parent a file names, when that's in its binder and doesn't make a loop; at the top when the
+    /// file names none. A parent that hasn't arrived yet is kept, and shows as the top until it does.
+    private func place(_ record: FolderRecord, under parent: String?) {
+        guard let parent, let parentID = UUID(uuidString: parent) else {
+            record.parentID = nil
+            return
+        }
+        if let target = store.folder(parentID) {
+            guard target.binderID == record.binderID,
+                  FolderTree.canMove(record.id, into: parentID, in: store.folders(in: record.binderID).map(\.node)) else { return }
+        }
+        record.parentID = parentID
+    }
+
+    private func writeFolder(_ root: URL, _ record: FolderRecord) {
+        let file = TeamFolderFile(id: record.id.uuidString, binderID: record.binderID.uuidString, parentID: record.parentID?.uuidString,
+                                  name: record.name, position: record.position == 0 ? nil : record.position, editedBy: me,
+                                  createdAt: record.createdAt, updatedAt: record.updatedAt)
+        writeFolderFile(root, file)
+        knownFolders[file.id] = .init(hash: file.syncHash)
+    }
+
+    /// A folder deleted here, for the team: kept a while with when, so every Mac learns of it.
+    private func writeFolder(_ root: URL, deleting file: TeamFolderFile) {
+        var file = file
+        file.deletedAt = Date()
+        file.updatedAt = Date()
+        file.editedBy = me
+        writeFolderFile(root, file)
+    }
+
+    private func writeFolderFile(_ root: URL, _ file: TeamFolderFile) {
+        let directory = dataURL(root, "folders")
+        do {
+            try ensureDirectory(directory)
+            try TeamCoding.encoder().encode(file).write(to: directory.appendingPathComponent("\(file.id).json"), options: .atomic)
+        } catch {
+            writeError = "Couldn't write the folder “\(file.name)” to the team folder: \(error.localizedDescription)"
         }
     }
 
@@ -530,6 +802,8 @@ final class TeamSyncService {
         // When files can't be read or the folder looks emptied, a missing file isn't evidence of a deletion.
         let trustsMissing = scan.unreadableNotePaths.isEmpty && !(scan.notes.isEmpty && !state.notes.isEmpty)
         var changed = false
+        // Where each note's folder is, read once for this pass.
+        let folders = FolderLookup(store: store)
 
         for (id, note) in notes {
             let entry = state.notes[id]
@@ -626,18 +900,38 @@ final class TeamSyncService {
             let syncedUnmarked = note.editedBy != nil && entry.map { $0.hash != hash(of: note) && $0.hash == unmarkedHash } == true
             let localHash = syncedUnmarked ? unmarkedHash : hash(of: note)
             let remoteHash = hash(of: remoteItem)
+            // Its folder is merged on its own, so a move and an edit on two Macs at once are both kept.
+            let filed = folderSide(of: note, remoteItem, entry: entry, scan: scan)
+            if filed.take {
+                note.folderID = filed.agreed.isEmpty ? nil : UUID(uuidString: filed.agreed)
+                changed = true
+            }
             switch SyncDecision.decide(local: localHash, remote: remoteHash, lastSynced: entry?.hash) {
             case .upToDate:
-                state.notes[id] = .init(hash: localHash, path: remoteItem.path)
+                // A folder to write keeps the one last agreed until the write is done, so a write that has to wait
+                // (the file changed meanwhile) doesn't read next time as a teammate's move back.
+                state.notes[id] = .init(hash: localHash, path: remoteItem.path, folder: filed.push ? entry?.folder : filed.agreed)
                 if note.isTeamCopy { changed = fileBinder(of: note, from: remoteItem) || changed }
+                if filed.push {
+                    // Moved here: its front matter first. Its file moves on a later pass, with nothing else changing.
+                    writeNote(folder, note: note, existing: remoteItem)
+                } else if !note.isTeamCopy, filesMayMove {
+                    // Yours, once files may move: the path in its front matter brought up to date, then its file put in place.
+                    switch placement(remoteItem, note: note, root: folder, folders: folders) {
+                    case .stale: writeNote(folder, note: note, existing: remoteItem)
+                    case .move(let names): placeNote(folder, note: note, existing: remoteItem, names: names)
+                    case .placed: break
+                    }
+                }
             case .pushLocal:
                 writeNote(folder, note: note, existing: remoteItem)
             case .pullRemote:
                 take(remoteItem, into: note, keepingAgentEdit: syncedUnmarked)
                 note.updatedAt = remoteItem.note.updatedAt ?? Date()
-                state.notes[id] = .init(hash: remoteHash, path: remoteItem.path)
+                state.notes[id] = .init(hash: remoteHash, path: remoteItem.path, folder: filed.push ? entry?.folder : filed.agreed)
                 if note.isTeamCopy { _ = fileBinder(of: note, from: remoteItem) }
                 changed = true
+                if filed.push { writeNote(folder, note: note, existing: remoteItem) }
             case .conflict:
                 // Keep the team's version and save this Mac's edit as a private note so nothing is lost.
                 let mine = NoteItem(text: note.text)
@@ -649,7 +943,8 @@ final class TeamSyncService {
                 store.context.insert(mine)
                 take(remoteItem, into: note, keepingAgentEdit: true)
                 note.updatedAt = remoteItem.note.updatedAt ?? Date()
-                state.notes[id] = .init(hash: remoteHash, path: remoteItem.path)
+                state.notes[id] = .init(hash: remoteHash, path: remoteItem.path, folder: filed.push ? entry?.folder : filed.agreed)
+                if filed.push { writeNote(folder, note: note, existing: remoteItem) }
                 let editor = remoteItem.note.editedBy ?? remoteItem.note.author?.name ?? "a teammate"
                 lastAnnouncements.append("“\(note.title)” was also edited by \(editor); your version was saved as a private note")
                 changed = true
@@ -701,8 +996,11 @@ final class TeamSyncService {
             note.updatedAt = item.note.updatedAt ?? item.modified
             note.binderID = binderForRemote(id: item.note.binderID, name: item.note.binderName,
                                             author: item.note.author ?? TeamAuthor(id: "", name: "Team"), mine: mine)
+            // In its folder, which may not have arrived yet: it shows at the top until it does.
+            let filed = resolvedFolder(item.note.folderID ?? "", scan: scan)
+            note.folderID = filed.isEmpty ? nil : UUID(uuidString: filed)
             store.context.insert(note)
-            state.notes[id] = .init(hash: hash(of: item), path: item.path)
+            state.notes[id] = .init(hash: hash(of: item), path: item.path, folder: filed)
             if !mine { lastAnnouncements.append("\(item.note.author?.name ?? "A teammate") shared the note “\(note.title)”") }
             changed = true
         }
@@ -783,16 +1081,47 @@ final class TeamSyncService {
                 result.binders[file.id] = file
             }
         }
-        for url in listing(data.appendingPathComponent("members"), keys: []) where url.pathExtension == "json" {
+        for url in listing(data.appendingPathComponent("members"), keys: []) {
+            // One still downloading, or that doesn't read, may be a Binders that doesn't know folders.
+            if let real = placeholderTarget(url) {
+                if real.pathExtension == "json" { result.unreadableMembers += 1 }
+                continue
+            }
+            guard url.pathExtension == "json" else { continue }
             if let raw = try? Data(contentsOf: url), let member = try? TeamCoding.decoder().decode(TeamMember.self, from: raw) {
                 result.members.append(member)
+            } else {
+                result.unreadableMembers += 1
             }
+        }
+        // Folders: only `<id>.json`, so sync-provider conflict copies are ignored; a deletion is let go after 60 days. One
+        // still downloading, or half-written, is pending, not gone.
+        for url in listing(data.appendingPathComponent("folders"), keys: []) {
+            if let real = placeholderTarget(url) {
+                if real.pathExtension == "json" { result.pendingFolderIDs.insert(real.deletingPathExtension().lastPathComponent) }
+                continue
+            }
+            guard url.pathExtension == "json" else { continue }
+            let id = url.deletingPathExtension().lastPathComponent
+            guard let raw = try? Data(contentsOf: url), let file = try? TeamCoding.decoder().decode(TeamFolderFile.self, from: raw) else {
+                if UUID(uuidString: id) != nil { result.pendingFolderIDs.insert(id) }
+                continue
+            }
+            guard file.id == id else { continue }
+            if let deleted = file.deletedAt, Date().timeIntervalSince(deleted) > 60 * 86_400 {
+                try? fileManager.removeItem(at: url)
+                continue
+            }
+            result.folders[file.id] = file
         }
         result.manifest = (try? Data(contentsOf: data.appendingPathComponent("team.json")))
             .flatMap { try? TeamCoding.decoder().decode(TeamManifest.self, from: $0) }
 
         if request.indexMeetingMarkdown {
-            for url in listing(folder.appendingPathComponent(TeamFiles.meetingsFolder), keys: []) where url.pathExtension == "md" {
+            // In its folder's subfolder too.
+            let meetingsURL = folder.appendingPathComponent(TeamFiles.meetingsFolder)
+            let walk = fileManager.enumerator(at: meetingsURL, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
+            for case let url as URL in walk?.allObjects ?? [] where url.pathExtension == "md" {
                 guard let text = try? String(contentsOf: url, encoding: .utf8), let id = Frontmatter.parse(text).fields["binders_id"] else { continue }
                 let path = relative(url, to: folder)
                 if let existing = result.meetingMarkdownPaths[id], existing.count <= path.count { continue }
@@ -848,7 +1177,34 @@ final class TeamSyncService {
         // Sync-provider conflict copies share an id: keep the file this Mac tracks (or the shortest name); each other copy becomes its own note.
         var trackedPaths: [String: String] = [:]
         for (path, id) in request.notePathIDs { trackedPaths[id] = path }
-        for (id, group) in Dictionary(grouping: candidates, by: { $0.note.id ?? "" }) {
+        for (id, all) in Dictionary(grouping: candidates, by: { $0.note.id ?? "" }) {
+            // A copy set aside before, that nobody has changed since, is set aside again, even once the note has moved on.
+            var group = all
+            if all.count > 1 {
+                let live = all.filter { item in
+                    guard let stray = request.strays[item.path], stray.id == id, abs(stray.modified.timeIntervalSince(item.modified)) < 0.001 else { return true }
+                    result.strays[item.path] = stray
+                    return false
+                }
+                if !live.isEmpty { group = live } else { result.strays = result.strays.filter { !all.map(\.path).contains($0.key) } }
+            }
+            if group.count == 1 {
+                result.notes[id] = group[0]
+                continue
+            }
+            // The same note in two places, word for word: a move into a folder that a drive passes on as a copy, then a
+            // delete. It stays one note. Every Mac keeps the same file: the one in the subfolder its front matter names,
+            // else the shortest path. The others are set aside, not made into notes, for the drive to take away.
+            if Set(group.map(noteContent)).count == 1 {
+                let kept = group.min { lhs, rhs in
+                    let left = placedByItsFolder(lhs), right = placedByItsFolder(rhs)
+                    if left != right { return left }
+                    return lhs.path.count != rhs.path.count ? lhs.path.count < rhs.path.count : lhs.path < rhs.path
+                } ?? group[0]
+                result.notes[id] = kept
+                for copy in group where copy.path != kept.path { result.strays[copy.path] = StrayCopy(id: id, modified: copy.modified) }
+                continue
+            }
             let ordered = group.sorted { lhs, rhs in
                 let lhsTracked = lhs.path == trackedPaths[id]
                 let rhsTracked = rhs.path == trackedPaths[id]
@@ -869,6 +1225,18 @@ final class TeamSyncService {
             }
         }
         return result
+    }
+
+    /// A note's file in the subfolder of Notes its front matter's folder path names (Notes itself for none).
+    nonisolated private static func placedByItsFolder(_ item: RemoteNote) -> Bool {
+        let wanted = item.note.folderID?.isEmpty == false ? TeamFiles.notesDirectory(FolderTree.components(item.note.folderPath ?? "")) : TeamFiles.notesFolder
+        let directory = (item.path as NSString).deletingLastPathComponent
+        return directory.precomposedStringWithCanonicalMapping.lowercased() == wanted.precomposedStringWithCanonicalMapping.lowercased()
+    }
+
+    /// What a note file holds that sync compares (its words, properties and whose words they are), as `hash(of:)`.
+    nonisolated private static func noteContent(_ item: RemoteNote) -> String {
+        TeamFiles.noteHash(item.note.body + TeamNoteMark(lines: item.note.extraFrontmatter).hashSuffix, item.note.properties)
     }
 
     nonisolated private static func listing(_ directory: URL, keys: Set<URLResourceKey>) -> [URL] {
@@ -912,8 +1280,12 @@ final class TeamSyncService {
         let meetingID = record.id
         var hasher = Hasher()
         let binder = store.binder(record.binderID)
+        // The folder it's in, and that folder's path, which a rename or a move changes.
+        let shownFolder = store.shownFolder(record.folderID, in: record.binderID)
+        let folderPath = store.folderPath(shownFolder)
         for part in [record.title, record.summary, record.userNotes, record.speakerNamesJSON, record.attendees.joined(separator: "\u{1}"),
-                     record.appName ?? "", record.templateID, me.id, me.name, binder?.id.uuidString ?? "", binder?.name ?? ""] {
+                     record.appName ?? "", record.templateID, me.id, me.name, binder?.id.uuidString ?? "", binder?.name ?? "",
+                     shownFolder?.uuidString ?? "", folderPath] {
             hasher.combine(part)
         }
         hasher.combine(record.duration)
@@ -927,7 +1299,8 @@ final class TeamSyncService {
                                    duration: record.duration, appName: record.appName, attendees: record.attendees,
                                    templateID: record.templateID, summary: record.summary, notes: record.userNotes,
                                    speakerNames: record.speakerNames, segments: store.segments(for: meetingID),
-                                   binderID: binder?.id.uuidString, binderName: binder?.name)
+                                   binderID: binder?.id.uuidString, binderName: binder?.name,
+                                   folderID: shownFolder?.uuidString, folderPath: folderPath.isEmpty ? nil : folderPath)
         let hash = TeamFiles.contentHash(file)
         localCache[key] = (fingerprint, file, hash)
         return (file, hash)
@@ -954,6 +1327,8 @@ final class TeamSyncService {
         record.status = "ready"
         record.errorMessage = nil
         record.binderID = binderForRemote(id: file.binderID, name: file.binderName, author: file.author, mine: !record.isTeamCopy)
+        // In the folder its author filed it in, which may not have arrived yet; at the top in files from before folders.
+        record.folderID = file.folderID.flatMap(UUID.init(uuidString:))
         store.replaceSegments(for: record.id, with: file.segments)
     }
 
@@ -1030,7 +1405,15 @@ final class TeamSyncService {
         guard scan.bindersFolderExists else { return }
         for binder in binders where binder.isTeamCopy && scan.binders[binder.id.uuidString] == nil {
             let counts = store.counts(in: binder.id)
-            if counts.meetings == 0, counts.notes == 0, store.conversationCount(in: binder.id, includingTrivial: true) == 0 { store.context.delete(binder) }
+            if counts.meetings == 0, counts.notes == 0, store.conversationCount(in: binder.id, includingTrivial: true) == 0 {
+                // Its folders go with it, and are forgotten: gone this way, they weren't deleted here, and a binder that
+                // comes back brings them back.
+                for folder in store.folders(in: binder.id) {
+                    knownFolders[folder.id.uuidString] = nil
+                    store.context.delete(folder)
+                }
+                store.context.delete(binder)
+            }
         }
     }
 
@@ -1041,13 +1424,20 @@ final class TeamSyncService {
             let dataFolder = dataURL(folder, "meetings")
             try ensureDirectory(dataFolder)
             try TeamCoding.encoder().encode(file).write(to: dataFolder.appendingPathComponent("\(file.id).json"), options: .atomic)
-            let markdownFolder = folder.appendingPathComponent(TeamFiles.meetingsFolder)
+            // In its folder's subfolder of Meetings: only its author writes it, and no Mac reads another's copy, so it moves
+            // with the meeting at once.
+            let markdownFolder = folder.appendingPathComponent(TeamFiles.meetingsDirectory(FolderTree.components(file.folderPath ?? "")))
             try ensureDirectory(markdownFolder)
             let markdownURL = uniqueURL(in: markdownFolder, fileName: TeamFiles.safeFileName(file.title, date: file.createdAt),
                                         previousPath: markdownPath, root: folder)
             try TeamFiles.meetingMarkdown(file).write(to: markdownURL, atomically: true, encoding: .utf8)
             let path = Self.relative(markdownURL, to: folder)
-            if let markdownPath, markdownPath != path { removeFile(folder.appendingPathComponent(markdownPath), ifItBelongsTo: file.id) }
+            if let markdownPath, markdownPath != path {
+                removeFile(folder.appendingPathComponent(markdownPath), ifItBelongsTo: file.id)
+                // Out of a folder's subfolder: one left with nothing in it goes.
+                removeIfEmpty(folder.appendingPathComponent(markdownPath).deletingLastPathComponent(),
+                              within: folder.appendingPathComponent(TeamFiles.meetingsFolder))
+            }
             state.meetings[file.id] = .init(hash: TeamFiles.contentHash(file), path: path)
             removeTombstone(folder, id: file.id)
         } catch {
@@ -1073,11 +1463,18 @@ final class TeamSyncService {
         }
     }
 
+    /// Writes one of the team's notes: the file it was read from, where it is, or a new one. Its folder goes in its front
+    /// matter; a new file is written in its folder's subfolder of Notes. An existing file never moves while it's written:
+    /// `placeNote` moves it on a later pass, once every member's Binders knows folders.
     private func writeNote(_ folder: URL, note: NoteItem, existing: RemoteNote?) {
         let fileManager = FileManager.default
-        if let existing, let current = (try? fileManager.attributesOfItem(atPath: existing.url.path))?[.modificationDate] as? Date,
-           abs(current.timeIntervalSince(existing.modified)) >= 0.001 {
-            return  // Changed since it was read (e.g. in Obsidian); the next pass merges it.
+        if let existing {
+            // Gone since it was read (moved, or deleted, on another Mac): the next pass finds where it is.
+            guard fileManager.fileExists(atPath: existing.url.path) else { return }
+            if let current = (try? fileManager.attributesOfItem(atPath: existing.url.path))?[.modificationDate] as? Date,
+               abs(current.timeIntervalSince(existing.modified)) >= 0.001 {
+                return  // Changed since it was read (e.g. in Obsidian); the next pass merges it.
+            }
         }
         let id = note.id.uuidString
         let author = existing?.note.author
@@ -1085,21 +1482,120 @@ final class TeamSyncService {
         let binder = store.binder(note.binderID)
         // Whose words it holds goes with it: the agent that made it, and the one that changed it since.
         let extra = TeamNoteMark.removing(from: existing?.note.extraFrontmatter ?? []) + Self.mark(of: note).lines
+        // Its folder: the id, and the path for whoever reads the file. One that has been in a folder says "" once it's at
+        // the top, so a file a Binders before folders wrote from scratch, which says nothing, isn't taken for a move.
+        let shown = store.shownFolder(note.folderID, in: note.binderID)
+        let names = store.folderNames(shown)
+        let wasFiled = existing?.note.folderID != nil || !(state.notes[id]?.folder ?? "").isEmpty
+        let folderLine = note.folderID?.uuidString ?? (wasFiled ? "" : nil)
+        let folderPath = shown != nil ? names.joined(separator: FolderTree.separator) : (note.folderID != nil ? existing?.note.folderPath : nil)
         let teamNote = TeamNote(id: id, author: author, editedBy: author.id == me.id ? nil : me.name,
                                 createdAt: existing?.note.createdAt ?? note.createdAt, updatedAt: Date(), body: note.text,
                                 extraFrontmatter: extra,
                                 binderID: binder?.id.uuidString ?? existing?.note.binderID, binderName: binder?.name ?? existing?.note.binderName,
-                                properties: note.properties)
+                                properties: note.properties, folderID: folderLine, folderPath: folderPath)
         do {
-            let notesFolder = folder.appendingPathComponent(TeamFiles.notesFolder)
-            try ensureDirectory(notesFolder)
-            let url = existing?.url ?? uniqueURL(in: notesFolder, fileName: TeamFiles.safeFileName(note.title), previousPath: nil, root: folder)
+            let url: URL
+            if let existing {
+                url = existing.url
+            } else {
+                // A new file goes in its folder's subfolder at once, which a Binders before folders reads as well; one
+                // whose folder hasn't arrived here goes in Notes.
+                let directory = folder.appendingPathComponent(TeamFiles.notesDirectory(note.folderID == nil || shown != nil ? names : []))
+                try ensureDirectory(directory)
+                url = uniqueURL(in: directory, fileName: TeamFiles.safeFileName(note.title), previousPath: nil, root: folder)
+            }
             try TeamFiles.noteMarkdown(teamNote).write(to: url, atomically: true, encoding: .utf8)
-            state.notes[id] = .init(hash: hash(of: note), path: Self.relative(url, to: folder))
+            state.notes[id] = .init(hash: hash(of: note), path: Self.relative(url, to: folder), folder: note.folderID?.uuidString ?? "")
             removeTombstone(folder, id: id)
         } catch {
             writeError = "Couldn't write “\(note.title)” to the team folder: \(error.localizedDescription)"
         }
+    }
+
+    /// Moves one of your notes' files into its folder's subfolder, as it is: nothing in it changes on this pass, so a drive
+    /// that passes the move on as a copy and then a delete leaves two files with the same words, which every Mac takes
+    /// for one note. Only while every member's Binders knows folders. The files it uses are copied next to it.
+    private func placeNote(_ folder: URL, note: NoteItem, existing: RemoteNote, names: [String]) {
+        let fileManager = FileManager.default
+        guard filesMayMove, fileManager.fileExists(atPath: existing.url.path),
+              let current = (try? fileManager.attributesOfItem(atPath: existing.url.path))?[.modificationDate] as? Date,
+              abs(current.timeIntervalSince(existing.modified)) < 0.001 else { return }
+        let directory = folder.appendingPathComponent(TeamFiles.notesDirectory(names))
+        do {
+            try ensureDirectory(directory)
+            let moved = uniqueURL(in: directory, fileName: existing.url.lastPathComponent, previousPath: nil, root: folder)
+            // One item moving, which a drive passes on as a move.
+            try fileManager.moveItem(at: existing.url, to: moved)
+            Attachments.copyForMove(note.text, from: existing.url.deletingLastPathComponent(), to: directory)
+            removeIfEmpty(existing.url.deletingLastPathComponent(), within: folder.appendingPathComponent(TeamFiles.notesFolder))
+            state.notes[note.id.uuidString]?.path = Self.relative(moved, to: folder)
+        } catch {
+            // Moved on another Mac first, or a name taken meanwhile: the next pass looks again.
+            Log.app.notice("Team sync: a note's file didn't move into its folder this time: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Where a note's folder stands between this Mac and the team folder: as agreed, moved by a teammate (take theirs:
+    /// `take`), or moved here (write it: `push`). A file that says nothing, for a note last agreed to be in a folder, was
+    /// written from scratch by a Binders that doesn't know folders: not a move. A folder deleted on a teammate's Mac
+    /// reads as where it was, so only the Mac that deleted it writes the notes that were in it.
+    private func folderSide(of note: NoteItem, _ remote: RemoteNote, entry: TeamSyncState.Entry?, scan: FolderScan) -> (agreed: String, take: Bool, push: Bool) {
+        let last = resolvedFolder(entry?.folder ?? "", scan: scan)
+        let theirs = remote.note.folderID.map { resolvedFolder($0, scan: scan) } ?? last
+        let mine = note.folderID?.uuidString ?? ""
+        // Its folder line gone from the file: written back, so a Mac reading the file for the first time files it too.
+        if remote.note.folderID == nil, !last.isEmpty, mine == last { return (mine, false, true) }
+        if mine == theirs { return (mine, false, false) }
+        if mine == last { return (theirs, true, false) }
+        if theirs == last { return (mine, false, true) }
+        // Moved on both: the team's.
+        return (theirs, true, false)
+    }
+
+    /// A folder id as it stands: one deleted on a teammate's Mac is where it was, up to a folder that's still there or
+    /// the top ("").
+    private func resolvedFolder(_ id: String, scan: FolderScan) -> String {
+        var current = id.trimmingCharacters(in: .whitespaces)
+        var seen: Set<String> = []
+        while !current.isEmpty, let file = scan.folders[current], file.deletedAt != nil, seen.insert(current).inserted {
+            current = file.parentID ?? ""
+        }
+        return current
+    }
+
+    /// Where one of your notes' files stands, once files may move: its front matter names the folder's old path (written
+    /// first), it isn't in its folder's subfolder (moved, as it is), or it's in place. A folder that hasn't arrived here
+    /// leaves it be.
+    private enum Placement {
+        case placed, stale
+        case move([String])
+    }
+
+    private func placement(_ item: RemoteNote, note: NoteItem, root: URL, folders: FolderLookup) -> Placement {
+        let shown = folders.shown(note.folderID, in: note.binderID)
+        guard note.folderID == nil || shown != nil else { return .placed }
+        let names = folders.names(shown, in: note.binderID)
+        if shown != nil, (item.note.folderPath ?? "") != names.joined(separator: FolderTree.separator) { return .stale }
+        return sameDirectory(item.url.deletingLastPathComponent(), TeamFiles.notesDirectory(names), root: root) ? .placed : .move(names)
+    }
+
+    /// Whether a file's folder is the one wanted (relative to the team folder), as a Mac's disk sees names: case and
+    /// accents written either way are the same.
+    private func sameDirectory(_ directory: URL, _ wanted: String, root: URL) -> Bool {
+        func key(_ path: String) -> String { path.precomposedStringWithCanonicalMapping.lowercased() }
+        return key(Self.relative(directory, to: root)) == key(wanted)
+    }
+
+    /// A subfolder of Notes (or Meetings) left with nothing in it once its last file moved out. Only ever an empty one:
+    /// `rmdir` fails on a folder something arrived in meanwhile.
+    private func removeIfEmpty(_ directory: URL, within root: URL) {
+        let manager = FileManager.default
+        guard directory.resolvingSymlinksInPath().path.hasPrefix(root.resolvingSymlinksInPath().path + "/"),
+              let names = try? manager.contentsOfDirectory(atPath: directory.path),
+              names.allSatisfy({ $0 == ".DS_Store" }) else { return }
+        if !names.isEmpty { try? manager.removeItem(at: directory.appendingPathComponent(".DS_Store")) }
+        _ = directory.withUnsafeFileSystemRepresentation { path in path.map { rmdir($0) } }
     }
 
     /// Moves a teammate's note into the binder their file names; true when it moved.
@@ -1139,7 +1635,8 @@ final class TeamSyncService {
 
     private func publishMember(_ folder: URL) -> TeamMember {
         let directory = dataURL(folder, "members")
-        let member = TeamMember(id: me.id, name: me.name, lastSeen: Date())
+        // What this build knows, so teammates' Macs move note files into folders only once everyone's does.
+        let member = TeamMember(id: me.id, name: me.name, lastSeen: Date(), features: TeamFeatures.thisMac)
         try? ensureDirectory(directory)
         try? TeamCoding.encoder().encode(member).write(to: directory.appendingPathComponent("\(me.id).json"), options: .atomic)
         return member
@@ -1162,8 +1659,9 @@ final class TeamSyncService {
         return candidate
     }
 
-    private func dataURL(_ folder: URL, _ subfolder: String) -> URL {
-        folder.appendingPathComponent(TeamFiles.dataFolder).appendingPathComponent(subfolder)
+    private func dataURL(_ folder: URL, _ subfolder: String, file: Bool = false) -> URL {
+        let data = folder.appendingPathComponent(TeamFiles.dataFolder)
+        return file ? data.appendingPathComponent(subfolder, isDirectory: false) : data.appendingPathComponent(subfolder)
     }
 
     private func updateCounts() {

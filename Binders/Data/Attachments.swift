@@ -118,4 +118,20 @@ enum Attachments {
             }
         }
     }
+
+    /// A note moving into another folder of the team folder: the files it uses go next to its new place too. They stay
+    /// where they were as well, as another note may use them.
+    static func copyForMove(_ text: String, from old: URL, to new: URL) {
+        let names = MarkdownMedia.attachmentNames(in: text)
+        guard !names.isEmpty else { return }
+        let manager = FileManager.default
+        let from = old.appendingPathComponent(MarkdownMedia.folder, isDirectory: true)
+        let to = new.appendingPathComponent(MarkdownMedia.folder, isDirectory: true)
+        for name in names {
+            let source = from.appendingPathComponent(name), target = to.appendingPathComponent(name)
+            guard manager.fileExists(atPath: source.path), !manager.fileExists(atPath: target.path) else { continue }
+            try? manager.createDirectory(at: to, withIntermediateDirectories: true)
+            try? manager.copyItem(at: source, to: target)
+        }
+    }
 }

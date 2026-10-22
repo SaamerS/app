@@ -46,6 +46,22 @@ public enum LinkFeatures {
     /// sends `to` with the comment: the agent it asked about. The Mac wakes on its comment only for that agent while it
     /// holds the card; a comment from a phone that doesn't list it stays on the card, and the card says Wake Now sends it.
     public static let commentsAskFirst = "commentsAskFirst"
+    /// A Mac with folders inside binders: `list_folders`, `folder` on `list_notes` ("/" for the top, or a folder's id)
+    /// and on `add_note` (a folder's id; one that's gone puts the note at the top), and `folder`/`folder_id` on notes.
+    /// A phone uses them only with a Mac that lists this; one that doesn't (iPhone 2.0) never passes `folder`, and
+    /// `list_notes` without it lists every note in the binder, as before. This phone lists it too.
+    public static let folders = "folders"
+    /// Distill (lane DS1): a Mac that answers `note_progress` (a Distill note's Work bar, panel and report, or a binder's
+    /// Work list) and says `distill: true` on get_note and list_notes for a note with Distill on; and a phone that shows
+    /// them, read-only. A phone shows none of it for a Mac that doesn't list it; an older phone never asks, and its
+    /// decoders leave the new keys be.
+    public static let distill = "distill"
+    /// Teammates' agents (lane DB2): a Mac sharing binders through a team database puts its teammates' agents in
+    /// list_agents, after yours, for a phone that lists this too: each with `teammate`, `owner`, `sends_to`, the shared
+    /// `binders` it takes cards from, and a fingerprint of those, so the phone asks once, naming its owner and who it sends
+    /// cards to, before it gives one a card ("Give cards to Claude Code (Dana)? It sends them to Anthropic."), and again when
+    /// that changes. An older phone never sees them; a phone shows them only from a Mac that lists this.
+    public static let teamAgents = "teamAgents"
 
     public static func suggestion(_ kind: ConversationSuggestion.Kind) -> String { "suggestion:" + kind.rawValue }
     public static func notification(_ method: String) -> String { "notification:" + method }
@@ -68,8 +84,11 @@ public enum LinkFeatures {
     /// `auto_left_out`), and puts `handedOver`, `waiting`, `late` and `stop` in its moments' outcomes; and that it vouches
     /// for a capture in which it heard only you (`ConversationPayload.soloFeature`): it sends the capture's mode and vouch,
     /// a moment's `fromTranscript` and `uncued`, Stop All, Not Only Me and a capture's mode, and reads `found`, `soloLine`,
-    /// `joins` and list_agents' `solo_start`, `solo` and `auto_fingerprint`.
+    /// `joins` and list_agents' `solo_start`, `solo` and `auto_fingerprint`; and that it shows a binder's folders
+    /// (`folders`).
     public static let thisPhone: [String] = ConversationSuggestion.Kind.allCases.map(suggestion)
         + [notification(changed), notification(askProgressMethod), notification(approvalMethod), notification(addressesMethod)]
-        + [workStreamsDoing, addresses, MomentPayload.agreedFeature, commentsAskFirst, MomentPayload.autoFeature, ConversationPayload.soloFeature]
+        + [workStreamsDoing, addresses, MomentPayload.agreedFeature, commentsAskFirst, MomentPayload.autoFeature, ConversationPayload.soloFeature,
+           folders]
+        + [distill, teamAgents]
 }

@@ -36,7 +36,7 @@ enum AgentConsents {
     /// The one going by `name`, matched as the Mac matches names: exactly, whatever the case.
     static func agent(named name: String, connection: MacConnection? = nil) -> AgentList.Agent? {
         let wanted = key(name)
-        return agents(connection)?.agents.first { key($0.name) == wanted }
+        return agents(connection)?.all.first { key($0.name) == wanted }
     }
 
     /// Asks the Mac again who they are, so what's said before a card goes is what's set up now.
@@ -89,7 +89,11 @@ enum AgentConsents {
     /// What goes to an agent with a card, and where, said before the first card goes to it: who the agent hands it to for
     /// its work too, when the Mac says (AgentConsent.disclosure).
     static func disclosure(_ agent: AgentList.Agent) -> String {
-        AgentConsent.disclosure(name: agent.name, wakes: agent.wakes, sendsTo: agent.sendsTo, vendor: agent.vendor, addsContext: agent.addsContext,
+        // A teammate's agent (lane DB2): who it belongs to and who it sends cards to, as its owner says.
+        if agent.isTeammates {
+            return TeamAgentConsent.message(owner: agent.owner ?? "a teammate", sendsTo: agent.sendsTo, headless: agent.headless == true)
+        }
+        return AgentConsent.disclosure(name: agent.name, wakes: agent.wakes, sendsTo: agent.sendsTo, vendor: agent.vendor, addsContext: agent.addsContext,
                                 contextFrom: agent.contextFrom, mayAct: agent.mayAct, openSession: agent.openSession, startsOnItsOwn: agent.autoStart,
                                 autoModeStart: agent.autoModeStart, soloStart: agent.soloStart)
     }

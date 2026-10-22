@@ -44,8 +44,27 @@ enum InboxCommands {
         return .failure("A correction from an agent goes through correct_knowledge, which keeps it as the agent's until the user makes it their own. It can't go into, or out of, a note that isn't the agent's.")
     }
 
+    /// Who a write to a note is by, for its history: the agent named in the request (yours: it came through this Mac),
+    /// else you, from the iPhone.
+    static func historyAuthor(_ request: InboxRequest) -> NoteAuthor {
+        guard request.fields["actor_kind"] == BoardActor.Kind.agent.rawValue else { return .you }
+        let name = (request.fields["actor"] ?? "").trimmed
+        return .agent(name.isEmpty ? "An AI agent" : name)
+    }
+
     /// An agent changing a note that isn't its own marks it as that agent's edit, with when, until the user makes it
     /// theirs: the note says so, and answers and corrections leave it out. Returns what the agent hears about that.
+    /// A note shared through a team database written to here: the change goes to the team at once, as whoever the request
+    /// names, an agent's marked as that agent's (lane DB3).
+    static func teamCapture(_ note: NoteItem, _ request: InboxRequest) {
+        let author = historyAuthor(request)
+        if author.isAgent {
+            TeamNotes.current?.captured(note, byAgent: author.name)
+        } else {
+            TeamNotes.current?.capture(note, by: .person)
+        }
+    }
+
     static func markAgentEdit(_ note: NoteItem, _ request: InboxRequest) -> String {
         guard request.fields["actor_kind"] == BoardActor.Kind.agent.rawValue else { return "" }
         let actor = (request.fields["actor"] ?? "").trimmed
@@ -77,14 +96,52 @@ enum InboxCommands {
         case "add_note":
             let text = field("text")
             guard !text.isEmpty else { return .failure("text is required") }
-            guard let binder = binder(named: field("binder")) else { return .failure(noBinder(field("binder"))) }
+            // A folder named by its id decides the binder, so a note the phone kept while a binder was renamed still finds
+            // it; one that's gone puts the note at the top of the binder. A path is made if it's missing.
+            let folderField = field("folder")
+            var folder = UUID(uuidString: folderField).flatMap { store.folder($0) }
+            let folderGone = UUID(uuidString: folderField) != nil && folder == nil
+            // A binder named that's there and isn't the folder's: said, rather than either one picked.
+            if let folder, !field("binder").isEmpty, let named = binder(named: field("binder")), named.id != folder.binderID {
+                return .failure("That folder is in \(store.binder(folder.binderID)?.name ?? "another binder"), not \(named.name). Give one or the other.")
+            }
+            guard let binder = folder.flatMap({ store.binder($0.binderID) }) ?? binder(named: field("binder")) else { return .failure(noBinder(field("binder"))) }
+            if folder == nil, !folderGone, !FolderTree.components(folderField).isEmpty {
+                folder = store.ensureFolder(path: FolderTree.components(folderField), in: binder.id)
+            }
             let note = NoteItem(text: text)
             note.binderID = binder.id
             note.sharedWithTeam = binder.sharedWithTeam
+            note.folderID = folder?.id
             // An agent's note says so.
             if field("actor_kind") == BoardActor.Kind.agent.rawValue { note.madeBy = field("actor").isEmpty ? "An AI agent" : field("actor") }
             store.insert(note)
-            return InboxResult(ok: true, id: note.id.uuidString, message: "Note “\(note.title)” added to \(binder.name)")
+            if folderGone {
+                return InboxResult(ok: true, id: note.id.uuidString, message: "Note “\(note.title)” added to the top of \(binder.name): the folder it was for is gone")
+            }
+            return InboxResult(ok: true, id: note.id.uuidString, message: "Note “\(note.title)” added to \(FolderPrompts.place(binderID: binder.id, folder: folder?.id))")
+
+        case "create_folder":
+            let path = FolderTree.components(field("name"))
+            guard !path.isEmpty else { return .failure("name is required") }
+            guard let binder = binder(named: field("binder")) else { return .failure(noBinder(field("binder"))) }
+            var parent: UUID?
+            if !FolderTree.components(field("parent")).isEmpty {
+                let named = field("parent")
+                parent = UUID(uuidString: named).flatMap { store.folder($0)?.binderID == binder.id ? $0 : nil }
+                    ?? FolderTree.resolve(FolderTree.components(named), in: store.folderNodes(in: binder.id))
+                guard parent != nil else { return .failure("No folder “\(named)” in \(binder.name). list_folders shows them.") }
+            }
+            let existed = FolderTree.resolve(path, in: store.folderNodes(in: binder.id), from: parent) != nil
+            guard let made = store.ensureFolder(path: path, in: binder.id, from: parent) else { return .failure(Store.refusedMessage) }
+            let place = FolderPrompts.place(binderID: binder.id, folder: made.id)
+            return InboxResult(ok: true, id: made.id.uuidString, message: existed ? "\(place) was already there" : "Made the folder \(place)")
+
+        case "move_item":
+            return field("ids").isEmpty ? moveItem(field: field) : moveItems(field: field)
+
+        case "rename_folder":
+            return renameFolder(field: field, controller: controller)
 
         case "append_to_note":
             guard let id = UUID(uuidString: field("id")) else { return .failure("id must be a note id") }
@@ -95,11 +152,12 @@ enum InboxCommands {
             }
             let appended = note.text.trimmingCharacters(in: .whitespacesAndNewlines) + "\n\n" + text
             if let refused = agentCorrecting(note, to: appended, request) { return refused }
-            NoteHistory.willChange(note, to: appended, always: true)
+            NoteHistory.willChange(note, to: appended, always: true, by: historyAuthor(request))
             note.text = appended
             note.updatedAt = Date()
             let marked = markAgentEdit(note, request)
             store.save()
+            teamCapture(note, request)
             return InboxResult(ok: true, id: note.id.uuidString, message: "Appended to “\(note.title)”.\(marked)")
 
         case "update_note":
@@ -121,12 +179,13 @@ enum InboxCommands {
             guard updated != note.text else { return InboxResult(ok: true, id: note.id.uuidString, message: "“\(note.title)” already says that") }
             if let refused = agentCorrecting(note, to: updated, request) { return refused }
             // What it said before stays in its history, so the change can be undone.
-            NoteHistory.willChange(note, to: updated, always: true)
+            NoteHistory.willChange(note, to: updated, always: true, by: historyAuthor(request))
             let oldTitle = MarkdownSyntax.noteTitle(note.text)
             note.text = updated
             note.updatedAt = Date()
             let marked = markAgentEdit(note, request)
             store.save()
+            teamCapture(note, request)
             // A new title: links to the old one follow it.
             let renamed = oldTitle.isEmpty ? nil : LinkTargets.renameNote(note.id, from: oldTitle, to: note.title, itself: true)
             let links = renamed.map { $0.links > 0 ? ". Links that follow the new title: \($0.counted)" : "" } ?? ""
@@ -148,10 +207,11 @@ enum InboxCommands {
                     // An agent fixes only a note of its own: yours, or another agent's, stays as written, with the correction beside it.
                     if !byAgent || (note.madeBy != nil && note.madeBy == field("actor")),
                        let updated = KnowledgeCorrections.fixing(note.text, wrong: correction.wrong, right: correction.right) {
-                        NoteHistory.willChange(note, to: updated, always: true)
+                        NoteHistory.willChange(note, to: updated, always: true, by: historyAuthor(request))
                         note.text = updated
                         note.updatedAt = Date()
                         fixed = true
+                        teamCapture(note, request)
                     }
                 } else if let meeting = (try? store.context.fetch(FetchDescriptor<MeetingRecord>(predicate: #Predicate { $0.id == id })))?.first {
                     source = (meeting.title, meeting.binderID)
@@ -259,7 +319,7 @@ enum InboxCommands {
             return await createTask(field: field, controller: controller)
 
         case "claim_task", "update_task", "ask_on_task", "comment_task", "release_task", "complete_task", "report_run", "request_approval":
-            return boardAction(request.action, fields: request.fields, field: field, controller: controller)
+            return await boardAction(request.action, fields: request.fields, field: field, controller: controller)
 
         case "add_to_calendar":
             let text = field("text")
@@ -267,9 +327,125 @@ enum InboxCommands {
             let result = await controller.addToCalendar(described: text)
             return result.added ? InboxResult(ok: true, message: result.line) : .failure(result.line)
 
+        case "distill_note", "propose_work_items":
+            // Lane DS1: a proposal for a person to review; cards only where the binder lets agents place them.
+            return await DistillCommands.perform(request, controller: controller)
+
         default:
             return .failure("Unknown action \(request.action)")
         }
+    }
+
+    /// What move_item can move, by its id: the note, meeting, capture or folder, its binder, and its title.
+    private static func movable(_ id: UUID) -> (item: DraggedItem, binderID: UUID?, title: String)? {
+        let store = Store.shared
+        if let note = store.note(id) { return (.note(id), note.binderID, note.title) }
+        if let meeting = (try? store.context.fetch(FetchDescriptor<MeetingRecord>(predicate: #Predicate { $0.id == id })))?.first {
+            return (.meeting(id), meeting.binderID, meeting.title)
+        }
+        if let folder = store.folder(id) { return (.folder(id), folder.binderID, folder.name) }
+        return nil
+    }
+
+    private static let nothingHasThatID = "Nothing has that id. list_notes, list_meetings and list_folders give them."
+
+    /// move_item: a note, meeting, capture or folder into a folder in its binder (a path is made if it's missing), or to
+    /// its top ("/").
+    private static func moveItem(field: (String) -> String) -> InboxResult {
+        let store = Store.shared
+        guard let id = UUID(uuidString: field("id")) else { return .failure("id must be the id of a note, meeting, capture or folder") }
+        guard let (item, binderID, title) = movable(id) else { return .failure(nothingHasThatID) }
+        guard let binderID, let binder = store.binder(binderID) else { return .failure("That isn't in a binder yet. Try again in a moment.") }
+        let to = field("to")
+        var target: UUID?
+        if let folderID = UUID(uuidString: to) {
+            guard let folder = store.folder(folderID) else { return .failure("No folder with that id. list_folders shows them.") }
+            guard folder.binderID == binderID else { return .failure("That folder is in another binder: move_item moves within the binder “\(title)” is in.") }
+            target = folderID
+        } else if !FolderTree.components(to).isEmpty {
+            target = store.ensureFolder(path: FolderTree.components(to), in: binderID)?.id
+        }
+        do {
+            try FolderMoves.move(item, to: target, in: binderID)
+        } catch {
+            return .failure(error.localizedDescription)
+        }
+        store.save()
+        return InboxResult(ok: true, id: id.uuidString, message: target == nil ? "Moved “\(title)” to the top of \(binder.name)"
+                           : "Moved “\(title)” to \(FolderPrompts.place(binderID: binderID, folder: target))")
+    }
+
+    /// move_item with ids: several things into the one folder, each said moved or not, and why. The folder is the one `to`
+    /// names, by its id, or by its path in the binder of the first one that's there (made if it's missing); "/" is the top
+    /// of each one's own binder. One in another binder than the folder's stays put, as one the tool may not read does.
+    private static func moveItems(field: (String) -> String) -> InboxResult {
+        let store = Store.shared
+        let ids = field("ids").split(separator: ",").map { String($0).trimmed }.filter { !$0.isEmpty }
+        let refused = (try? JSONSerialization.jsonObject(with: Data(field("refused").utf8))) as? [String: String] ?? [:]
+        let to = field("to")
+        let toTop = UUID(uuidString: to) == nil && FolderTree.components(to).isEmpty
+        var target: (folder: UUID, binder: UUID)?
+        if let folderID = UUID(uuidString: to) {
+            guard let folder = store.folder(folderID) else { return .failure("No folder with that id. list_folders shows them.") }
+            target = (folderID, folder.binderID)
+        }
+        var items: [InboxResult.Item] = []
+        for raw in ids {
+            if let why = refused[raw] {
+                items.append(.init(id: raw, done: false, why: why))
+                continue
+            }
+            guard let id = UUID(uuidString: raw), let (item, binderID, title) = movable(id) else {
+                items.append(.init(id: raw, done: false, why: nothingHasThatID))
+                continue
+            }
+            guard let binderID, store.binder(binderID) != nil else {
+                items.append(.init(id: raw, done: false, title: title, why: "It isn't in a binder yet. Try again in a moment."))
+                continue
+            }
+            if !toTop, target == nil {
+                guard let made = store.ensureFolder(path: FolderTree.components(to), in: binderID) else { return .failure(Store.refusedMessage) }
+                target = (made.id, binderID)
+            }
+            if !toTop, let target, target.binder != binderID {
+                items.append(.init(id: raw, done: false, title: title,
+                                   why: "It's in \(store.binder(binderID)?.name ?? "another binder"), and the folder is in \(store.binder(target.binder)?.name ?? "another binder"): move_item moves within a binder."))
+                continue
+            }
+            do {
+                try FolderMoves.move(item, to: toTop ? nil : target?.folder, in: binderID)
+                items.append(.init(id: id.uuidString, done: true, title: title))
+            } catch {
+                items.append(.init(id: id.uuidString, done: false, title: title, why: error.localizedDescription))
+            }
+        }
+        store.save()
+        let moved = items.filter(\.done).count
+        let place = toTop ? "the top of their binders" : target.map { FolderPrompts.place(binderID: $0.binder, folder: $0.folder) } ?? "the folder"
+        let message = "Moved \(moved) of \(items.count) to \(place)." + (moved < items.count ? " The items say why the others stayed." : "")
+        guard moved > 0 else {
+            let why = items.map { "\($0.title.map { "“\($0)”" } ?? $0.id): \($0.why ?? "")" }.joined(separator: " ")
+            return InboxResult(ok: false, message: message, error: "Nothing moved. " + why, items: items)
+        }
+        return InboxResult(ok: true, id: toTop ? nil : target?.folder.uuidString, message: message, items: items)
+    }
+
+    /// rename_folder: a folder's new name; what's in it stays in it, and it stays where it is. A name a folder beside it
+    /// already has is refused, so a path still names one folder.
+    private static func renameFolder(field: (String) -> String, controller: DictationController) -> InboxResult {
+        let store = Store.shared
+        guard let id = UUID(uuidString: field("id")), let folder = store.folder(id) else { return .failure("That folder isn't there any more. list_folders shows them.") }
+        guard let name = FolderTree.cleanName(field("name")) else { return .failure(FolderProblem.noName.localizedDescription) }
+        let old = folder.name
+        let parent = store.shownFolder(folder.parentID, in: folder.binderID)
+        let place = FolderPrompts.place(binderID: folder.binderID, folder: parent)
+        guard name != old else { return InboxResult(ok: true, id: id.uuidString, message: "The folder “\(old)” in \(place) already has that name") }
+        if let other = FolderTree.resolve([name], in: store.folderNodes(in: folder.binderID), from: parent), other != id {
+            return .failure("There's already a folder “\(store.folder(other)?.name ?? name)” in \(place). Choose another name, or move what's in “\(old)” into it with move_item.")
+        }
+        guard store.rename(folder, to: name) else { return .failure(Store.refusedMessage) }
+        controller.team.scheduleSync(after: 0.5)
+        return InboxResult(ok: true, id: id.uuidString, message: "Renamed the folder “\(old)” to “\(name)” in \(place). What's in it stays in it.")
     }
 
     /// Ticks or unticks a checklist item in a meeting's notes, a note's digest or a note, found by its words.
@@ -321,7 +497,11 @@ enum InboxCommands {
             guard let named = binder(named: field("binder")) else { return .failure(noBinder(field("binder"))) }
             target = named
         }
+        // On a shared board an agent acts as itself in the team, which this Mac has to know first (lane DB2).
+        if actor.isAgent, controller.teamBoard.isShared(binder: target.id), !controller.teamBoard.knowsItself { return .failure(Self.teamNotReached) }
         let card = board.create(title: field("title"), details: field("details"), binderID: target.id, column: column, by: actor)
+        // A new card on a board whose database is off or out of reach is kept here for it, and says so (lane DB8).
+        let kept = controller.teamBoard.reach(card).map(TeamBoardWrites.kept).map { $0.isEmpty ? "" : " " + $0 } ?? ""
         if var routed {
             routed.card = card.id
             controller.router.record(routed)
@@ -332,17 +512,80 @@ enum InboxCommands {
         } else {
             controller.router.suggestLater(for: card, origin: origin)
         }
-        return InboxResult(ok: true, id: card.id.uuidString, message: "Card “\(card.title)” added to the \(target.name) board, in \(card.column.title)")
+        return InboxResult(ok: true, id: card.id.uuidString, message: "Card “\(card.title)” added to the \(target.name) board, in \(card.column.title).\(kept)")
     }
 
-    /// A change to a card, by the actor named in the request (an agent over MCP, or you from the phone).
-    private static func boardAction(_ action: String, fields: [String: String], field: (String) -> String, controller: DictationController) -> InboxResult {
+    /// A change to a card, by the actor named in the request (an agent over MCP, or you from the phone). On a board shared
+    /// through a team database (lane DB2) the database decides: an agent hears what it said, after it said it, so it never
+    /// works on a card it lost (`TeamBoard`). Whatever the database's state, the answer comes within a few seconds (lane
+    /// DB8): what the database decides first asks whether it answers, and is refused at once while it's off or out of
+    /// reach; the rest is kept here and goes once it's back, and the reply says so.
+    private static func boardAction(_ action: String, fields: [String: String], field: (String) -> String, controller: DictationController) async -> InboxResult {
         let board = controller.board
         let actor = BoardActor(name: field("actor").isEmpty ? "AI agent" : field("actor"),
                                kind: BoardActor.Kind(rawValue: field("actor_kind")) ?? .agent)
         guard let id = UUID(uuidString: field("id")), let card = board.card(id) else {
             return .failure("No card with that id. list_tasks shows them.")
         }
+        let team = controller.teamBoard
+        let shared = team.sends(card)
+        if shared, actor.isAgent, !team.knowsItself { return .failure(Self.teamNotReached) }
+        let decided = shared ? decidedWrite(action, field: field, card: card, actor: actor, board: board) : nil
+        if let decided {
+            await team.checkReach(card)
+            if let refusal = board.teamRefusal(decided, on: card, by: actor) { return .failure(refusal) }
+        }
+        let before = team.sentTotal
+        let result = boardActionHere(action, fields: fields, field: field, controller: controller, actor: actor, card: card)
+        guard shared, result.ok else { return result }
+        return await teamAnswer(result, operations: team.sent(since: before), actor: actor, card: card, team: team)
+    }
+
+    /// What of a write the team database decides (TeamBoardWrite), on a shared board: nil for a write that can wait for it.
+    private static func decidedWrite(_ action: String, field: (String) -> String, card: TaskCard, actor: BoardActor, board: BoardService) -> TeamBoardWrite? {
+        switch action {
+        case "claim_task": return .claim
+        case "complete_task": return .finish
+        case "release_task": return .release
+        case "update_task": return BoardColumn(loose: field("column")).flatMap { $0 == card.column ? nil : .move($0) }
+        case "comment_task":
+            // A person's words on a card that waits for an approval they decide on are the decision.
+            guard !actor.isAgent, card.column == .blocked, card.waitingApproval(events: board.timeline(card.id)) != nil,
+                  board.team?.decides(card, askedBy: card.waitingApproval(events: board.timeline(card.id))?.event.author ?? "") != false
+            else { return nil }
+            return .answerApproval
+        default: return nil
+        }
+    }
+
+    static let teamNotReached = "This Mac hasn't reached the team's database yet, so agents can't work on its shared boards. Try again in a minute."
+
+    /// What the team database said of a write on its board: refused, the write's reply says why (the card is already put back
+    /// as the database has it). While it's off or out of reach, the write was kept here and the reply says so, at once.
+    /// Not answered within the wait: what it decides is taken back if it hasn't gone yet, or said to be unknown if it's on
+    /// its way; anything else is kept here, and the reply says so.
+    private static func teamAnswer(_ result: InboxResult, operations: [UUID], actor: BoardActor, card: TaskCard, team: TeamBoard) async -> InboxResult {
+        guard !operations.isEmpty else { return result }
+        func adding(_ words: String) -> InboxResult {
+            InboxResult(ok: true, id: result.id, message: result.message + " " + words, items: result.items)
+        }
+        guard let reach = team.reach(card), reach == .reachable else {
+            let kept = TeamBoardWrites.kept(team.reach(card) ?? team.outboxReach)
+            return kept.isEmpty ? result : adding(kept)
+        }
+        let wait = actor.isAgent ? TeamBoardWrites.agentWait : TeamBoardWrites.personWait
+        let answer = await team.answers(to: operations, within: .seconds(wait))
+        if let refused = answer.refused { return .failure(refused) }
+        guard answer.timedOut else { return result }
+        let taken = team.withdraw(operations, agent: actor.isAgent)
+        if let call = taken.withdrawn.first { return .failure(TeamBoardWrites.withdrawn(call, agent: actor.isAgent)) }
+        if let call = taken.sending.first { return .failure(TeamBoardWrites.unknown(call, agent: actor.isAgent)) }
+        return adding(TeamBoardWrites.notAnsweredYet)
+    }
+
+    private static func boardActionHere(_ action: String, fields: [String: String], field: (String) -> String, controller: DictationController,
+                                        actor: BoardActor, card: TaskCard) -> InboxResult {
+        let board = controller.board
         do {
             switch action {
             case "claim_task":

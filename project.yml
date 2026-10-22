@@ -23,6 +23,16 @@ packages:
   SwiftTransformers:
     url: https://github.com/huggingface/swift-transformers.git
     from: 1.3.4
+  # The team database: Postgres over TLS, for teams that share binders through one (docs/plans/team-database.md). The
+  # Mac only: the iPhone sees shared binders through its Mac.
+  PostgresNIO:
+    url: https://github.com/vapor/postgres-nio.git
+    from: 1.33.1
+  # Notes edited together live on a team database (lane DB3): each shared note is an Automerge document, so two people
+  # typing in one note both keep their words. The Mac only, as PostgresNIO: the iPhone edits shared notes through its Mac.
+  Automerge:
+    url: https://github.com/automerge/automerge-swift.git
+    exactVersion: 0.7.2
 settings:
   base:
     SWIFT_VERSION: "5.0"
@@ -30,8 +40,8 @@ settings:
     DEVELOPMENT_TEAM: 87LFD98HJU
     CODE_SIGN_STYLE: Manual
     CODE_SIGN_IDENTITY: "Apple Development: Helder Feixas (2SNS7F6FAZ)"
-    MARKETING_VERSION: "0.9.0"
-    CURRENT_PROJECT_VERSION: "33"
+    MARKETING_VERSION: "0.10.0"
+    CURRENT_PROJECT_VERSION: "40"
 targets:
   Binders:
     type: application
@@ -66,6 +76,11 @@ targets:
             CFBundleTypeRole: Viewer
             LSHandlerRank: Owner
             LSItemContentTypes: [io.binders.transfer]
+          # An invite to a team database (lane DB2): Settings → Team asks before it joins.
+          - CFBundleTypeName: Binders team invite
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Owner
+            LSItemContentTypes: [io.binders.team-invite]
         UTExportedTypeDeclarations:
           - UTTypeIdentifier: io.binders.transfer
             UTTypeDescription: Binders file
@@ -73,6 +88,11 @@ targets:
             UTTypeTagSpecification:
               public.filename-extension: [binders]
               public.mime-type: [application/x-binders]
+          - UTTypeIdentifier: io.binders.team-invite
+            UTTypeDescription: Binders team invite
+            UTTypeConformsTo: [public.data, public.content]
+            UTTypeTagSpecification:
+              public.filename-extension: [binders-invite]
         NSAudioCaptureUsageDescription: Binders records what other meeting participants say so it can take notes on this Mac.
         NSCalendarsFullAccessUsageDescription: Binders uses your calendar to title meetings and name attendees in meeting notes, and to add the events you ask for out loud.
         NSHumanReadableCopyright: © 2026 Helder Feixas
@@ -105,8 +125,36 @@ targets:
         product: MLXLMCommon
       - package: MLXSwiftLM
         product: MLXEmbedders
+      # Distill's reply held to a JSON schema on a model running in Binders (lane DS3): xgrammar, compiled from source.
+      - package: MLXSwiftLM
+        product: MLXGuidedGeneration
       - package: SwiftTransformers
         product: Tokenizers
+      - package: PostgresNIO
+      # Shared notes' Automerge documents (lane DB3), in a framework of their own: see BindersAutomerge.
+      - target: BindersAutomerge
+  # Automerge for shared notes (lane DB3), on its own: its Rust core is a static library carrying Rust's standard library,
+  # as FluidAudio's text processing is, and two of those can't be linked into one binary (both define
+  # rust_eh_personality). In a framework of its own, embedded in the app, each has its own. Only Foundation crosses
+  # between them. The Mac only, as PostgresNIO: the iPhone edits shared notes through its Mac.
+  BindersAutomerge:
+    type: framework
+    platform: macOS
+    sources:
+      - path: AutomergeBridge
+        excludes: [exports.txt]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.binders.mac.automerge
+        PRODUCT_NAME: BindersAutomerge
+        GENERATE_INFOPLIST_FILE: YES
+        SKIP_INSTALL: YES
+        DEFINES_MODULE: YES
+        # Only its own API leaves it: what Automerge and its Rust core don't use is stripped, not exported.
+        EXPORTED_SYMBOLS_FILE: AutomergeBridge/exports.txt
+        DEAD_CODE_STRIPPING: YES
+    dependencies:
+      - package: Automerge
   BindersPhone:
     type: application
     platform: iOS
@@ -161,8 +209,8 @@ targets:
       base:
         # The App Store Connect record "Binders" (6751210657), taken over from the old events app at 2.0.
         PRODUCT_BUNDLE_IDENTIFIER: io.binders.app
-        MARKETING_VERSION: "2.1"
-        CURRENT_PROJECT_VERSION: "35"
+        MARKETING_VERSION: "2.2"
+        CURRENT_PROJECT_VERSION: "42"
         PRODUCT_NAME: Binders
         SDKROOT: iphoneos
         SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
@@ -214,8 +262,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.binders.app.widgets
         # Same as the app's: an extension's versions must match the app it's in.
-        MARKETING_VERSION: "2.1"
-        CURRENT_PROJECT_VERSION: "35"
+        MARKETING_VERSION: "2.2"
+        CURRENT_PROJECT_VERSION: "42"
         PRODUCT_NAME: BindersWidgets
         SDKROOT: iphoneos
         SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
@@ -258,8 +306,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.binders.app.keyboard
         # Same as the app's: an extension's versions must match the app it's in.
-        MARKETING_VERSION: "2.1"
-        CURRENT_PROJECT_VERSION: "35"
+        MARKETING_VERSION: "2.2"
+        CURRENT_PROJECT_VERSION: "42"
         PRODUCT_NAME: BindersKeyboard
         SDKROOT: iphoneos
         SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"

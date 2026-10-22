@@ -32,6 +32,9 @@ private struct TodayPage: View {
     }
 
     private var calendar: Calendar { .current }
+    /// The page's width from which the day's two columns go side by side: room for the note for the day and its
+    /// toolbar beside the 340-point column.
+    static let sideBySide: CGFloat = 772
     private var isToday: Bool { calendar.isDateInToday(day) }
 
     // MARK: The day's things
@@ -53,99 +56,105 @@ private struct TodayPage: View {
         let tasks = data.tasks
         let moved = data.moved
         let dictations = data.dictations
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                header(dictations: dictations, moved: moved.count)
-                if isToday { NeedsYouStrip() }
-                HStack(alignment: .top, spacing: 16) {
-                    VStack(alignment: .leading, spacing: 16) {
-                        journal
-                        if !data.meetings.isEmpty || !tasks.isEmpty {
-                            section(data.meetings.isEmpty ? "Promises and to-dos" : "Meetings, promises and to-dos") {
-                                TaskBoard(tasks: tasks, binderName: { id in binders.first { $0.id == id }?.name })
-                            }
-                            .transition(.filed)
-                        }
-                        if !data.conversations.isEmpty {
-                            section("Captures") {
-                                ForEach(data.conversations) { conversation in
-                                    ConversationRow(conversation: conversation, binder: binderName(conversation.binderID)) { open(meeting: conversation) }
-                                        .transition(.filed)
+        // Side by side while there's room for both columns; on a narrow page the second goes under the first.
+        GeometryReader { proxy in
+            let sideBySide = proxy.size.width >= Self.sideBySide
+            let columns = sideBySide ? AnyLayout(HStackLayout(alignment: .top, spacing: 16)) : AnyLayout(VStackLayout(alignment: .leading, spacing: 16))
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    header(dictations: dictations, moved: moved.count)
+                    if isToday { NeedsYouStrip() }
+                    columns {
+                        VStack(alignment: .leading, spacing: 16) {
+                            journal
+                            if !data.meetings.isEmpty || !tasks.isEmpty {
+                                section(data.meetings.isEmpty ? "Promises and to-dos" : "Meetings, promises and to-dos") {
+                                    TaskBoard(tasks: tasks, binderName: { id in binders.first { $0.id == id }?.name })
                                 }
-                            }
-                            .transition(.filed)
-                        }
-                        if !data.dueNotes.isEmpty {
-                            section("Notes due") {
-                                ForEach(data.dueNotes) { note in
-                                    let late = (note.dueAt ?? day) < day
-                                    row(symbol: late ? "clock" : "calendar", tint: late ? BindersTheme.needsYou : nil, title: note.title,
-                                        detail: [note.status, late ? note.dueAt.map { "was due \($0.formatted(.dateTime.month(.abbreviated).day()))" } : nil,
-                                                 note.owner].compactMap { $0 }.joined(separator: " · ")) { open(note: note) }
-                                        .transition(.filed)
-                                }
-                            }
-                            .transition(.filed)
-                        }
-                        if !data.notes.isEmpty {
-                            section("Notes you worked on") {
-                                ForEach(data.notes) { note in
-                                    row(symbol: "note.text", title: note.title, detail: binderName(note.binderID)) { open(note: note) }
-                                        .transition(.filed)
-                                }
-                                if data.moreNotes > 0 { Text("and \(data.moreNotes) more").font(.caption).foregroundStyle(.secondary).rollingCount(data.moreNotes) }
-                            }
-                            .transition(.filed)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-                    VStack(alignment: .leading, spacing: 16) {
-                        if isToday { WorkStreamsSection() }
-                        if !moved.isEmpty {
-                            section("On the boards") {
-                                ForEach(moved) { item in
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Button(item.card.title) { open(card: item.card) }
-                                            .themedLink()
-                                            .font(.callout.weight(.medium))
-                                            .lineLimit(1)
-                                        EventRow(event: item.event, cardColumn: item.card.column)
-                                    }
-                                    .transition(.filed)
-                                }
-                            }
-                            .transition(.filed)
-                        }
-                        if !dictations.isEmpty {
-                            section("You dictated") {
-                                ForEach(dictations.prefix(6)) { record in
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(record.finalText).lineLimit(2).font(BindersTheme.quote(.callout))
-                                        Text([record.appName, record.createdAt.formatted(date: .omitted, time: .shortened)].compactMap { $0 }.joined(separator: " · "))
-                                            .font(BindersTheme.time()).foregroundStyle(.secondary)
-                                    }
-                                    .transition(.filed)
-                                }
-                                if dictations.count > 6 { Text("and \(dictations.count - 6) more").font(.caption).foregroundStyle(.secondary).rollingCount(dictations.count - 6) }
-                            }
-                            .transition(.filed)
-                        }
-                        if data.loaded, moved.isEmpty, dictations.isEmpty, data.meetings.isEmpty, data.conversations.isEmpty, data.notes.isEmpty,
-                           tasks.isEmpty, data.dueNotes.isEmpty {
-                            Text(isToday ? "Meetings, notes, promises, cards and dictations from today show up here as they happen."
-                                 : "Nothing was recorded on this day.")
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .paperCard(padding: 16)
                                 .transition(.filed)
+                            }
+                            if !data.conversations.isEmpty {
+                                section("Captures") {
+                                    ForEach(data.conversations) { conversation in
+                                        ConversationRow(conversation: conversation, binder: binderName(conversation.binderID)) { open(meeting: conversation) }
+                                            .transition(.filed)
+                                    }
+                                }
+                                .transition(.filed)
+                            }
+                            if !data.dueNotes.isEmpty {
+                                section("Notes due") {
+                                    ForEach(data.dueNotes) { note in
+                                        let late = (note.dueAt ?? day) < day
+                                        row(symbol: late ? "clock" : "calendar", tint: late ? BindersTheme.needsYou : nil, title: note.title,
+                                            detail: [note.status, late ? note.dueAt.map { "was due \($0.formatted(.dateTime.month(.abbreviated).day()))" } : nil,
+                                                     note.owner].compactMap { $0 }.joined(separator: " · ")) { open(note: note) }
+                                            .transition(.filed)
+                                    }
+                                }
+                                .transition(.filed)
+                            }
+                            if !data.notes.isEmpty {
+                                section("Notes you worked on") {
+                                    ForEach(data.notes) { note in
+                                        row(symbol: "note.text", title: note.title, detail: binderName(note.binderID)) { open(note: note) }
+                                            .transition(.filed)
+                                    }
+                                    if data.moreNotes > 0 { Text("and \(data.moreNotes) more").font(.caption).foregroundStyle(.secondary).rollingCount(data.moreNotes) }
+                                }
+                                .transition(.filed)
+                            }
                         }
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                        VStack(alignment: .leading, spacing: 16) {
+                            if isToday { WorkStreamsSection() }
+                            if !moved.isEmpty {
+                                section("On the boards") {
+                                    ForEach(moved) { item in
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            Button(item.card.title) { open(card: item.card) }
+                                                .themedLink()
+                                                .font(.callout.weight(.medium))
+                                                .lineLimit(1)
+                                            EventRow(event: item.event, cardColumn: item.card.column)
+                                        }
+                                        .transition(.filed)
+                                    }
+                                }
+                                .transition(.filed)
+                            }
+                            if !dictations.isEmpty {
+                                section("You dictated") {
+                                    ForEach(dictations.prefix(6)) { record in
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(record.finalText).lineLimit(2).font(BindersTheme.quote(.callout))
+                                            Text([record.appName, record.createdAt.formatted(date: .omitted, time: .shortened)].compactMap { $0 }.joined(separator: " · "))
+                                                .font(BindersTheme.time()).foregroundStyle(.secondary)
+                                        }
+                                        .transition(.filed)
+                                    }
+                                    if dictations.count > 6 { Text("and \(dictations.count - 6) more").font(.caption).foregroundStyle(.secondary).rollingCount(dictations.count - 6) }
+                                }
+                                .transition(.filed)
+                            }
+                            if data.loaded, moved.isEmpty, dictations.isEmpty, data.meetings.isEmpty, data.conversations.isEmpty, data.notes.isEmpty,
+                               tasks.isEmpty, data.dueNotes.isEmpty {
+                                Text(isToday ? "Meetings, notes, promises, cards and dictations from today show up here as they happen."
+                                     : "Nothing was recorded on this day.")
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .paperCard(padding: 16)
+                                    .transition(.filed)
+                            }
+                        }
+                        .frame(width: sideBySide ? 340 : nil, alignment: .topLeading)
+                        .frame(maxWidth: sideBySide ? nil : .infinity, alignment: .topLeading)
                     }
-                    .frame(width: 340, alignment: .topLeading)
+                    // A new item files in and the sections around it make room.
+                    .filing(filingKeys(tasks: tasks, moved: moved, dictations: dictations))
                 }
-                // A new item files in and the sections around it make room.
-                .filing(filingKeys(tasks: tasks, moved: moved, dictations: dictations))
+                .padding(28)
             }
-            .padding(28)
         }
         .onAppear { data.show(day, actions: taskActions) }
         .followingWorkStreams()
@@ -179,6 +188,7 @@ private struct TodayPage: View {
                 Button { step(1) } label: { Image(systemName: "chevron.right") }
                     .disabled(isToday)
                     .help("The day after")
+                    .fitProbe("today.header.last")
             }
             .controlSize(.large)
         }

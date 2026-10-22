@@ -100,36 +100,53 @@ struct HomeView: View {
         navigation.pendingHistorySearch = nil
     }
 
+    private var greetingLines: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(greeting).font(BindersTheme.title(32))
+            Text("\(Date().formatted(date: .complete, time: .omitted)) · Hold \(settings.hotkeys.dictation.displayString()) and speak, double-tap for hands-free.")
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    /// Record, New note and Scratchpad.
+    private var starts: some View {
+        HStack(spacing: 8) {
+            Button {
+                Task {
+                    await meetingService.toggle()
+                    if meetingService.recordingMeetingID != nil { openMeetings() }
+                }
+            } label: {
+                Label(meetingService.isRecording ? "Stop" : "Record",
+                      systemImage: meetingService.isRecording ? "stop.fill" : "record.circle")
+            }
+            .buttonStyle(.borderedProminent)
+            // Red only while the microphone is live.
+            .tint(meetingService.isRecording ? BindersTheme.live : BindersTheme.accent)
+            Button { newNote() } label: { Label("New note", systemImage: "square.and.pencil") }
+            Button { ScratchpadController.shared.show() } label: { Label("Scratchpad", systemImage: "note.text.badge.plus") }
+                .fitProbe("home.header.last")
+        }
+        .controlSize(.large)
+        .fixedSize()
+    }
+
     private var content: some View {
         let openCount = data.openCount
         let stats = data.stats
         return ScrollView {
             VStack(alignment: .leading, spacing: 26) {
-                HStack(alignment: .top, spacing: 16) {
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text(greeting).font(BindersTheme.title(32))
-                        Text("\(Date().formatted(date: .complete, time: .omitted)) · Hold \(settings.hotkeys.dictation.displayString()) and speak, double-tap for hands-free.")
-                            .foregroundStyle(.secondary)
+                // The greeting beside what to start while there's room; on a narrow page the buttons go under it.
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .top, spacing: 16) {
+                        greetingLines.modifier(IdealWidthCap(cap: 280))
+                        Spacer()
+                        starts
                     }
-                    Spacer()
-                    HStack(spacing: 8) {
-                        Button {
-                            Task {
-                                await meetingService.toggle()
-                                if meetingService.recordingMeetingID != nil { openMeetings() }
-                            }
-                        } label: {
-                            Label(meetingService.isRecording ? "Stop" : "Record",
-                                  systemImage: meetingService.isRecording ? "stop.fill" : "record.circle")
-                        }
-                        .buttonStyle(.borderedProminent)
-                        // Red only while the microphone is live.
-                        .tint(meetingService.isRecording ? BindersTheme.live : BindersTheme.accent)
-                        Button { newNote() } label: { Label("New note", systemImage: "square.and.pencil") }
-                        Button { ScratchpadController.shared.show() } label: { Label("Scratchpad", systemImage: "note.text.badge.plus") }
+                    VStack(alignment: .leading, spacing: 14) {
+                        greetingLines
+                        starts
                     }
-                    .controlSize(.large)
-                    .fixedSize()
                 }
 
                 NeedsYouStrip()

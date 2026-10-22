@@ -50,11 +50,15 @@ memory you can ask questions. The speech models, the language model and your dat
   and people, and each has a "Mentioned in" list that fills itself, links or not. Notes take `#tags`, a status, an owner and a
   due date, start from templates, keep their earlier versions, and have an outline. Pop a note out into a window that stays in
   front, or fold it into a bubble on the edge of the screen.
+- **Folders.** A binder holds folders, as deep as you like. Tidy into Folders files your notes by the words their titles
+  start with, and an AI tool can sort a binder for you over MCP.
 - **Find anything, and your day.** ⌘O jumps to any note, meeting, card, person or page, and ⌘P runs any command. Today
   collects the day's meetings, promises, notes, cards and dictation, next to a note of your own for the day.
 - **A board in every binder.** Cards move from Backlog to Done, and you and your AI agents work from the same board. An agent
   claims a card over MCP, reports progress, asks you when it's stuck, and hands the work over for you to review. The to-dos
   Binders finds become cards in a click, and each is ticked off where it came from when its card is done.
+- **Distill.** A note that asks for work, such as a spec, becomes cards on its binder's board for you and your agents,
+  which wait for each other, and the note shows how the work is going.
 - **Binders and teams.** One binder per thing you are working on. Share a binder with teammates through a folder you already sync
   (OneDrive, Dropbox, Google Drive, iCloud Drive). There is no server of ours in between.
 - **Open to other software.** Rules run a Shortcut, open a URL, run a script or call a web hook when you say a phrase or when

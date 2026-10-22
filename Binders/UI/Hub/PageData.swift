@@ -371,3 +371,103 @@ final class TodayData {
         }
     }
 }
+
+/// What a binder's Overview shows that takes work to put together (lane DB10), kept the way HomeData keeps Home's: its
+/// counts, its latest meetings and notes, and the to-dos in them, read with bounded fetches when the page opens and again
+/// after a save that could change them, the to-dos collected again as soon as one of them changes. Before, the page fetched
+/// every note in the binder and scanned the latest 120 for to-dos each time it drew, which a shared binder's sync made
+/// often.
+@MainActor
+@Observable
+final class BinderOverviewData {
+    /// How many of the latest meetings, notes and promises the to-dos come from, as the page had it.
+    static let meetingLimit = 60, noteLimit = 120, commitmentLimit = 100
+
+    private(set) var meetingCount = 0
+    private(set) var noteCount = 0
+    private(set) var recentMeetings: [MeetingRecord] = []
+    private(set) var recentNotes: [NoteItem] = []
+    private(set) var tasks: [TaskEntry] = []
+    private(set) var openCount = 0
+    /// For self-tests: how many times the binder was read, and its to-dos collected.
+    @ObservationIgnored private(set) var reads = 0
+    @ObservationIgnored private(set) var collects = 0
+
+    @ObservationIgnored private var binder: UUID?
+    @ObservationIgnored private var actions: TaskActions?
+    @ObservationIgnored private var sources: (meetings: [MeetingRecord], notes: [NoteItem], commitments: [CommitmentRecord]) = ([], [], [])
+    @ObservationIgnored private var watcher: SaveWatcher?
+    @ObservationIgnored private var generation = 0
+
+    /// Reads the binder, and from then on what a save changes.
+    func start(binder: UUID, _ actions: TaskActions) {
+        self.actions = actions
+        if watcher == nil {
+            watcher = SaveWatcher(kinds: ["MeetingRecord", "NoteItem", "CommitmentRecord"]) { [weak self] in self?.read() }
+        }
+        guard self.binder != binder || reads == 0 else { return }
+        reads = 0
+        self.binder = binder
+        read()
+    }
+
+    /// Stops reading (the page closed): a page that isn't showing does no work.
+    func stop() {
+        watcher = nil
+        generation += 1
+        reads = 0
+    }
+
+    /// The binder's counts, its latest meetings, notes and promises, and their to-dos.
+    func read() {
+        guard let binder, watcher != nil else { return }
+        let context = Store.shared.context
+        let id: UUID? = binder
+        let capture = MeetingRecord.conversationKind
+        var meetings = FetchDescriptor<MeetingRecord>(predicate: #Predicate { $0.binderID == id && $0.kind != capture },
+                                                      sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
+        let allNotes = FetchDescriptor<NoteItem>(predicate: #Predicate { $0.binderID == id })
+        var notes = FetchDescriptor<NoteItem>(predicate: #Predicate { $0.binderID == id }, sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
+        var commitments = FetchDescriptor<CommitmentRecord>(predicate: #Predicate { $0.binderID == id },
+                                                            sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
+        let meetingCount = (try? context.fetchCount(meetings)) ?? 0
+        let noteCount = (try? context.fetchCount(allNotes)) ?? 0
+        notes.fetchLimit = Self.noteLimit
+        commitments.fetchLimit = Self.commitmentLimit
+        // Conversations (captures) carry to-dos too, as the page always read them: the latest of every kind.
+        var everyMeeting = FetchDescriptor<MeetingRecord>(predicate: #Predicate { $0.binderID == id }, sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
+        everyMeeting.fetchLimit = Self.meetingLimit
+        let latestMeetings = (try? context.fetch(everyMeeting)) ?? []
+        let latestNotes = (try? context.fetch(notes)) ?? []
+        sources = (latestMeetings, latestNotes, (try? context.fetch(commitments)) ?? [])
+        meetings.fetchLimit = 6
+        let recentMeetings = (try? context.fetch(meetings)) ?? []
+        let recentNotes = Array(latestNotes.prefix(6))
+        if self.meetingCount != meetingCount { self.meetingCount = meetingCount }
+        if self.noteCount != noteCount { self.noteCount = noteCount }
+        if self.recentMeetings.map(\.id) != recentMeetings.map(\.id) { self.recentMeetings = recentMeetings }
+        if self.recentNotes.map(\.id) != recentNotes.map(\.id) { self.recentNotes = recentNotes }
+        reads += 1
+        collect()
+    }
+
+    /// The to-dos in what was read, collected again as soon as anything they came from changes.
+    private func collect() {
+        guard let actions, watcher != nil else { return }
+        generation += 1
+        collects += 1
+        let current = generation
+        let sources = sources
+        let collected = withObservationTracking {
+            TaskCollector.collect(meetings: sources.meetings, notes: sources.notes, commitments: sources.commitments,
+                                  openMeeting: actions.openMeeting, openNote: actions.openNote, commitmentActions: actions.commitments)
+        } onChange: { [weak self] in
+            Task { @MainActor in
+                guard let self, self.generation == current else { return }
+                self.collect()
+            }
+        }
+        tasks = collected
+        openCount = collected.filter { !$0.done }.count
+    }
+}

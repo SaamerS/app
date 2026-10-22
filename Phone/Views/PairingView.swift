@@ -71,6 +71,9 @@ struct PairingView: View {
                 .surfaceCard(padding: 12)
                 Link("Privacy Policy", destination: URL(string: "https://binders.io/privacy.html")!)
                     .font(.footnote)
+                // The open-source software in the app, and its licences.
+                Link("Acknowledgements", destination: URL(string: "https://binders.io/licenses.html")!)
+                    .font(.footnote)
             }
             .padding(24)
         }
@@ -220,6 +223,7 @@ struct MacSheet: View {
                 .surfaceRows()
                 Section {
                     Link("Privacy Policy", destination: URL(string: "https://binders.io/privacy.html")!)
+                    Link("Acknowledgements", destination: URL(string: "https://binders.io/licenses.html")!)
                 }
                 .surfaceRows()
             }

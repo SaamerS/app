@@ -196,4 +196,6 @@ final class PhoneNavigation {
     var pendingNeedsYou = false
     /// The binder open on screen, so the tabs' Dictate files into it as its own button would.
     var binderInView: String?
+    /// And the folder open in it, so a note dictated there goes in it.
+    var folderInView: FolderInfo?
 }

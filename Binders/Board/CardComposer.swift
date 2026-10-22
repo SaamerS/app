@@ -108,8 +108,10 @@ struct CardComposer: View {
         guard !words.isEmpty else { return }
         if button.wakesNow {
             problem = CardActions.sendToAgent(card, words: words, controller: controller)
-        } else {
-            controller.board.comment(card, text: words, by: .you)
+        } else if let refused = controller.board.comment(card, text: words, by: .you) {
+            // An answer to an approval waits for the team's database (lane DB8): your words stay in the box.
+            problem = refused
+            return
         }
         draft = ""
     }

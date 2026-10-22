@@ -17,11 +17,40 @@ public struct TeamMember: Codable, Equatable, Sendable, Identifiable {
     public var id: String
     public var name: String
     public var lastSeen: Date
+    /// What this member's Binders knows of the team folder's newer ways (TeamFeatures). Nil from a Binders before them,
+    /// which writes its file without it.
+    public var features: [String]?
 
-    public init(id: String, name: String, lastSeen: Date) {
+    public init(id: String, name: String, lastSeen: Date, features: [String]? = nil) {
         self.id = id
         self.name = name
         self.lastSeen = lastSeen
+        self.features = features
+    }
+
+    /// Its Binders knows folders: it finds a note by its id wherever its file goes, and keeps a folder's front matter.
+    public var knowsFolders: Bool { features?.contains(TeamFeatures.folders) == true }
+}
+
+/// What a Binders says it knows of the team folder, in its file in `_binders/members`, so the others hold back what an
+/// older one would get wrong.
+public enum TeamFeatures {
+    /// Notes in folders: their files may move into subfolders of `Notes`.
+    public static let folders = "folders"
+    /// What this build writes in its member file.
+    public static let thisMac = [folders]
+
+    /// Whether note files may move into their folders' subfolders: only once every member's Binders knows folders. A
+    /// member file that's there but can't be read yet (`unreadable`) counts as an older one. This Mac (`me`) knows.
+    /// A Binders before folders matches a moved note by its id when it sees its file in one place, but one that sees it
+    /// in two at once (a drive delivering the move as a copy, then a delete) makes it a second note.
+    public static func filesMayMove(members: [TeamMember], unreadable: Int, me: String) -> Bool {
+        unreadable == 0 && members.allSatisfy { $0.id == me || $0.knowsFolders }
+    }
+
+    /// The teammates whose Binders doesn't know folders yet, by name.
+    public static func waitingForFolders(members: [TeamMember], me: String) -> [String] {
+        members.filter { $0.id != me && !$0.knowsFolders }.map(\.name).sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }
 }
 
@@ -56,12 +85,19 @@ public struct TeamMeetingFile: Codable, Equatable, Sendable {
     /// The binder the author filed it in; absent in files from before binders existed.
     public var binderID: String?
     public var binderName: String?
+    /// The folder the author filed it in, in that binder, and its path ("DevOps/Pipelines"); absent at the top, and in
+    /// files from before folders, so their hash is as it was.
+    public var folderID: String?
+    public var folderPath: String?
 
     public init(version: Int = 1, id: String, author: TeamAuthor, title: String, createdAt: Date, updatedAt: Date,
                 duration: TimeInterval, appName: String?, attendees: [String], templateID: String, summary: String, notes: String,
-                speakerNames: [String: String], segments: [TranscriptSegment], binderID: String? = nil, binderName: String? = nil) {
+                speakerNames: [String: String], segments: [TranscriptSegment], binderID: String? = nil, binderName: String? = nil,
+                folderID: String? = nil, folderPath: String? = nil) {
         self.binderID = binderID
         self.binderName = binderName
+        self.folderID = folderID
+        self.folderPath = folderPath
         self.version = version
         self.id = id
         self.author = author
@@ -100,6 +136,48 @@ public struct TeamBinderFile: Codable, Equatable, Sendable {
     }
 }
 
+/// A folder in a shared binder, in the team folder (`_binders/folders/<id>.json`), so everyone's Macs keep the same
+/// folders. Anyone in the binder may change it; the change made last wins. Once deleted it stays a while with
+/// `deletedAt`, so every Mac learns of it and moves what was in it up to where it was (`parentID`). Binders before
+/// folders never read this folder.
+public struct TeamFolderFile: Codable, Equatable, Sendable {
+    public var version: Int
+    public var id: String
+    public var binderID: String
+    /// Nil at the top of the binder.
+    public var parentID: String?
+    public var name: String
+    public var position: Double?
+    /// Who changed it last.
+    public var editedBy: TeamAuthor
+    public var createdAt: Date
+    public var updatedAt: Date
+    public var deletedAt: Date?
+
+    public init(version: Int = 1, id: String, binderID: String, parentID: String?, name: String, position: Double? = nil,
+                editedBy: TeamAuthor, createdAt: Date, updatedAt: Date, deletedAt: Date? = nil) {
+        self.version = version
+        self.id = id
+        self.binderID = binderID
+        self.parentID = parentID
+        self.name = name
+        self.position = position
+        self.editedBy = editedBy
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.deletedAt = deletedAt
+    }
+
+    /// What sync compares: where it is, what it's called, and whether it's gone; not who or when.
+    public var syncHash: String {
+        TeamFolderFile.syncHash(binderID: binderID, parentID: parentID, name: name, position: position ?? 0, deleted: deletedAt != nil)
+    }
+
+    public static func syncHash(binderID: String, parentID: String?, name: String, position: Double, deleted: Bool) -> String {
+        TeamFiles.sha256(Data("\(binderID)\u{1}\(parentID ?? "")\u{1}\(name)\u{1}\(position)\u{1}\(deleted ? "deleted" : "")".utf8))
+    }
+}
+
 public struct TeamTombstone: Codable, Equatable, Sendable {
     public var id: String
     public var deletedBy: TeamAuthor
@@ -120,14 +198,28 @@ public struct NoteProperties: Equatable, Sendable {
     public var owner: String?
     /// A day; the time doesn't matter.
     public var due: Date?
+    /// Distill is on: the note can be distilled into work items, shows its work's progress and keeps its whole history.
+    /// `binders_distill: true` in the Markdown copy. Off for every note until someone turns it on.
+    public var distill: Bool
 
-    public init(status: String? = nil, owner: String? = nil, due: Date? = nil) {
+    public init(status: String? = nil, owner: String? = nil, due: Date? = nil, distill: Bool = false) {
         self.status = status.flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0.trimmingCharacters(in: .whitespaces) }
         self.owner = owner.flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0.trimmingCharacters(in: .whitespaces) }
         self.due = due
+        self.distill = distill
     }
 
-    public var isEmpty: Bool { status == nil && owner == nil && due == nil }
+    public var isEmpty: Bool { status == nil && owner == nil && due == nil && !distill }
+
+    /// The front matter line that turns Distill on, written as it is (a YAML boolean, which Obsidian shows as a checkbox).
+    public static let distillKey = "binders_distill"
+    public static let distillLine = distillKey + ": true"
+
+    /// Whether a front matter value turns Distill on: true, yes or 1, however written.
+    public static func distills(_ value: String?) -> Bool {
+        guard let value else { return false }
+        return ["true", "yes", "1", "on"].contains(value.trimmingCharacters(in: .whitespaces).lowercased())
+    }
 
     /// The statuses offered; any other word someone writes in the front matter is kept as it is.
     public static let statuses = ["Idea", "Draft", "In progress", "Waiting", "Done"]
@@ -145,13 +237,21 @@ public struct TeamNote: Equatable, Sendable {
     public var binderID: String?
     public var binderName: String?
     public var properties: NoteProperties
+    /// The folder it's filed in, in its binder (`binders_folder_id`): an id, or "" for the top of the binder once it has
+    /// left its folders. Nil when the file says nothing, as files from a Binders before folders, or one such a Binders
+    /// wrote again from scratch.
+    public var folderID: String?
+    /// The folder's path ("DevOps/Pipelines", `binders_folder`), for people and Obsidian; Binders goes by the id.
+    public var folderPath: String?
 
     public init(id: String? = nil, author: TeamAuthor? = nil, editedBy: String? = nil, createdAt: Date? = nil, updatedAt: Date? = nil,
                 body: String, extraFrontmatter: [String] = [], binderID: String? = nil, binderName: String? = nil,
-                properties: NoteProperties = NoteProperties()) {
+                properties: NoteProperties = NoteProperties(), folderID: String? = nil, folderPath: String? = nil) {
         self.properties = properties
         self.binderID = binderID
         self.binderName = binderName
+        self.folderID = folderID
+        self.folderPath = folderPath
         self.id = id
         self.author = author
         self.editedBy = editedBy
@@ -389,16 +489,24 @@ public enum TeamFiles {
         if let editedBy = note.editedBy { fields.append(("edited_by", editedBy)) }
         if let binderID = note.binderID { fields.append(("binder_id", binderID)) }
         if let binderName = note.binderName { fields.append(("binder", binderName)) }
+        if let folderID = note.folderID { fields.append((folderIDKey, folderID)) }
+        if let folderPath = note.folderPath, !folderPath.isEmpty, note.folderID?.isEmpty == false { fields.append((folderPathKey, folderPath)) }
         if let status = note.properties.status { fields.append(("status", status)) }
         if let owner = note.properties.owner { fields.append(("owner", owner)) }
         if let due = note.properties.due { fields.append(("due", dayString(due))) }
         if let createdAt = note.createdAt { fields.append(("created", createdAt.formatted(.iso8601))) }
         if let updatedAt = note.updatedAt { fields.append(("updated", updatedAt.formatted(.iso8601))) }
-        return Frontmatter.render(fields, extraLines: note.extraFrontmatter, body: note.body)
+        // Distill, as a YAML boolean rather than a quoted string, and only when it's on.
+        let distill = note.properties.distill ? [NoteProperties.distillLine] : []
+        return Frontmatter.render(fields, extraLines: distill + note.extraFrontmatter, body: note.body)
     }
 
+    /// The folder a note is in, in its front matter: its id, and its path for whoever reads the file.
+    public static let folderIDKey = "binders_folder_id"
+    public static let folderPathKey = "binders_folder"
+
     static let noteFields: Set<String> = ["binders_id", "author", "author_id", "edited_by", "created", "updated", "binder_id", "binder",
-                                          "status", "owner", "due"]
+                                          "status", "owner", "due", folderIDKey, folderPathKey, NoteProperties.distillKey]
 
     public static func parseNote(_ text: String) -> TeamNote {
         let parsed = Frontmatter.parse(text)
@@ -410,7 +518,37 @@ public enum TeamFiles {
                         body: String(parsed.body.drop(while: { $0.isNewline })),
                         extraFrontmatter: parsed.entries.filter { !noteFields.contains($0.key) }.flatMap(\.lines),
                         binderID: fields["binder_id"].flatMap { $0.isEmpty ? nil : $0 }, binderName: fields["binder"],
-                        properties: NoteProperties(status: fields["status"], owner: fields["owner"], due: fields["due"].flatMap(day(from:))))
+                        properties: NoteProperties(status: fields["status"], owner: fields["owner"], due: fields["due"].flatMap(day(from:)),
+                                                   distill: NoteProperties.distills(fields[NoteProperties.distillKey])),
+                        folderID: fields[folderIDKey].map { $0.trimmingCharacters(in: .whitespaces) },
+                        folderPath: fields[folderPathKey].flatMap { $0.isEmpty ? nil : $0 })
+    }
+
+    // MARK: Folders in the team copy
+
+    /// A folder's name as a folder on disk, safe on every sync service and in Obsidian: no `/\:*?"<>|`, no dot in front
+    /// (which would hide it, and every note in it, from the scan) or at the end, not a name Binders or Windows keeps for
+    /// itself, at most 60 characters.
+    public static func safeFolderName(_ name: String) -> String {
+        var safe = name.replacingOccurrences(of: "[/\\\\:*?\"<>|\\n\\r\\t]+", with: " ", options: .regularExpression)
+            .replacingOccurrences(of: " {2,}", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces.union(CharacterSet(charactersIn: ".")))
+        safe = String(safe.prefix(60)).trimmingCharacters(in: .whitespaces.union(CharacterSet(charactersIn: ".")))
+        if safe.isEmpty { return "Folder" }
+        let reserved: Set<String> = [MarkdownMedia.folder, dataFolder, "con", "prn", "aux", "nul"]
+        let lower = safe.lowercased()
+        if reserved.contains(lower) || lower.range(of: #"^(com|lpt)[0-9]$"#, options: .regularExpression) != nil { safe += " folder" }
+        return safe
+    }
+
+    /// Where a note in a folder goes in the team folder: "Notes/DevOps/Pipelines"; "Notes" at the top.
+    public static func notesDirectory(_ folderPath: [String]) -> String {
+        ([notesFolder] + folderPath.map(safeFolderName)).joined(separator: "/")
+    }
+
+    /// The same for a meeting's readable copy: "Meetings/DevOps".
+    public static func meetingsDirectory(_ folderPath: [String]) -> String {
+        ([meetingsFolder] + folderPath.map(safeFolderName)).joined(separator: "/")
     }
 
     /// "2026-10-02", as a date at the start of that day here.
@@ -460,7 +598,9 @@ public enum TeamFiles {
     public static func noteHash(_ body: String, _ properties: NoteProperties = NoteProperties()) -> String {
         let text = body.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !properties.isEmpty else { return sha256(Data(text.utf8)) }
+        // Distill joins only when it's on, so every note without it hashes as before.
         let extra = "status=\(properties.status ?? "");owner=\(properties.owner ?? "");due=\(properties.due.map(dayString) ?? "")"
+            + (properties.distill ? ";distill=1" : "")
         return sha256(Data((text + "\n\u{1}" + extra).utf8))
     }
 

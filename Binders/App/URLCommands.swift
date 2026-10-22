@@ -8,10 +8,13 @@ import BindersKit
 ///     binders://capture/on|off|toggle                binders://meeting/start|stop|toggle   binders://meeting/<id>
 ///     binders://card/<id>   opens the card in its own window, without bringing Binders forward or putting the cursor in
 ///                           it (the BINDERS_LINK every woken agent gets)
-///     binders://note/<id>   opens the note in its binder (a card put on the board from a note links back with one)
+///     binders://note/<id>   opens the note in its binder (a card put on the board from a note links back with one);
+///                           ?section=<heading> opens it at that section (a card Distill placed links back so)
 ///     binders://open?section=home|writing|knowledge|settings[&page=automations]
 ///     binders://link/pair   turns the phone link on and opens pairing; the one-time link is written to
 ///                           Application Support/Binders/link-pairing.txt (yours only), for a phone that isn't at the Mac
+///     binders://team/join?… an invite to a team database (TeamInvite.link): Settings → Team comes forward and asks
+///                           before it joins, as anything on this Mac can open a link
 @MainActor
 enum URLCommands {
     static func handle(_ url: URL, controller: DictationController) {
@@ -51,6 +54,8 @@ enum URLCommands {
                 return
             }
             hub.navigation.open(note: note)
+            // A card Distill placed links to its section: the note opens there.
+            if let section = DistillLinks.heading(in: url) { hub.navigation.pendingNotePlace = section }
             hub.show()
         case "calendar":
             guard !text.isEmpty else { return warn("binders://calendar needs ?text=") }
@@ -114,6 +119,10 @@ enum URLCommands {
             let section = HubSection(rawValue: (query["section"] ?? "home").lowercased()) ?? .home
             if let page = query["page"].flatMap({ SettingsPage(rawValue: $0.lowercased()) }) { hub.navigation.pendingSettingsPage = page }
             hub.show(section: section)
+        case "team":
+            // An invite never joins by itself: Settings → Team comes forward and asks.
+            guard let invite = TeamInvite(link: url) else { return warn("binders://team/join needs an invite's server, login and password") }
+            openInvite(invite, controller: controller)
         case "apply":
             // A write from the MCP server or another local tool, waiting in the inbox.
             guard let name = query["file"] else { return warn("binders://apply needs ?file=") }
@@ -121,6 +130,14 @@ enum URLCommands {
         default:
             warn("Unknown binders:// command: \(command)")
         }
+    }
+
+    /// An invite, from a link or a file: Settings → Team asks "Join … as …?", and while team databases are off
+    /// (TeamDatabaseFeature), "Turn on team databases and join …?" (lane DB7).
+    static func openInvite(_ invite: TeamInvite, controller: DictationController) {
+        controller.teamBoard.pendingInvite = invite
+        HubWindowController.shared.navigation.pendingSettingsPage = .team
+        HubWindowController.shared.show(section: .settings)
     }
 
     /// Asked by a link for the microphone, writing capture or a new paired device: Binders comes forward and asks, every

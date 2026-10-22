@@ -428,9 +428,10 @@ final class AllDayCaptureService {
 @MainActor
 enum BindersFiles {
     /// Keeps what's in a Binders file. A file AirDrop left in Downloads goes to the Trash once kept, so the text doesn't
-    /// sit there.
+    /// sit there. Opened from inside a folder (the Captures page's Open a Binders File…), what's kept goes in `folder`
+    /// when it lands in that folder's binder, and stays there once it's read.
     @discardableResult
-    static func open(_ url: URL, controller: DictationController) -> String {
+    static func open(_ url: URL, controller: DictationController, folder: UUID? = nil) -> String {
         // Not while the library didn't open: the file stays where it is, to open again once Binders can keep it.
         guard Store.shared.allowsSave() else { return Store.unavailableMessage }
         let scoped = url.startAccessingSecurityScopedResource()
@@ -439,7 +440,11 @@ enum BindersFiles {
             let transfer = try BindersTransfer.decode(Data(contentsOf: url))
             var kept = 0
             for conversation in transfer.conversations {
-                if case .kept = controller.conversations.receive(conversation) { kept += 1 }
+                guard case .kept(let id) = controller.conversations.receive(conversation) else { continue }
+                kept += 1
+                if let folder, let record = Store.shared.meeting(id), Store.shared.folder(folder)?.binderID == record.binderID {
+                    try? Store.shared.move(record, toFolder: folder)
+                }
             }
             let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first?.resolvingSymlinksInPath().path ?? ""
             if !downloads.isEmpty, url.resolvingSymlinksInPath().deletingLastPathComponent().path == downloads {

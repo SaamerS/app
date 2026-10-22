@@ -117,6 +117,8 @@ public enum BoardError: Error, Equatable, LocalizedError {
     case agentsCannotFinish
     case notYours(String)
     case finished
+    /// It waits for other cards that aren't Done yet: their titles.
+    case waitsFor([String])
 
     /// Read by agents, as only agents are refused: "You" on the board is the user.
     public var errorDescription: String? {
@@ -131,6 +133,11 @@ public enum BoardError: Error, Equatable, LocalizedError {
             return "\(who(name)) has this card, so only they, or a person, can release it."
         case .finished:
             return "This card is done. Move it back to Ready first to work on it again."
+        case .waitsFor(let titles):
+            let quoted = titles.prefix(3).map { "“\($0)”" }
+            let list = quoted.count > 1 ? quoted.dropLast().joined(separator: ", ") + " and " + quoted.last! : quoted.first ?? "another card"
+            let more = titles.count > 3 ? " and \(titles.count - 3) more" : ""
+            return "This card waits for \(list)\(more), which \(titles.count == 1 ? "isn't" : "aren't") done yet, so it can't be taken yet. Pick another card."
         }
     }
 }
@@ -152,13 +159,23 @@ public enum BoardRules {
         card.assigneeIsAgent && card.column == .inProgress ? card.claimExpires : nil
     }
 
+    /// The wait rule: an agent can't take a card while it waits for others that aren't Done (`waitingOn`, their titles),
+    /// unless it holds the card already. A person always can.
+    static func checkWaits(_ card: CardState, by actor: BoardActor, waitingOn: [String], at now: Date) throws {
+        guard actor.isAgent, !waitingOn.isEmpty else { return }
+        if isClaimed(card, at: now), card.assignee == actor.name { return }
+        throw BoardError.waitsFor(waitingOn)
+    }
+
     /// Grabbing a card: it moves to In progress if it was waiting, and an agent's claim on work in progress starts its
-    /// lease. A person can take a card over from anyone; an agent only takes one that's free or its own.
-    public static func claim(_ card: CardState, by actor: BoardActor, at now: Date) throws -> CardState {
+    /// lease. A person can take a card over from anyone; an agent only takes one that's free or its own, and not one that
+    /// still waits for other cards (`waitingOn`: the titles of those that aren't Done).
+    public static func claim(_ card: CardState, by actor: BoardActor, at now: Date, waitingOn: [String] = []) throws -> CardState {
         guard card.column != .done else { throw BoardError.finished }
         if actor.isAgent, isClaimed(card, at: now), card.assignee != actor.name {
             throw BoardError.claimedBy(card.assignee ?? "Someone", until: leaseEnd(card))
         }
+        try checkWaits(card, by: actor, waitingOn: waitingOn, at: now)
         var next = card
         next.assignee = actor.name
         next.assigneeIsAgent = actor.isAgent
@@ -170,12 +187,16 @@ public enum BoardRules {
 
     /// Moving a card. People can move anything; agents only cards that are free or theirs, and not to Done unless the
     /// binder allows it. Back to Backlog or Ready lets go of the claim; Review and Done keep who did it but end the lease.
-    public static func move(_ card: CardState, to column: BoardColumn, by actor: BoardActor, agentsMayFinish: Bool, at now: Date) throws -> CardState {
+    /// An agent moving a card that still waits for others (`waitingOn`) into In progress, Review or Done takes it, so the
+    /// wait rule holds there too.
+    public static func move(_ card: CardState, to column: BoardColumn, by actor: BoardActor, agentsMayFinish: Bool, at now: Date,
+                            waitingOn: [String] = []) throws -> CardState {
         if actor.isAgent {
             if column == .done, !agentsMayFinish { throw BoardError.agentsCannotFinish }
             if isClaimed(card, at: now), card.assignee != actor.name {
                 throw BoardError.claimedBy(card.assignee ?? "Someone", until: leaseEnd(card))
             }
+            if [.inProgress, .review, .done].contains(column) { try checkWaits(card, by: actor, waitingOn: waitingOn, at: now) }
         }
         var next = card
         next.column = column
@@ -228,8 +249,10 @@ public enum BoardRules {
     }
 
     /// A person's answer to a blocked card sends it back to work, and the agent that has it gets a fresh lease.
-    public static func answered(_ card: CardState, by actor: BoardActor, at now: Date) -> CardState {
-        guard !actor.isAgent, card.column == .blocked else { return card }
+    /// `decides`: false when what the card waits on is an approval this person doesn't decide (`deciders`): their words
+    /// are a comment then, and the card keeps waiting for whoever does.
+    public static func answered(_ card: CardState, by actor: BoardActor, at now: Date, decides: Bool = true) -> CardState {
+        guard !actor.isAgent, decides, card.column == .blocked else { return card }
         var next = card
         next.column = card.assignee == nil ? .ready : .inProgress
         if next.assigneeIsAgent { next.claimExpires = now.addingTimeInterval(lease) }
@@ -247,11 +270,14 @@ public enum BoardRules {
         return next
     }
 
-    /// Finishing: a person's card is done; an agent's goes to Review unless the binder lets agents finish.
-    public static func complete(_ card: CardState, by actor: BoardActor, agentsMayFinish: Bool, at now: Date) throws -> CardState {
+    /// Finishing: a person's card is done; an agent's goes to Review unless the binder lets agents finish. An agent that
+    /// doesn't hold a card that still waits for others (`waitingOn`) can't finish it either.
+    public static func complete(_ card: CardState, by actor: BoardActor, agentsMayFinish: Bool, at now: Date,
+                                waitingOn: [String] = []) throws -> CardState {
         if actor.isAgent, isClaimed(card, at: now), card.assignee != actor.name {
             throw BoardError.claimedBy(card.assignee ?? "Someone", until: leaseEnd(card))
         }
+        try checkWaits(card, by: actor, waitingOn: waitingOn, at: now)
         var next = card
         next.column = (actor.isAgent && !agentsMayFinish) ? .review : .done
         if next.assignee == nil {
@@ -323,6 +349,38 @@ public enum BoardRules {
 
     /// A name no agent may act under: the user's own. Every rule here tells people and agents apart by name.
     public static func isReserved(_ name: String) -> Bool { isNamed(name, as: BoardActor.you.name) }
+}
+
+// MARK: Who decides on an approval
+
+extension BoardRules {
+    /// Who decides on what an agent asked approval for, as the plan has approvals ring "for the agent's owner and whoever
+    /// the card is for": the agent's owner (`askerOwner`), and the person the card is meant for (`meantFor`: a person, or
+    /// the owner of the agent it's meant for), unless an agent or Binders only suggested who it's for (`suggested`): a
+    /// suggestion makes no one a decider. Anyone else is refused, by the team database's `decide` too (migration 8), and
+    /// what they write on the card is a comment, not its answer, so the board greys out what the database would refuse.
+    /// On a board that isn't shared, both are you. People however the caller tells them apart (names, member ids), the
+    /// owner first.
+    public static func deciders<Person: Equatable>(askerOwner: Person?, meantFor: Person?, suggested: Bool) -> [Person] {
+        var people: [Person] = []
+        for person in [askerOwner, suggested ? nil : meantFor].compactMap({ $0 }) where !people.contains(person) { people.append(person) }
+        return people
+    }
+
+    /// Who decides, in words for someone who doesn't: "Only Sam can decide on this: it's their agent asking."
+    public static func onlyDeciders(owner: String?, meantFor: String?) -> String {
+        let owner = owner?.trimmingCharacters(in: .whitespaces).nilIfBlank, meant = meantFor?.trimmingCharacters(in: .whitespaces).nilIfBlank
+        switch (owner, meant) {
+        case let (owner?, meant?) where owner.localizedCaseInsensitiveCompare(meant) != .orderedSame:
+            return "Only \(owner), whose agent is asking, or \(meant), who the card is for, can decide on this."
+        case let (owner?, _):
+            return "Only \(owner) can decide on this: it's their agent asking."
+        case let (nil, meant?):
+            return "Only \(meant) can decide on this: the card is for them."
+        case (nil, nil):
+            return "No one in the team can decide on this now: the agent's owner isn't in the team any more. Choose who the card is for, and they can."
+        }
+    }
 }
 
 /// Word of a card that's worth a quiet notification.

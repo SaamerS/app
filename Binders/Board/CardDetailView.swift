@@ -46,6 +46,8 @@ struct CardDetailView: View {
                            toggleDetails: { toggleDetails(width: geometry.size.width) }, close: close, problem: $problem,
                            confirmDelete: $confirmDelete)
                 Divider()
+                // A board shared through a team database that's off or out of reach says what waits (lane DB8).
+                TeamReachLine(binderID: card.binderID, compact: true)
                 HStack(alignment: .top, spacing: 0) {
                     // A short window (under about 700 pt, its title bar with it): the approval's text in its shorter box.
                     CardConversationColumn(card: card, events: events, registry: registry, draft: $draft, problem: $problem,
@@ -76,6 +78,8 @@ struct CardDetailView: View {
         .followingAgentDoing()
         .confirmationDialog("Delete “\(card.title)”?", isPresented: $confirmDelete) {
             Button("Delete Card", role: .destructive) {
+                // On a board shared through a team database that's off or out of reach, it stays until it's back (lane DB8).
+                if let refused = controller.board.teamRefusal(.delete, on: card, by: .you) { return problem = refused }
                 close()
                 let doomed = card
                 DispatchQueue.main.async { controller.board.delete(doomed) }
@@ -138,6 +142,8 @@ enum CardActions {
     /// Accept, on finished work in Review: your words, if any, go on the card first; then it's moved to Done, as the column
     /// chip's Done does.
     static func accept(_ card: TaskCard, words: String, board: BoardService) throws {
+        // Waiting for the team's database, your words wait with it, rather than go on their own (lane DB8).
+        if let refused = board.teamRefusal(.move(.done), on: card, by: .you) { throw TeamWaitRefusal(words: refused) }
         let words = words.trimmingCharacters(in: .whitespacesAndNewlines)
         if !words.isEmpty { board.comment(card, text: words, by: .you) }
         try board.move(card, to: .done, by: .you)
@@ -147,6 +153,7 @@ enum CardActions {
     /// progress, which the board logs as sent back and the dispatcher wakes with `sent_back` and your words. In that order,
     /// so your words go with the send-back rather than as a comment of their own.
     static func sendBack(_ card: TaskCard, words: String, board: BoardService) throws {
+        if let refused = board.teamRefusal(.move(.inProgress), on: card, by: .you) { throw TeamWaitRefusal(words: refused) }
         let words = words.trimmingCharacters(in: .whitespacesAndNewlines)
         if !words.isEmpty { board.comment(card, text: words, by: .you) }
         try board.move(card, to: .inProgress, by: .you)
@@ -244,6 +251,8 @@ struct CardHeader: View {
     let close: () -> Void
     @Binding var problem: String?
     @Binding var confirmDelete: Bool
+    /// Giving it to a teammate's agent, waiting for your yes (lane DB2).
+    @State private var asking: TeamConsent?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -258,6 +267,17 @@ struct CardHeader: View {
         // Just under the title bar, and under the tab bar when cards are tabs: the window's safe area holds both.
         .padding(.top, 2)
         .padding(.bottom, 12)
+        .teamConsent($asking) { consent in
+            controller.teamBoard.agree(to: consent.agent)
+            giveTo(consent.name)
+        }
+    }
+
+    /// Give to: on a board whose team database is off or out of reach, who it's for is kept, and the card says why
+    /// nothing was handed over (lane DB8).
+    private func giveTo(_ name: String) {
+        let waiting = controller.teamBoard.reach(card).map { $0 != .reachable } ?? false
+        if case .notWoken(let why) = controller.board.give(card, to: name, by: .you), waiting { problem = why }
     }
 
     /// For the self-tests, in a throwaway folder: where each card's title row starts, from the top of its window.
@@ -302,6 +322,10 @@ struct CardHeader: View {
                 }
             }
             Button("Show on Board") { navigation.showOnBoard(card) }
+            // Kept on this Mac (made from what your iPhone heard), on a board shared through the team database.
+            if card.teamShadow == TeamBoard.held, controller.teamBoard.covers(card) {
+                Button("Share It on the Team's Board") { controller.teamBoard.shareKept(card) }
+            }
             Button(detailsShown ? "Hide Details" : "Show Details", action: toggleDetails)
             Divider()
             Button("Delete Card…", role: .destructive) { confirmDelete = true }
@@ -419,9 +443,18 @@ struct CardHeader: View {
     /// an approval and finished work have theirs above the composer, with their words.
     @ViewBuilder
     private var primary: some View {
-        switch Self.primary(card, registry: registry, showsStop: showsStop, reach: controller.agents.commentReach(for: card, events: events)) {
+        switch Self.primary(card, registry: registry, showsStop: showsStop, reach: controller.agents.commentReach(for: card, events: events),
+                            awaitsYou: controller.agents.waitsForYourGiveTo(card),
+                            teammatesAgent: controller.teamBoard.teammatesAgent(named: card.meantFor) != nil) {
         case .giveTo(let name):
-            Button("Give to \(name)") { controller.board.give(card, to: name, by: .you) }
+            Button("Give to \(name)") {
+                // A teammate's agent: asked once, naming its owner and who it sends cards to.
+                if let agent = controller.teamBoard.teammatesAgent(named: name), !controller.teamBoard.agreed(to: agent) {
+                    asking = controller.teamBoard.consent(for: agent)
+                } else {
+                    giveTo(name)
+                }
+            }
                 .buttonStyle(.borderedProminent)
                 .disabled(registry.paused)
                 .help(registry.paused ? "Agents are paused: resume them in Settings → Agents" : "It goes to Ready, and Binders hands it over")
@@ -442,12 +475,15 @@ struct CardHeader: View {
     /// composer has it (Blocked, Review); Give to for a card meant for an agent that nobody holds, in Backlog, or in Ready
     /// while it's only a suggestion; Wake Now for one meant by you for an agent Binders wakes, in Ready or In progress,
     /// while Stop isn't showing (bordered where the composer's button is Send to); Take It for one nobody holds.
-    static func primary(_ card: TaskCard, registry: AgentRegistry, showsStop: Bool, reach: CommentReach) -> CardPrimary? {
+    /// `awaitsYou`: a teammate's card that waits for your Give to (lane DB2); `teammatesAgent`: it's meant for a teammate's
+    /// agent, which its owner's Mac starts.
+    static func primary(_ card: TaskCard, registry: AgentRegistry, showsStop: Bool, reach: CommentReach, awaitsYou: Bool = false,
+                        teammatesAgent: Bool = false) -> CardPrimary? {
         let meantAgent = card.meantFor.flatMap { registry.agent(named: $0) }
         let held = BoardRules.isClaimed(card.state, at: .now)
         if card.column == .done || card.column == .blocked || card.column == .review { return nil }
-        if let name = card.meantFor, card.meantForByAgent || meantAgent != nil, !held,
-           card.column == .backlog || (card.column == .ready && card.meantForByAgent) {
+        if let name = card.meantFor, card.meantForByAgent || meantAgent != nil || teammatesAgent, !held,
+           card.column == .backlog || (card.column == .ready && (card.meantForByAgent || awaitsYou)) {
             return .giveTo(name)
         }
         if let agent = meantAgent, !card.meantForByAgent, agent.wake != .board, card.column == .ready || card.column == .inProgress, !showsStop {
@@ -620,6 +656,8 @@ struct WhoChip: View {
     @Binding var problem: String?
     @State private var typingName = false
     @State private var meantFor = ""
+    /// Meaning it for a teammate's agent, waiting for your yes (lane DB2).
+    @State private var asking: TeamConsent?
 
     var body: some View {
         Menu {
@@ -644,6 +682,10 @@ struct WhoChip: View {
             }
             .padding(12)
             .onAppear { meantFor = card.meantFor ?? "" }
+        }
+        .teamConsent($asking) { consent in
+            controller.teamBoard.agree(to: consent.agent)
+            controller.board.assign(card, to: consent.name, by: .you)
         }
     }
 
@@ -722,7 +764,26 @@ struct WhoChip: View {
                 ForEach(agents) { agent in Button(agent.name) { controller.board.assign(card, to: agent.name, by: .you) } }
             }
         }
-        let people = peopleOnThisBoard
+        // On a board shared through the team database: teammates' agents that take its cards, with their owners, and teammates.
+        let team = controller.teamBoard
+        let theirs = team.teammatesAgents(taking: card.binderID)
+        if !theirs.isEmpty {
+            Section("Teammates' Agents") {
+                ForEach(theirs) { agent in
+                    let consent = team.consent(for: agent)
+                    Button(consent.name) {
+                        if team.agreed(to: agent) { controller.board.assign(card, to: consent.name, by: .you) } else { asking = consent }
+                    }
+                }
+            }
+        }
+        let teammates = team.covers(card.binderID) ? team.directory.teammates.map(\.name) : []
+        if !teammates.isEmpty {
+            Section("Teammates") {
+                ForEach(teammates, id: \.self) { name in Button(name) { controller.board.assign(card, to: name, by: .you) } }
+            }
+        }
+        let people = peopleOnThisBoard.filter { name in !teammates.contains(name) && team.teammatesAgent(named: name) == nil }
         if !people.isEmpty {
             Section("People") {
                 ForEach(people, id: \.self) { name in Button(name) { controller.board.assign(card, to: name, by: .you) } }
@@ -819,9 +880,13 @@ struct CardDetailsPanel: View {
                     ForEach(card.links, id: \.self) { link in linkRow(link) }
                 }
             }
-            if let source = card.sourceTitle {
+            if card.distilledFrom != nil {
+                // Lane DS1: its spec, its section and what changed in it since, and what it waits for.
+                DistilledFromPanel(card: card)
+            } else if let source = card.sourceTitle {
                 Label("From \(source)", systemImage: "arrow.turn.down.right").font(.caption).foregroundStyle(BindersTheme.muted)
             }
+            if !card.waitsFor.isEmpty { CardWaitsPanel(card: card) }
             if card.sourceRef != nil {
                 Label("Its to-do is ticked off when this card is done.", systemImage: "checklist")
                     .font(.caption)
@@ -852,6 +917,20 @@ struct CardDetailsPanel: View {
             .help(ApprovalBox.web(link) != nil ? "Open it in your browser" : CardActions.runLog(link) != nil ? "Open the run's log" : "Show it in the Finder")
         } else {
             Label(link, systemImage: "link").font(.callout).foregroundStyle(BindersTheme.muted).textSelection(.enabled).lineLimit(2)
+        }
+    }
+}
+
+extension View {
+    /// The yes before a teammate's agent is given a card (lane DB2): "Give cards to Claude Code (Dana)?", with its owner
+    /// and who it sends cards to.
+    func teamConsent(_ pending: Binding<TeamConsent?>, onYes: @escaping (TeamConsent) -> Void) -> some View {
+        confirmationDialog(pending.wrappedValue?.question ?? "", isPresented: Binding(get: { pending.wrappedValue != nil }, set: { if !$0 { pending.wrappedValue = nil } }),
+                           titleVisibility: .visible, presenting: pending.wrappedValue) { consent in
+            Button("Give to \(consent.name)") { onYes(consent) }
+            Button("Cancel", role: .cancel) {}
+        } message: { consent in
+            Text(consent.message)
         }
     }
 }

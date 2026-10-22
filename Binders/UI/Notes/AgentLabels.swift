@@ -42,6 +42,8 @@ struct AgentNoteBanner: View {
                 }
                 Button("Make It Mine") {
                     note.makeMine()
+                    // An agent's changes to a spec's sections, held back from the agents on its cards, go to them now.
+                    if note.distill { DistillService.shared?.passOnAll(of: note) }
                     Store.shared.save()
                     madeMine()
                 }

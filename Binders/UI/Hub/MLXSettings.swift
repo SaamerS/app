@@ -102,7 +102,7 @@ struct MLXModelSettings: View {
                 if let failure = models.failures[model] {
                     StatusLabel(failure, .problem)
                 } else {
-                    let size = (MLXModels.suggestions + [MLXModels.embeddingSuggestion]).first { $0.id == model }.map { " · \($0.gigabytes.formatted()) GB" } ?? ""
+                    let size = MLXModels.known.first { $0.id == model }.map { " · \($0.gigabytes.formatted()) GB" } ?? ""
                     Text("Not downloaded yet\(size).")
                 }
                 Spacer()
@@ -115,7 +115,7 @@ struct MLXModelSettings: View {
 
     private func name(of model: String) -> String {
         if model.isEmpty { return "Choose a model" }
-        if let pick = (MLXModels.suggestions + [MLXModels.embeddingSuggestion]).first(where: { $0.id == model }) { return pick.name }
+        if let pick = MLXModels.known.first(where: { $0.id == model }) { return pick.name }
         if model.hasPrefix("/") { return (model as NSString).lastPathComponent }
         return model
     }

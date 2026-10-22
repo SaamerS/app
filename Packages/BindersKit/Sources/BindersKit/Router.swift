@@ -675,6 +675,14 @@ public enum RouterRules {
         return AgentOutcome()
     }
 
+    /// Whether Tev1's agent answer says no agent fits ("nobody", for you to do yourself) as surely as it would have to name
+    /// an agent: its top option, at or above the suggest band. Unsure, or no answer: false. The model doesn't choose among
+    /// people, who have no What it's for; Distill takes this as an item meant for you.
+    public static func saysNobody(_ model: [RankedOption]?, bands: RouterBands?) -> Bool {
+        guard let model, let top = RouterMath.argmax(model.map(\.p)).map({ model[$0] }) else { return false }
+        return top.key == RouterQuestions.nobody && top.p >= (bands?.suggest ?? 0.5)
+    }
+
     /// Everything a start without a tap depends on, as plain values.
     public struct StartCheck: Equatable, Sendable {
         /// The agent suggested, and how.

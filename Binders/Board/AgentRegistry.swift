@@ -449,14 +449,19 @@ final class AgentRegistry {
         asBefore.purpose = nil
         asBefore.kinds = nil
         asBefore.autoStart = nil
+        asBefore.takesTeamCards = nil
         return hash(asBefore)
     }
 
     /// Its kinds of work and its start switch, which steer what the router reads and what starts, fingerprinted apart;
     /// "" when it says neither, which never counts as a change.
+    /// Take cards from teammates (lane DB2) is in it only when it says something, so an agent saved before it fingerprints
+    /// as it did, and one whose "off" went missing (a save by a Mac before it) is held as changed outside Binders.
     static func routeFingerprint(_ agent: AgentProfile) -> String {
-        guard agent.kinds != nil || agent.autoStart != nil else { return "" }
-        return hash(["kinds": (agent.kinds ?? []).joined(separator: "\n"), "autoStart": agent.autoStart.map { $0 ? "on" : "off" } ?? ""])
+        guard agent.kinds != nil || agent.autoStart != nil || agent.takesTeamCards != nil else { return "" }
+        var parts = ["kinds": (agent.kinds ?? []).joined(separator: "\n"), "autoStart": agent.autoStart.map { $0 ? "on" : "off" } ?? ""]
+        if let teammates = agent.takesTeamCards { parts["takesTeamCards"] = teammates ? "on" : "off" }
+        return hash(parts)
     }
 
     /// Who it sends cards to and what it's for, fingerprinted apart from the rest (`fingerprint`); "" when it says neither.

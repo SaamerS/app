@@ -124,11 +124,15 @@ Each end lists, in hello, what it understands besides the tools, and neither sen
   on cards Binders sends it), `commentWakes` (a comment on a card an agent holds in progress wakes it; from a phone, only
   when its `to` names that agent; a phone asks first before a comment only on a Mac that lists it), `momentAuto` (it
   reads a moment's `mode`, hands over in Auto mode, takes `stop` and `not-me` in `binders/outcome`, and says what Auto
-  mode can do now in `list_agents`, to a phone that lists `momentAuto`) and `soloAuto` (it reads a capture's `mode`,
+  mode can do now in `list_agents`, to a phone that lists `momentAuto`), `soloAuto` (it reads a capture's `mode`,
   `solo`, `soloHold`, `agreed` and `soloMoments`, reads a capture the phone heard as only you for what you said and hands
   it over in Auto mode, reads a moment's `fromTranscript` and `uncued`, takes `stop-all`, `not-only-me` and `mode` in
   `binders/outcome` on a capture, sends `found`, `soloLine` and `joins` in outcomes, and gives `solo_start`, `solo` and
-  `auto_fingerprint` in `list_agents`). A phone that lists `workStreamsDoing` is
+  `auto_fingerprint` in `list_agents`), `folders` (binders have folders: `list_folders`, and `folder` on `list_notes`, `/`
+  for the binder's top or a folder's id, and on `add_note`, a folder's id, which decides the binder; one that's gone puts
+  the note at the binder's top) and `distill` (it answers `note_progress`, a Distill note's Work bar, cards and report,
+  or a binder's Work list, and says `distill: true` in `get_note` and `list_notes` for a note with Distill on; a phone
+  shows a note's Work section and a binder's Work list only for a Mac that lists it). A phone that lists `workStreamsDoing` is
   sent `doing` in `work_streams` (what a Claude Code run on the Mac says it's doing); one that doesn't isn't, since an
   older phone saves the whole reply. A phone holds
   back what its Mac doesn't list, and sends it once the Mac is updated: it keeps All-day capture's conversations in its
@@ -139,8 +143,15 @@ Each end lists, in hello, what it understands besides the tools, and neither sen
   them (`auto_start`) and fingerprints those with that too, so a yes given before is asked again;
   `commentsAskFirst`: it asks before a comment goes to an agent you haven't said yes to, and names that agent in `to`
   with the comment; `momentAuto`: it sends a moment's `mode`, and reads `auto` in `list_agents` and `handedOver` and
-  `stop` in outcomes; and `soloAuto`: it sends a capture's `mode`, `solo` and `soloMoments` (and in Auto mode its yes)
-  and a moment's `fromTranscript` and `uncued`, and reads `found`, `soloLine`, `joins` and the new `list_agents` keys.
+  `stop` in outcomes; `soloAuto`: it sends a capture's `mode`, `solo` and `soloMoments` (and in Auto mode its yes)
+  and a moment's `fromTranscript` and `uncued`, and reads `found`, `soloLine`, `joins` and the new `list_agents` keys;
+  `folders`: it shows a binder's folders and files the notes made in one there, asking only a Mac that lists
+  `folders`; and `distill`: it shows a note's Work section and a binder's Work list, read-only. A phone that doesn't
+  list `folders` never passes `folder`, and `list_notes` without it lists every note in the binder, as before; a folder
+  changing on the Mac comes as a change to `notes` in `binders/changed`. Its saved copy of a `note_progress` reply
+  leaves out what runs say they're doing (`doing`, and the report's sentences), as its copy of `work_streams` does. An
+  older phone never asks for `note_progress`, and its decoders leave the new keys (`distill`, `waits_for`,
+  `distilled_from`) be.
   A phone that lists nothing (iPhone 2.0) is taken to read
   `suggestion:card`, `suggestion:answer` and `notification:binders/changed`, and is sent nothing else: it decodes
   suggestions against a closed list, so one kind it doesn't know would freeze its refresh, and it takes any other
@@ -178,6 +189,8 @@ To a Mac that lists `dedupe`, every tool call the outbox makes for a note, a to-
 item's id as `request_id`. Sent again after its reply was lost (a timeout, the link gone on the way), it's saved once:
 the Mac answers a repeat as it did the first time, and keeps ids for a week, up to 5,000, per sender. A moment's
 `assign` carries one too, though assigning the same agent again is already a no-op there. A note or to-do retried without its binder (renamed or deleted on the Mac) keeps its id.
+A note kept in the outbox from inside a folder keeps the folder's id (`folder`, Optional), sent with it only to a Mac
+that lists `folders`.
 An answer already on the card, in your words, after the question it answers counts as sent and isn't sent again. To a Mac
 that doesn't list `dedupe`, the arguments are as before.
 

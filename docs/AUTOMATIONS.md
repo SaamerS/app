@@ -124,7 +124,11 @@ overrides, with `--ignore-user-config`; OpenCode through `OPENCODE_CONFIG_CONTEN
 `--additional-mcp-config` with a file in the run's folder, and a Copilot settings folder of Binders' own. None of your own
 config files for these tools is changed. Claude Code's settings carry Stop and SessionEnd hooks that run Binders' own
 `--agent-hook stop` and `--agent-hook session-end`, with the card and agent taken from the run's environment, so what the
-run said last goes on the card once. The other three have no such hooks: Binders reads the run's own JSON output when it
+run said last goes on the card once. On a Mac whose organization manages Claude Code's MCP servers (a `managed-mcp.json`),
+or once Claude Code has refused `--strict-mcp-config` there, a run starts without it, and a `--agent-hook pre-tool` hook
+lets it use Binders' board tools and nothing else. When those settings keep Binders' server out of a run altogether, the
+card says so and what you can do instead: ask whoever manages the Mac to allow Binders' server, post the card to a Claude
+Code session you have open, or wake the agent with a command. The other three have no such hooks: Binders reads the run's own JSON output when it
 ends, and puts what it said last on the card once. Each of their runs leaves a record beside its log, so a run that
 outlives Binders (a quit, a crash, an update) is taken up again when Binders opens, and its end still happens once. A run
 that fails or is stopped leaves its card in Blocked with why, and your answer sends it back to work. While the card is in
@@ -224,18 +228,27 @@ the argument `--mcp`. The "Anything else" row has that as JSON to copy.
 
 | Tool | Returns |
 |---|---|
-| `search_knowledge` (query, limit, kind) | The best-matching passages across meetings, notes, dictations and captured writing, by keywords and meaning |
-| `ask_knowledge` (question) | A written answer with the passages it drew on. Uses your local language model, so it takes a few seconds |
+| `search_knowledge` (query, limit, kind, binder, folder) | The best-matching passages across meetings, notes, dictations and captured writing, by keywords and meaning, each with the `folder` its source is in (`""` at the top of its binder). With `binder`, only that binder; with `folder` (a path such as `Ops/DevOps`, or an id from `list_folders`), only what's in that folder and the folders inside it |
+| `ask_knowledge` (question, binder, folder) | A written answer with the passages it drew on. With `binder` or `folder`, it answers only from that binder, or that folder and the folders inside it. Uses your local language model, so it takes a few seconds |
 | `list_binders` | Your binders with their counts, and what goes in each when you've said (`what_goes_here`) |
-| `list_meetings` (limit, binder) · `get_meeting` (id, include_transcript) | Meetings, and one in full |
-| `list_notes` (limit, binder, tag, status) · `get_note` (id) | Notes, with their status, owner, due date and #tags, and one in full |
+| `list_meetings` (limit, binder, kind, folder, include_subfolders) · `get_meeting` (id, include_transcript) | Meetings, and one in full, each with its `folder` and `folder_id`. With `folder` (a path or an id; `/` for the top of the binder), only the meetings directly in it, or with `include_subfolders` those in the folders inside it too |
+| `list_notes` (limit, offset, binder, tag, status, folder, include_subfolders) · `get_note` (id) | Notes, with their status, owner, due date, #tags, `folder` (its path, `""` at the top of its binder) and `folder_id`, and one in full. With `folder` (a path or an id; `/` for the top of the binder), only the notes directly in it, or with `include_subfolders` those in the folders inside it too |
 | `list_todos` (status) | Every to-do: promises, asks, to-dos, and the checklist items in meeting notes, notes and digests, with the card each is on, if any, where it came from (`origin`) and, when it wasn't you, who added it (`made_by`) |
 | `recent_dictations` (limit) | What you dictated lately |
 | `add_to_knowledge` (title, text, source, binder) | Anything worth remembering: a fact, a document's text, a web page, an email. Kept under the title with its source, so search and answers can cite it |
-| `add_note` (text, binder) · `append_to_note` (id, text) | A new note, with its first line as title; or more text at the end of one. A note an agent didn't write is then marked as edited by that agent |
+| `add_note` (text, binder, folder) · `append_to_note` (id, text) | A new note, with its first line as title, in the binder and folder named (a folder's path is made if it's missing; its id decides the binder, and an id that's gone puts the note at the top of the binder, and the reply says so); or more text at the end of one. A note an agent didn't write is then marked as edited by that agent |
 | `update_note` (id, find, replace, or text) | Change a note: one passage, given exactly as it is, or the whole text. Its earlier version stays in its history |
 | `correct_knowledge` (wrong, right, source_id, reason, binder) | Fix something the knowledge base has wrong. A note that says it is fixed; a meeting, dictation or message stays as it was said. The correction is kept as a note tagged #correction: search marks passages that still say the wrong thing (`corrected`), and answers follow the correction |
+| `distill_note` (id, agent) | Binders' own model (the Model for Distill in Settings → AI) reads a note with Distill on and proposes work items (title, brief, `done_when`, section, waits, size, who it's for). It's a proposal for you to review and place; it makes no cards. Returns the items when the model finishes within about 25 seconds, else says the proposal waits in Binders |
+| `propose_work_items` (id, items, agent) | An agent's own work items for a note with Distill on, by the note's id or by the id of the card that asked it to distill the note. A proposal for you to review, never cards, unless the binder's Agents may place work items is on: then they go to Ready, meant for whoever it picked (`for`), waiting for each other as it proposed (`waits_for`), so agents take them in order, each as its own start switch allows. A run Binders started for one card may call it with that card's id |
+| `note_progress` (id or binder, since) | How the work distilled from a note is going, from the board alone: its `counts` (done, in progress, waits on you, held up, not started), every card (`items`: column, who has it, what its agent says it's doing, its last update and `last_update_at`, `waits_on`, what it waits for, its section) and its `report` (finished since you last looked, in progress, waiting on whom, held up and by what, not started and for whom, sections changed since their cards were made, a `summary` and `markdown`). With `binder`: each Distill note there with its counts |
+| `get_note_history` (id) | A note's versions, newest first, the note as it is now on top: when, who (`by`, `by_kind`: person, teammate or agent, and an agent's `owner`), a `name` if given, lines added and removed, the sections touched, and the distills that read it. The id may be a card distilled from the note |
+| `get_note_version` (id, version, compare_to) | One version's text (`now` for the note as it is), and with `compare_to` what changed from it, line by line |
 | `create_binder` (name) | A new binder, or the existing one's id if the name is taken |
+| `list_folders` (binder, parent) | The folders in a binder, or in all of them: each one's `id`, `name`, `path`, `binder`, `binder_id`, `parent_id` (`""` at the top) and how many `notes`, `meetings` and `folders` it holds; with `parent` (a path or an id; `/` for the top), only those directly in it. A teammate's binder's folders only for a tool that may read teammates' items, and `captures` only for one that may read captures |
+| `create_folder` (name, binder, parent) | A folder, or each folder of a path (`Ops/DevOps`) that's missing, in the binder named or the current one, inside `parent` or at the top. One already there is returned as it is |
+| `rename_folder` (folder, name, binder) | A new name for a folder: `folder` is its id from `list_folders` or its path, and `binder` says which binder when the path could be in more than one. A name another folder beside it has is refused. What's in it stays in it. No tool deletes a folder |
+| `move_item` (id, ids, to) | Moves a note, meeting, capture or folder within its binder, or several at once (`ids`), all to the same place: into a folder (its path, made if it's missing, or its id) or to the top (`/`). A folder can't go into itself or one of its own folders, a teammate's meeting stays where they filed it, and a tool moves only what it may read. With `ids`, the reply's `items` says for each one whether it moved, and why not |
 | `add_meeting` (title, notes, date, attendees, duration_minutes, app, binder) | A meeting that happened elsewhere, from its notes or transcript, so it is searchable with the rest |
 | `add_todo` (text, binder) · `set_todo_status` (id, status) | A to-do, with a time at the end as its due date, in the named binder or the current one; done or open (ticks the checkbox where it lives), or dismiss a promise |
 | `add_to_calendar` (text) | An event from a phrase such as "lunch with Sam tomorrow at noon" |
@@ -260,6 +273,20 @@ finished work over for review unless the binder lets them finish.
 | `ask_on_task` (id, question, agent) · `comment_task` (id, text, agent) | A question for you (the card waits in Blocked until you answer), or a comment |
 | `release_task` (id, note, agent) · `complete_task` (id, summary, agent) | Lets go with a note for the next one, or finishes with a summary |
 | `request_approval` (id, action, recipients, text, link, agent) | Asks you to approve something outside Binders before the agent does it ("send an email", exactly who it goes to, the exact text). The card waits in Blocked; your answer comes back on it as "Approved" or "Declined: …" and wakes the agent. Agents can't decide one |
+
+**Distill.** A note with Distill on can be read into work items, which you review and place; placed cards wait for each
+other, and an agent can't claim one (or take it by moving it, or finish it without holding it) until every card it waits
+for is Done: "This card waits for “…”, which isn't done yet". `list_tasks` and `get_task` say what a card waits for
+(`waits_for`: id, title, column) and what it was distilled from (`distilled_from`: note, title, section, version, link,
+and `section_changed` once you've passed a change on). When a section changes after its cards were made, `get_task`'s timeline says who changed it and how many lines, and gives an agent the changed lines only when the user made the change, or a teammate did and the tool may read teammates' items; another agent's change is never given to a different agent, which is told to read the section with `get_note_version`. `get_note` and `list_notes` say `distill: true` for such a note. A
+run Binders started for one card also has `propose_work_items`, `get_note_history` and `get_note_version`, with its own
+card's id only: they reach the note its card came from, so it can see what changed since its card was made. An agent's
+own board-only server reaches a note only through a card it holds or is meant for.
+Binders doesn't wake an agent for a card that still waits ("Waits for “…”. Binders wakes Scribe once it's done."): it
+wakes it once the last card it waits for is Done, as for a card you made ready. When you or a teammate change the
+section a card came from, the agent holding the card in progress is woken as your comment wakes it, with the changed
+lines in `answer`; an agent's change waits until you choose Looked at It on the card or Make It Mine on the note. Cards
+an agent places through Agents may place work items start an agent only when it may start on cards Binders sends it.
 
 **Agents you hand cards to.** Settings → Agents sets up agents that take cards: Claude Code in a repository; Codex,
 OpenCode or GitHub Copilot CLI in a repository, when they're on this Mac (kept in agents-cli.json beside
@@ -288,10 +315,11 @@ the card says Binders started it and why, and Stop on the card, Stop in the flow
 to Backlog: a run Binders started stops, and a web hook, a Shortcut, a command that has run or your open Claude Code
 session keeps what it was sent, as the line then says. Never
 what a capture or a conversation heard, what you tell Siri or a Shortcut, a teammate's item, or a card from MCP or
-another agent. Only an agent whose What it's for is in your words, that drafts first (Can send, post or buy off) and that
+another agent, except the cards an agent places from Distill on a board where you turned on Agents may place work items
+(above). Only an agent whose What it's for is in your words, that drafts first (Can send, post or buy off) and that
 Binders wakes itself (not one that checks the board itself) can start that way. Binders wakes one (or posts to the Claude Code session you have open in its repository, when you turn that
-on) only when you give it a card, answer its question, comment on a card it holds in progress or send its work back, and
-at once for Give to and Assign (an edit or a comment on the Mac waits two seconds, so two quick comments make one wake).
+on) only when you give it a card, answer its question, comment on a card it holds in progress or send its work back, or
+for Distill's reasons above, and at once for Give to and Assign (an edit or a comment on the Mac waits two seconds, so two quick comments make one wake).
 A web hook's, a command's or a Shortcut's wake says why in `event` (`BINDERS_EVENT` for a command): `ready`, `answered`,
 `commented`, `sent_back` or `manual` (`test` from Settings). `answer` has your latest answer or comment, as before; while
 comments you made as it worked on the card haven't reached it (sent with an answer or Send Back, held back by the hour's

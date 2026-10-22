@@ -40,6 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.start()
         if controller.settings.phoneLink { controller.link.start() }
         controller.board.start()
+        controller.distill.start()
 
         // The library didn't open: the window comes up with its banner, so it's seen before anything seems to be saved.
         if !AppSettings.shared.hasCompletedSetup || !Permissions.accessibility || Permissions.microphone != .authorized || Store.shared.isFallback {
@@ -67,6 +68,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Typing an editor hasn't handed to its note yet, and whatever isn't saved.
         MarkdownEditor.flushAll()
         Store.shared.save()
+        // What waits for the team database, all of it on disk (lane DB10).
+        TeamBoard.current?.flushToDisk()
+        // Deleted meetings' recordings waited for Undo, which goes with the window: they go now.
+        MeetingTrash.forgetWaiting(keepingThisRun: false)
         guard let controller else { return .terminateNow }
         let recording = controller.meetings.isRecording
         let freeModel = AppSettings.shared.managesModelMemory
@@ -95,6 +100,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // A Binders file from the iPhone (AirDrop, Files, Mail), or a binders:// link.
             if url.isFileURL, url.pathExtension.lowercased() == BindersTransfer.fileExtension {
                 BindersFiles.open(url, controller: controller)
+            } else if url.isFileURL, url.pathExtension.lowercased() == TeamInvite.fileExtension {
+                // An invite to a team database: Settings → Team asks before it joins.
+                if let data = try? Data(contentsOf: url), let invite = TeamInvite(fileData: data) {
+                    URLCommands.openInvite(invite, controller: controller)
+                }
             } else {
                 URLCommands.handle(url, controller: controller)
             }
@@ -102,8 +112,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-/// Whole-library tidying: writing past its keep-by, unused attachments, old audio, the history of deleted notes. In the app
-/// it runs a little after launch, once this copy is the one running; self-tests run it first, as they always have.
+/// Whole-library tidying: writing past its keep-by, unused attachments, old audio, the history of deleted notes, the
+/// recordings of meetings deleted before a crash. In the app it runs a little after launch, once this copy is the one
+/// running; self-tests run it first, as they always have.
 @MainActor
 enum LaunchHousekeeping {
     static func run() {
@@ -111,6 +122,7 @@ enum LaunchHousekeeping {
         Store.shared.pruneWriting(olderThanDays: settings.captureRetentionDays)
         Store.shared.cleanupWriting()
         NoteHistory.forgetDeletedNotes()
+        MeetingTrash.forgetWaiting(keepingThisRun: true)
         Attachments.trashUnused()
         Store.shared.pruneOldAudio(olderThanDays: settings.audioRetentionDays)
     }

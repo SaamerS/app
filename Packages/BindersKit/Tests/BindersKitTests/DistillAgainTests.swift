@@ -1,0 +1,130 @@
+import XCTest
+@testable import BindersKit
+
+final class DistillAgainTests: XCTestCase {
+    private let before = """
+        # Offline mode
+
+        ## Storage
+        Keep the last 7 days of jobs on the device, encrypted.
+
+        ## Sync
+        Queue the changes made offline and send them in order.
+
+        ## Interface
+        Show a banner while offline.
+        """
+
+    /// The same note, its Sync section changed, Interface gone and Testing new.
+    private let after = """
+        # Offline mode
+
+        ## Storage
+        Keep the last 7 days of jobs on the device, encrypted.
+
+        ## Sync
+        Queue the changes made offline and send them in order. If a job changed on both sides, ask which to keep.
+
+        ## Testing
+        Test with the network cut for an hour.
+        """
+
+    private func earlier() -> [DistillAgain.Earlier] {
+        let sections = DistillSections.sections(of: before)
+        func hash(_ heading: String) -> String? { sections.first { $0.heading == heading }?.hash }
+        return [
+            DistillAgain.Earlier(item: UUID(), title: "Store 7 days of jobs, encrypted", section: "Storage", sectionHash: hash("Storage"), card: UUID()),
+            DistillAgain.Earlier(item: UUID(), title: "Queue offline changes and send them in order", section: "Sync", sectionHash: hash("Sync"), card: UUID()),
+            DistillAgain.Earlier(item: UUID(), title: "Show an offline banner", section: "Interface", sectionHash: hash("Interface"), card: UUID()),
+        ]
+    }
+
+    func testSectionsAreNewChangedOrTheSame() {
+        let plan = DistillAgain.plan(read: [], earlier: earlier(), sections: DistillSections.sections(of: after))
+        XCTAssertEqual(plan.sections["Storage"], .same)
+        XCTAssertEqual(plan.sections["Sync"], .changed)
+        XCTAssertEqual(plan.sections["Testing"], .new)
+        XCTAssertNil(plan.sections["Interface"], "it's gone")
+    }
+
+    func testItProposesOnlyTheNewAndTheChanged() {
+        let sections = DistillSections.sections(of: after)
+        let earlier = earlier()
+        func item(_ title: String, _ section: String, brief: String = "") -> DistillItem {
+            DistillItem(title: title, brief: brief, section: section, sectionHash: sections.first { $0.heading == section }?.hash)
+        }
+        let read = [
+            item("Store the last 7 days of jobs, encrypted", "Storage"),
+            item("Queue offline changes and send them in order", "Sync", brief: "Send in order; ask on a conflict."),
+            item("Ask which version to keep on a conflict", "Sync", brief: "Keep both and ask."),
+            item("Test an hour offline", "Testing"),
+        ]
+        let plan = DistillAgain.plan(read: read, earlier: earlier, sections: sections)
+        XCTAssertEqual(plan.items.map(\.title), ["Ask which version to keep on a conflict", "Test an hour offline"],
+                       "the storage item is the same as before, the queue item is on the board already")
+        XCTAssertEqual(plan.updates.map(\.card), [earlier[1].card!], "the queue card's section changed: its brief is offered for update")
+        XCTAssertEqual(plan.updates.first?.brief, "Send in order; ask on a conflict.")
+        XCTAssertEqual(plan.updates.first?.sectionHash, sections.first { $0.heading == "Sync" }?.hash)
+        XCTAssertEqual(plan.closes.map(\.card), [earlier[2].card!], "the banner card's section is gone")
+        XCTAssertEqual(plan.leftOut, 2)
+    }
+
+    func testItNeverMakesTheSameItemTwice() {
+        let sections = DistillSections.sections(of: before)
+        let earlier = earlier()
+        // Distilled again with nothing changed: the same items come back, and none is proposed.
+        let read = earlier.map { DistillItem(title: $0.title, section: $0.section, sectionHash: $0.sectionHash) }
+        let plan = DistillAgain.plan(read: read, earlier: earlier, sections: sections)
+        XCTAssertTrue(plan.items.isEmpty)
+        XCTAssertTrue(plan.updates.isEmpty)
+        XCTAssertTrue(plan.closes.isEmpty)
+        XCTAssertEqual(plan.leftOut, 3)
+    }
+
+    func testAChangedSectionsNewItemMatchesItsCardByTitle() {
+        let sections = DistillSections.sections(of: after)
+        let earlier = earlier()
+        let read = [DistillItem(title: "Queue the offline changes and send in order", brief: "New brief.", section: "Sync")]
+        let plan = DistillAgain.plan(read: read, earlier: earlier, sections: sections)
+        XCTAssertTrue(plan.items.isEmpty, "close enough to the card that's there: an update, not a new item")
+        XCTAssertEqual(plan.updates.first?.brief, "New brief.")
+    }
+
+    func testFinishedCardsAreLeftAlone() {
+        var earlier = earlier()
+        earlier[2].finished = true
+        earlier[1].finished = true
+        let sections = DistillSections.sections(of: after)
+        let plan = DistillAgain.plan(read: [DistillItem(title: "Queue offline changes and send them in order", section: "Sync")], earlier: earlier,
+                                     sections: sections)
+        XCTAssertTrue(plan.closes.isEmpty, "a done card isn't closed")
+        XCTAssertTrue(plan.updates.isEmpty, "nor brought up to date")
+    }
+
+    func testWaitsOnItemsLeftOutGo() {
+        let sections = DistillSections.sections(of: after)
+        let storage = DistillItem(title: "Store 7 days of jobs, encrypted", section: "Storage")
+        var testing = DistillItem(title: "Test an hour offline", section: "Testing")
+        testing.waitsFor = [storage.id]
+        let plan = DistillAgain.plan(read: [storage, testing], earlier: earlier(), sections: sections)
+        XCTAssertEqual(plan.items.map(\.title), ["Test an hour offline"])
+        XCTAssertEqual(plan.items[0].waitsFor, [], "what it waited for is on the board from before, not in this proposal")
+    }
+
+    func testAnAgentsOwnProposalLeavesOutOnlyRepeats() {
+        let earlier = earlier()
+        let read = [DistillItem(title: "Show an offline banner", section: "Interface"),
+                    DistillItem(title: "Write the help page", section: "Storage"),
+                    DistillItem(title: "Show an offline banner", section: "Storage")]
+        let added = DistillAgain.additions(read: read, earlier: earlier)
+        XCTAssertEqual(added.items.map(\.title), ["Write the help page", "Show an offline banner"],
+                       "a new item in a section that's the same stays; the same item in the same section goes")
+        XCTAssertEqual(added.leftOut, 1)
+    }
+
+    func testSimilarity() {
+        XCTAssertEqual(DistillAgain.similarity("Show an offline banner", "show the offline banner."), 1)
+        XCTAssertEqual(DistillAgain.similarity("Write docs", "Build the demo"), 0)
+        XCTAssertGreaterThan(DistillAgain.similarity("Queue offline changes", "Queue the offline changes in order"), 0.5)
+    }
+}

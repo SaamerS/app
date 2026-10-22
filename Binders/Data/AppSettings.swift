@@ -20,6 +20,20 @@ enum LLMProviderKind: String, CaseIterable, Codable, Identifiable {
     }
 }
 
+/// Where Distill's model comes from (lane DS3): the language model, or another one for Distill only.
+enum DistillModelSource: String, CaseIterable, Codable, Identifiable {
+    /// The language model in Settings → AI.
+    case same
+    /// A model running in Binders with MLX.
+    case mlx
+    /// A model in Ollama, at the Ollama address in Settings → AI.
+    case ollama
+    /// A model on the OpenAI-compatible server in Settings → AI.
+    case server
+
+    var id: String { rawValue }
+}
+
 /// User preferences, persisted to UserDefaults on every change.
 @MainActor
 @Observable
@@ -51,6 +65,12 @@ final class AppSettings {
     var mlxEmbeddingModel: String { didSet { defaults.set(mlxEmbeddingModel, forKey: "mlxEmbeddingModel") } }
     /// Where MLX models are downloaded from: Hugging Face, or a company's mirror of it.
     var mlxEndpoint: String { didSet { defaults.set(mlxEndpoint, forKey: "mlxEndpoint") } }
+    /// Where Distill's model comes from: the language model ("same", as before) or another one, for Distill only (lane
+    /// DS3). Distill and `distill_note` use it; dictation, Ask, digests and everything else keep the language model.
+    var distillModelSource: DistillModelSource { didSet { defaults.set(distillModelSource.rawValue, forKey: "distillModelSource") } }
+    /// The model Distill uses when `distillModelSource` isn't "same": an MLX model's Hugging Face name or folder, an Ollama
+    /// tag, or the name a server lists.
+    var distillModel: String { didSet { defaults.set(distillModel, forKey: "distillModel") } }
     /// The decision model (DecisionChoice): "tev1", "off", a Hugging Face name, a folder's path or a server's address. ""
     /// until you choose: Tev1 0.8B on Apple silicon, Off on an Intel Mac. Nothing writes it but a choice in Settings.
     var decisionModel: String { didSet { defaults.set(decisionModel, forKey: "decisionModel") } }
@@ -121,6 +141,19 @@ final class AppSettings {
     var teamMemberName: String { didSet { defaults.set(teamMemberName, forKey: "teamMemberName") } }
     var shareMeetingsByDefault: Bool { didSet { defaults.set(shareMeetingsByDefault, forKey: "shareMeetingsByDefault") } }
     var shareNotesByDefault: Bool { didSet { defaults.set(shareNotesByDefault, forKey: "shareNotesByDefault") } }
+    /// The team database this Mac shares binders through (lane DB2): the server and this Mac's login, as JSON
+    /// (`TeamDatabaseServer`), never a password, which is in the Keychain. Nil when there's none. Kept under a key of its
+    /// own: "teamDatabase" is the default that turns the team database on (TeamDatabaseFeature).
+    var teamDatabase: String? { didSet { defaults.set(teamDatabase, forKey: Self.teamDatabaseServerKey) } }
+    static let teamDatabaseServerKey = "teamDatabaseServer"
+
+    /// A team database saved by a build before its switch, under "teamDatabase", where that key now turns it on: moved to
+    /// its own key, once, so turning it on never overwrites it. A switch already set (a bool) is left as it is.
+    static func moveTeamDatabaseServer(in defaults: UserDefaults) {
+        guard defaults.object(forKey: teamDatabaseServerKey) == nil, let saved = defaults.object(forKey: TeamDatabaseFeature.key) as? String else { return }
+        defaults.set(saved, forKey: teamDatabaseServerKey)
+        defaults.removeObject(forKey: TeamDatabaseFeature.key)
+    }
 
     var openAIKey: String {
         get { Keychain.read("openai-compatible-key") ?? "" }
@@ -165,6 +198,8 @@ final class AppSettings {
         mlxModel = defaults.string(forKey: "mlxModel") ?? MLXModels.suggested.id
         mlxEmbeddingModel = defaults.string(forKey: "mlxEmbeddingModel") ?? MLXModels.embeddingSuggestion.id
         mlxEndpoint = defaults.string(forKey: "mlxEndpoint") ?? "https://huggingface.co"
+        distillModelSource = defaults.string(forKey: "distillModelSource").flatMap(DistillModelSource.init(rawValue:)) ?? .same
+        distillModel = defaults.string(forKey: "distillModel") ?? ""
         // Read, never written here (a didSet doesn't run in init): a launch writes none of the three until you choose.
         decisionModel = defaults.string(forKey: "decisionModel") ?? ""
         decisionIdleMinutes = defaults.object(forKey: "decisionIdleMinutes") as? Int ?? 5
@@ -225,6 +260,8 @@ final class AppSettings {
         teamMemberName = defaults.string(forKey: "teamMemberName") ?? ""
         shareMeetingsByDefault = defaults.bool(forKey: "shareMeetingsByDefault")
         shareNotesByDefault = defaults.bool(forKey: "shareNotesByDefault")
+        Self.moveTeamDatabaseServer(in: defaults)
+        teamDatabase = defaults.string(forKey: Self.teamDatabaseServerKey)
     }
 
     var languageHint: String? { language == "auto" ? nil : language }
@@ -243,6 +280,40 @@ final class AppSettings {
     /// The model client, in the lane its caller belongs to: `.now` for what you wait on, `.later` for background work.
     func makeLLMClient(lane: ModelLane.Priority = .now) -> LLMClient? {
         makeProviderClient().map { LanedClient(inner: $0, lane: lane, interrupts: llmProvider == .ollama) }
+    }
+
+    /// Whether Distill has a model of its own (`distillModelSource`), rather than the language model: one named, and,
+    /// for MLX, on a Mac that runs it.
+    var distillHasOwnModel: Bool {
+        guard distillModelSource != .same, !distillModel.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
+        return distillModelSource != .mlx || MLXModels.isSupported
+    }
+
+    /// The name Distill's model goes by: its own, or the language model's.
+    var distillModelName: String {
+        guard distillHasOwnModel else { return llmModelName }
+        let model = distillModel.trimmingCharacters(in: .whitespaces)
+        guard distillModelSource == .mlx else { return model }
+        return model.hasPrefix("/") ? (model as NSString).lastPathComponent : (model.split(separator: "/").last.map(String.init) ?? model)
+    }
+
+    /// The model client for Distill and `distill_note` (lane DS3): the model chosen for Distill, in the same lane as the
+    /// language model's requests (one model answers at a time), else the language model. An MLX model of its own frees
+    /// its memory after the same idle time as the language model's, and stays beside it only where both fit
+    /// (`MLXRuntime`).
+    func makeDistillClient(lane: ModelLane.Priority = .now) -> LLMClient? {
+        guard distillHasOwnModel else { return makeLLMClient(lane: lane) }
+        let model = distillModel.trimmingCharacters(in: .whitespaces)
+        let client: LLMClient?
+        switch distillModelSource {
+        case .same: client = nil
+        case .mlx: client = MLXClient(model: model, idleMinutes: modelIdleMinutes)
+        case .ollama:
+            client = URL(string: ollamaURL).map { OllamaClient(baseURL: $0, model: model, keepAliveSeconds: modelIdleMinutes <= 0 ? -1 : modelIdleMinutes * 60) }
+        case .server:
+            client = URL(string: openAIBaseURL).map { OpenAICompatibleClient(baseURL: $0, model: model, apiKey: openAIKey.isEmpty ? nil : openAIKey) }
+        }
+        return client.map { LanedClient(inner: $0, lane: lane, interrupts: distillModelSource == .ollama) }
     }
 
     private func makeProviderClient() -> LLMClient? {

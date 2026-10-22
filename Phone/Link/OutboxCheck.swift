@@ -30,6 +30,7 @@ extension Outbox {
                            raw: "um book the dentist for friday", app: "Binders on iPhone", model: "Apple Intelligence")
         put(try? encoder.encode([note, todo, dictated]), in: outbox)
         check(load() == [note, todo, dictated].map(\.current), "an outbox from iPhone 2.0 (6) reads")
+        check(load().allSatisfy { $0.folder == nil }, "and its notes have no folder: they go to their binder's top")
         clear()
 
         // As 2.0 (10) wrote it (07fe0ab), the first with All-day capture: a keyboard dictation and a conversation in two parts.
@@ -71,7 +72,8 @@ extension Outbox {
         // answer first.
         let full = PendingSave(id: UUID(), tool: PendingSave.dictation, text: "Book the dentist.", binder: "Personal", created: date(1200),
                                raw: "um book the dentist", app: "All-day capture", model: "Apple Intelligence", conversation: UUID(),
-                               payload: Data(#"{"text":"Book the dentist."}"#.utf8), card: UUID().uuidString, question: "2026-10-16T09:00:00Z")
+                               payload: Data(#"{"text":"Book the dentist."}"#.utf8), card: UUID().uuidString, question: "2026-10-16T09:00:00Z",
+                               folder: UUID().uuidString)
         let answer = PendingSave(id: UUID(), tool: PendingSave.answer, text: "Dark, please.", binder: nil, created: date(1260),
                                  card: UUID().uuidString, question: "2026-10-16T09:00:00-04:00")
         let handOff = PendingSave(id: UUID(), tool: PendingSave.handOff, text: "Fix the login bug", binder: nil, created: date(1320),

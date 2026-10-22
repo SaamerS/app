@@ -2,14 +2,44 @@ import Foundation
 
 /// When a note's earlier text is kept, which kept versions go, and how two versions differ, for version history.
 public enum NoteVersions {
-    /// How long after one kept version the next can be: an editing session keeps a version every few minutes.
+    /// How long after one kept version the next can be, as versions were kept before editing sessions (`beginsSession`).
     public static let interval: TimeInterval = 5 * 60
+    /// How long an editing session goes without a change before it ends.
+    public static let sessionIdle: TimeInterval = 10 * 60
+
+    /// An editing session going on in a note: who's making it, and when they last changed the note.
+    public struct Session: Equatable, Sendable {
+        public var author: NoteAuthor
+        public var last: Date
+
+        public init(author: NoteAuthor, last: Date) {
+            self.author = author
+            self.last = last
+        }
+    }
+
+    /// Whether a change by `author` at `now` begins a new editing session, so the text from before it is kept as the
+    /// version the session before made: none was going on (its author left the note or closed its window, or Binders
+    /// started since), someone else makes this change, or ten minutes went by without one. `always`: a change that's a
+    /// session of its own, such as an agent's edit, a teammate's copy arriving or links following a rename.
+    public static func beginsSession(after session: Session?, by author: NoteAuthor, at now: Date, always: Bool = false) -> Bool {
+        guard !always, let session else { return true }
+        return session.author != author || now.timeIntervalSince(session.last) >= sessionIdle
+    }
+
+    /// When the version a session made is dated: its last change (never after `now`); without a session known (Binders
+    /// started since), `now`. Never at or before the version kept before it, so no two share a name, the moment in
+    /// milliseconds.
+    public static func versionDate(of session: Session?, now: Date, after lastKept: Date?) -> Date {
+        let earliest = lastKept.map { $0.addingTimeInterval(0.001) } ?? .distantPast
+        return max(session.map { min($0.last, now) } ?? now, earliest)
+    }
     /// Versions older than this go, except the latest few.
     public static let keepDays = 30
     public static let keepLatest = 20
 
-    /// Whether the text a note had before a change should be kept: when the last kept version is old enough, and the
-    /// text isn't empty or the same as it.
+    /// Whether the text a note had before a change should be kept, as before editing sessions: when the last kept version
+    /// is old enough, and the text isn't empty or the same as it.
     public static func shouldKeep(_ previous: String, lastKept: (date: Date, text: String)?, now: Date) -> Bool {
         guard !previous.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
         guard let lastKept else { return true }

@@ -7,10 +7,19 @@ import BindersKit
 /// (BINDERS_CARD) as its agent (BINDERS_AGENT), through the inbox like any agent's write: what the run said last, or that
 /// its session ended. The app keeps it to one report a run (`AgentDispatcher.reported`), and the run's end stands in when
 /// no hook comes. It prints nothing and always exits 0, so a hook never holds the run up or keeps Claude from stopping.
+/// And `--agent-hook pre-tool`, the PreToolUse hook of a run not limited to Binders' tools, which refuses every MCP tool
+/// but Binders' board tools (`ClaudeCodeToolGuard`).
 @MainActor
 enum AgentRunHook {
     static func run(_ arguments: [String]) -> Never {
         let input = FileHandle.standardInput.readDataToEndOfFile()
+        // `--agent-hook pre-tool`: a run not limited to Binders' tools asks before each MCP tool. A refusal is said on standard
+        // error with exit status 2, which Claude Code takes as "don't run it" and tells the run why.
+        if let index = arguments.firstIndex(of: "--agent-hook"), arguments.indices.contains(index + 1), arguments[index + 1] == ClaudeCodeToolGuard.hook {
+            guard let why = ClaudeCodeToolGuard.refusal(input) else { exit(0) }
+            FileHandle.standardError.write(Data((why + "\n").utf8))
+            exit(2)
+        }
         let environment = ProcessInfo.processInfo.environment
         guard let index = arguments.firstIndex(of: "--agent-hook"), arguments.indices.contains(index + 1),
               let hook = AgentRunReport.Hook(rawValue: arguments[index + 1]),

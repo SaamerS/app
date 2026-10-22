@@ -36,6 +36,8 @@ public struct MCPTool: Equatable, Sendable {
         for parameter in parameters {
             var property: [String: Any] = ["type": parameter.type, "description": parameter.description]
             if let options = parameter.options { property["enum"] = options }
+            // A list is of strings: ids, names.
+            if parameter.type == "array" { property["items"] = ["type": "string"] }
             properties[parameter.name] = property
         }
         // Binders' writes add or change, and a changed note keeps its earlier versions: none destroys anything, and

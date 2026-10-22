@@ -10,6 +10,9 @@ struct DictationSheet: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// The binder it goes into; the first one when nil.
     var binder: String? = nil
+    /// The folder in that binder a note goes into, when it's dictated inside one; a to-do, or a note for another binder
+    /// picked here, goes where it would anyway.
+    var folder: FolderInfo? = nil
     /// Dictating into something else, such as a note being written: its words go there instead.
     var onInsert: ((String) -> Void)? = nil
     @State private var session = DictationSession()
@@ -222,16 +225,18 @@ struct DictationSheet: View {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         let binder = chosenBinder ?? binders.first?.name
+        let inFolder = tool == "add_note" && binder != nil && binder == self.binder ? folder : nil
         Task {
-            let sent = await connection.save(tool, text: text, binder: binder)
+            let sent = await connection.save(tool, text: text, binder: binder, folder: inFolder?.id)
             // In its binder: filed, by touch. Kept here for later, only a tap.
             if sent { Haptics.shared.success() } else { Haptics.shared.tap() }
             let what = tool == "add_todo" ? "To-do" : "Note"
             let kept = connection.mac == nil ? "\(what) kept on this iPhone until you pair a Mac"
                                              : "\(what) kept on this iPhone; it goes to your Mac when it's back"
             // What was done, in the past tense: "Added to Personal: Book a doctor's appointment".
-            let done = tool == "add_todo" ? binder.map { "Added to \($0): \(text)" } ?? "To-do added: \(text)"
-                                          : binder.map { "Note saved in \($0)" } ?? "Note saved"
+            let place: String? = inFolder?.name ?? binder
+            let done: String = tool == "add_todo" ? binder.map { "Added to \($0): \(text)" } ?? "To-do added: \(text)"
+                                                  : place.map { "Note saved in \($0)" } ?? "Note saved"
             show(sent ? done : kept)
             try? await Task.sleep(for: .seconds(1.2))
             dismiss()

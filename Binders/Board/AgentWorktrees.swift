@@ -35,6 +35,12 @@ enum AgentPlaces {
         AppPaths.isDemo ? root.path + CodexManaged.folder : CodexManaged.folder
     }
 
+    /// Claude Code's folder of an organization's managed settings, as Claude Code looks for it (`ClaudeCodeManaged`); under
+    /// the root in a throwaway folder, so a self-test can plant something in it, and never touches the real one.
+    static var managedClaudeFolder: String {
+        AppPaths.isDemo ? root.path + ClaudeCodeManaged.folder : ClaudeCodeManaged.folder
+    }
+
     /// Makes a folder (and its parents under the root) 0700, whoever made it first.
     @discardableResult
     static func ensure(_ folder: URL) -> URL {

@@ -31,6 +31,11 @@ protocol LLMClient: Sendable {
     /// that can't stream tells it once, with the whole reply.
     func stream(system: String, user: String, maxTokens: Int, temperature: Double, timeout: TimeInterval,
                 stopWhen: @escaping @Sendable (String) -> Bool, onText: @escaping @Sendable (String) -> Void) async throws -> String
+    /// The same, the reply held to `schema` where the client can hold it (lane DS3): MLX token by token, Ollama with
+    /// `format`, an OpenAI-compatible server with `response_format`. A client that can't, or a server that turns it down,
+    /// answers as `stream` does, and says so in `SchemaReply.held` and `why`.
+    func stream(system: String, user: String, maxTokens: Int, temperature: Double, timeout: TimeInterval, schema: ReplySchema,
+                stopWhen: @escaping @Sendable (String) -> Bool, onText: @escaping @Sendable (String) -> Void) async throws -> SchemaReply
     func listModels() async throws -> [String]
     /// Loads the model into memory so the first dictation isn't slow.
     func warmUp() async
@@ -38,11 +43,23 @@ protocol LLMClient: Sendable {
     func unload() async
     /// Whether the model is in memory right now, and until when.
     func residency() async -> ModelResidency?
+    /// How many tokens the model reads at once (its context: the prompt and the reply together), where Binders can tell:
+    /// what Distill sizes the parts of a long note by (lane DS2). Nil when it can't.
+    func contextTokens() async -> Int?
 }
 
 extension LLMClient {
     func unload() async {}
     func residency() async -> ModelResidency? { nil }
+    func contextTokens() async -> Int? { nil }
+
+    /// A client that can't hold a reply to a schema: the reply as it comes.
+    func stream(system: String, user: String, maxTokens: Int, temperature: Double, timeout: TimeInterval, schema: ReplySchema,
+                stopWhen: @escaping @Sendable (String) -> Bool, onText: @escaping @Sendable (String) -> Void) async throws -> SchemaReply {
+        let text = try await stream(system: system, user: user, maxTokens: maxTokens, temperature: temperature, timeout: timeout,
+                                    stopWhen: schema.stopWhenNotHeld ?? stopWhen, onText: onText)
+        return SchemaReply(text: text, held: false, why: "this kind of model can't be held to a schema")
+    }
 
     /// A client that can't stream: one reply, told once.
     func stream(system: String, user: String, maxTokens: Int, temperature: Double, timeout: TimeInterval,
@@ -87,10 +104,68 @@ struct LanedClient: LLMClient {
         }
     }
 
+    func stream(system: String, user: String, maxTokens: Int, temperature: Double, timeout: TimeInterval, schema: ReplySchema,
+                stopWhen: @escaping @Sendable (String) -> Bool, onText: @escaping @Sendable (String) -> Void) async throws -> SchemaReply {
+        let inner = inner
+        return try await ModelLane.shared.run(lane, interrupting: lane == .now && interrupts) {
+            try await inner.stream(system: system, user: user, maxTokens: maxTokens, temperature: temperature, timeout: timeout,
+                                   schema: schema, stopWhen: stopWhen, onText: onText)
+        }
+    }
+
     func listModels() async throws -> [String] { try await inner.listModels() }
     func warmUp() async { await inner.warmUp() }
     func unload() async { await inner.unload() }
     func residency() async -> ModelResidency? { await inner.residency() }
+    func contextTokens() async -> Int? { await inner.contextTokens() }
+}
+
+/// A JSON schema a reply is held to, where the model's client can hold it (lane DS3; Distill's is `DistillSchema`).
+struct ReplySchema: Sendable {
+    /// What an OpenAI-compatible server's `json_schema` is named.
+    var name: String
+    /// With lengths and counts: for MLX and Ollama, whose grammars hold to them.
+    var bounded: String
+    /// Without them: for an OpenAI-compatible server's strict mode, which may turn them down.
+    var portable: String
+    /// The answer's own limit in tokens: a reply MLX holds to the schema is brought to a close within it.
+    var answerTokens: Int
+    /// When to stop a reply that ends up not held to the schema (a client that can't, a server that turned it down), in
+    /// place of the `stopWhen` given for a held one; nil for the same.
+    var stopWhenNotHeld: (@Sendable (String) -> Bool)?
+}
+
+/// A reply asked for with a schema, and whether it was held to it.
+struct SchemaReply: Sendable {
+    var text: String
+    var held: Bool
+    /// Why it wasn't, for the log and the bench.
+    var why: String?
+}
+
+/// Servers that turned a reply's schema down (`format`, `response_format`) once: asked without it from then on, until
+/// Binders quits.
+enum SchemaRefusals {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var refused: Set<String> = []
+
+    static func refuses(_ server: String) -> Bool { lock.withLock { refused.contains(server) } }
+    static func remember(_ server: String) { _ = lock.withLock { refused.insert(server) } }
+
+    /// Whether a server's error turns down the schema it was sent: a 4xx that names it (`format`, `response_format`,
+    /// `json_schema`, a schema or grammar it couldn't read), and isn't a prompt too long for its context.
+    static func isRefusal(_ code: Int, _ message: String, field: String) -> Bool {
+        guard (400..<500).contains(code), !DistillBudget.isTooLong(message) else { return false }
+        let lower = message.lowercased()
+        return [field, "json_schema", "schema", "grammar"].contains { lower.contains($0) }
+    }
+}
+
+/// A value put in a request body as JSON text, as it is: a schema's properties keep their order, which a server's grammar
+/// writes them in (JSONSerialization would reorder them).
+private struct RawJSON {
+    let text: String
+    let marker = "binders-raw-json-" + UUID().uuidString
 }
 
 /// A model loaded on the server: how much memory it holds and when it will be freed.
@@ -104,8 +179,26 @@ private func makeRequest(_ url: URL, body: [String: Any], headers: [String: Stri
     request.httpMethod = "POST"
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
-    request.httpBody = try JSONSerialization.data(withJSONObject: body)
+    request.httpBody = try serialize(body)
     return request
+}
+
+/// The body as JSON, a `RawJSON` anywhere in it put in as its text.
+private func serialize(_ body: [String: Any]) throws -> Data {
+    var raws: [RawJSON] = []
+    func swap(_ value: Any) -> Any {
+        if let raw = value as? RawJSON {
+            raws.append(raw)
+            return raw.marker
+        }
+        if let object = value as? [String: Any] { return object.mapValues(swap) }
+        if let list = value as? [Any] { return list.map(swap) }
+        return value
+    }
+    let swapped = body.mapValues(swap)
+    var text = String(decoding: try JSONSerialization.data(withJSONObject: swapped), as: UTF8.self)
+    for raw in raws { text = text.replacingOccurrences(of: "\"\(raw.marker)\"", with: raw.text) }
+    return Data(text.utf8)
 }
 
 private func postJSON(_ url: URL, body: [String: Any], headers: [String: String] = [:], timeout: TimeInterval) async throws -> [String: Any] {
@@ -246,6 +339,40 @@ struct OllamaClient: LLMClient {
                                  isDone: { $0["done"] as? Bool == true })
     }
 
+    /// The schema goes as `format` (Ollama 0.5 and later hold the reply to it); an Ollama that turns it down is asked
+    /// without it, then and from then on.
+    func stream(system: String, user: String, maxTokens: Int, temperature: Double, timeout: TimeInterval, schema: ReplySchema,
+                stopWhen: @escaping @Sendable (String) -> Bool, onText: @escaping @Sendable (String) -> Void) async throws -> SchemaReply {
+        let server = baseURL.absoluteString
+        guard !SchemaRefusals.refuses(server) else {
+            let text = try await stream(system: system, user: user, maxTokens: maxTokens, temperature: temperature, timeout: timeout,
+                                        stopWhen: schema.stopWhenNotHeld ?? stopWhen, onText: onText)
+            return SchemaReply(text: text, held: false, why: "this Ollama turned the schema down before")
+        }
+        var body = chatBody(system: system, user: user, maxTokens: maxTokens, temperature: temperature, stream: true)
+        body["format"] = RawJSON(text: schema.bounded)
+        var why: String?
+        var bytes: URLSession.AsyncBytes?
+        for _ in 0..<3 where bytes == nil {
+            do {
+                bytes = try await openStream(chatURL, body: body, timeout: timeout)
+            } catch LLMError.http(400, let message) where body["think"] != nil && message.localizedCaseInsensitiveContains("think") {
+                body.removeValue(forKey: "think")
+            } catch LLMError.http(let code, let message) where body["format"] != nil && SchemaRefusals.isRefusal(code, message, field: "format") {
+                Log.llm.notice("\(model, privacy: .public) on Ollama turned the reply's schema down; asking without it: \(message.prefix(200), privacy: .public)")
+                SchemaRefusals.remember(server)
+                body.removeValue(forKey: "format")
+                why = "Ollama turned the schema down: \(message.prefix(120))"
+            }
+        }
+        guard let bytes else { throw LLMError.invalidResponse }
+        let message: ([String: Any]) -> String? = { ($0["message"] as? [String: Any])?["content"] as? String }
+        let held = body["format"] != nil
+        let text = try await collect(bytes, model: model, stopWhen: held ? stopWhen : schema.stopWhenNotHeld ?? stopWhen, onText: onText,
+                                     content: message, whole: message, isDone: { $0["done"] as? Bool == true })
+        return SchemaReply(text: text, held: held, why: why)
+    }
+
     func listModels() async throws -> [String] {
         let json = try await getJSON(baseURL.appendingPathComponent("api/tags"))
         let models = json["models"] as? [[String: Any]] ?? []
@@ -279,6 +406,26 @@ struct OllamaClient: LLMClient {
             if let date = expires, date.timeIntervalSinceNow > 10 * 365 * 86_400 { expires = nil }
         }
         return ModelResidency(bytes: bytes, expiresAt: expires)
+    }
+
+    /// Ollama's default context when nothing sets it (`OLLAMA_CONTEXT_LENGTH`, the Ollama app's context setting, a
+    /// model's own `num_ctx`). Binders sends no `num_ctx`, so a longer prompt is cut from the front, instructions first.
+    static let defaultContext = 4_096
+
+    /// The context the loaded model reads with, as Ollama reports it (`context_length` in /api/ps, from Ollama 0.12); the
+    /// model is loaded first when it isn't. Ollama's default when it doesn't say.
+    func contextTokens() async -> Int? {
+        func loaded() async -> Int? {
+            guard let json = try? await getJSON(baseURL.appendingPathComponent("api/ps")),
+                  let models = json["models"] as? [[String: Any]] else { return nil }
+            let wanted = model.contains(":") ? model : model + ":latest"
+            let entry = models.first { ($0["name"] as? String) == wanted || ($0["model"] as? String) == wanted || ($0["name"] as? String) == model }
+            return (entry?["context_length"] as? NSNumber)?.intValue
+        }
+        if let tokens = await loaded(), tokens > 0 { return tokens }
+        await warmUp()
+        if let tokens = await loaded(), tokens > 0 { return tokens }
+        return Self.defaultContext
     }
 }
 
@@ -373,6 +520,58 @@ struct OpenAICompatibleClient: LLMClient {
                                  isDone: { ($0["choices"] as? [[String: Any]])?.first?["finish_reason"] is String })
     }
 
+    private static let format = "response_format"
+
+    /// The schema goes as `response_format` (`json_schema`, strict), as llama.cpp, LM Studio, vLLM and OpenAI's own API
+    /// take it, in its portable form; a server that turns it down is asked without it, then and from then on.
+    func stream(system: String, user: String, maxTokens: Int, temperature: Double, timeout: TimeInterval, schema: ReplySchema,
+                stopWhen: @escaping @Sendable (String) -> Bool, onText: @escaping @Sendable (String) -> Void) async throws -> SchemaReply {
+        let server = baseURL.absoluteString
+        guard !SchemaRefusals.refuses(server) else {
+            let text = try await stream(system: system, user: user, maxTokens: maxTokens, temperature: temperature, timeout: timeout,
+                                        stopWhen: schema.stopWhenNotHeld ?? stopWhen, onText: onText)
+            return SchemaReply(text: text, held: false, why: "this server turned the schema down before")
+        }
+        var body = chatBody(system: system, user: user, maxTokens: maxTokens, temperature: temperature, stream: true)
+        body[Self.format] = ["type": "json_schema",
+                             "json_schema": ["name": schema.name, "strict": true, "schema": RawJSON(text: schema.portable)] as [String: Any]]
+            as [String: Any]
+        var why: String?
+        var bytes: URLSession.AsyncBytes?
+        var oneReply = false
+        for _ in 0..<3 where bytes == nil && !oneReply {
+            do {
+                bytes = try await openStream(chatURL, body: body, headers: headers, timeout: timeout)
+            } catch LLMError.http(let code, let message) where body[Self.noThinking] != nil && Self.rejectsNoThinking(code, message) {
+                body.removeValue(forKey: Self.noThinking)
+            } catch LLMError.http(let code, let message) where body[Self.format] != nil && SchemaRefusals.isRefusal(code, message, field: Self.format) {
+                Log.llm.notice("\(model, privacy: .public) turned the reply's schema down; asking without it: \(message.prefix(200), privacy: .public)")
+                SchemaRefusals.remember(server)
+                body.removeValue(forKey: Self.format)
+                why = "the server turned the schema down: \(message.prefix(120))"
+            } catch LLMError.http(let code, let message) where Self.rejectsStreaming(code, message) {
+                oneReply = true
+            }
+        }
+        guard let bytes else {
+            guard oneReply else { throw LLMError.invalidResponse }
+            // A server that doesn't stream: one reply, without the schema (the plain question, as `stream` asks it).
+            let text = try await complete(system: system, user: user, maxTokens: maxTokens, temperature: temperature, timeout: timeout)
+            onText(text)
+            return SchemaReply(text: text, held: false, why: "the server answers in one piece, asked without the schema")
+        }
+        func delta(_ json: [String: Any]) -> [String: Any]? {
+            (json["choices"] as? [[String: Any]])?.first?["delta"] as? [String: Any]
+        }
+        let held = body[Self.format] != nil
+        let text = try await collect(bytes, model: model, stopWhen: held ? stopWhen : schema.stopWhenNotHeld ?? stopWhen, onText: onText,
+                                     content: { delta($0)?["content"] as? String },
+                                     thinking: { Self.reasoning(delta($0)) },
+                                     whole: { ((($0["choices"] as? [[String: Any]])?.first?["message"]) as? [String: Any])?["content"] as? String },
+                                     isDone: { ($0["choices"] as? [[String: Any]])?.first?["finish_reason"] is String })
+        return SchemaReply(text: text, held: held, why: why)
+    }
+
     func listModels() async throws -> [String] {
         let json = try await getJSON(baseURL.appendingPathComponent("models"), headers: headers)
         let data = json["data"] as? [[String: Any]] ?? []
@@ -380,4 +579,23 @@ struct OpenAICompatibleClient: LLMClient {
     }
 
     func warmUp() async {}
+
+    /// The context the server reads with: llama.cpp's /props (`n_ctx`, per slot), else the model's entry in /models
+    /// (vLLM's `max_model_len`, or `context_length`, `loaded_context_length`, `max_context_length`). Nil for a server that
+    /// says neither, as hosted APIs don't.
+    func contextTokens() async -> Int? {
+        func number(_ value: Any?) -> Int? { (value as? NSNumber)?.intValue }
+        let root = baseURL.lastPathComponent == "v1" ? baseURL.deletingLastPathComponent() : baseURL
+        if let props = try? await getJSON(root.appendingPathComponent("props"), headers: headers) {
+            let settings = props["default_generation_settings"] as? [String: Any]
+            if let tokens = number(settings?["n_ctx"]) ?? number(props["n_ctx"]), tokens > 0 { return tokens }
+        }
+        guard let list = try? await getJSON(baseURL.appendingPathComponent("models"), headers: headers),
+              let data = list["data"] as? [[String: Any]] else { return nil }
+        guard let entry = data.first(where: { $0["id"] as? String == model }) ?? (data.count == 1 ? data.first : nil) else { return nil }
+        for key in ["loaded_context_length", "max_model_len", "context_length", "max_context_length", "context_window"] {
+            if let tokens = number(entry[key]), tokens > 0 { return tokens }
+        }
+        return nil
+    }
 }

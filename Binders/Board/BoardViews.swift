@@ -25,19 +25,41 @@ struct BoardView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 12) {
-                Text("Drag cards between columns. Agents such as Claude pick up Ready cards through Binders' MCP server.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                AddTodosButton(binder: binder)
-                Toggle("Agents can finish cards", isOn: $binder.agentsMayFinish)
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
-                    .help("When this is off, an agent's finished card goes to Review for you to check.")
+            // On one row while it fits; short of room, the switches go under the words, then under each other.
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) {
+                    hint
+                    Spacer()
+                    AddTodosButton(binder: binder)
+                    switches
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    hint
+                    HStack(spacing: 12) {
+                        AddTodosButton(binder: binder)
+                        Spacer(minLength: 0)
+                        switches
+                    }
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    hint
+                    AddTodosButton(binder: binder)
+                    switches
+                }
             }
             .padding(.horizontal, 24)
             .padding(.vertical, 12)
+            if binder.agentsMayPlace {
+                // What the switch gives up, said where it's on (lane DS1).
+                Label("Agents place their work items from Distill straight onto this board, in Ready, without your review: their words are the briefs, and the agents they pick start on them as those agents' switches allow.",
+                      systemImage: BindersTheme.agentSymbol)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 8)
+            }
+            // Shared through a team database that's off or out of reach: what waits, what's kept, and what to do (lane DB8).
+            TeamReachLine(binderID: binder.id)
             // Columns narrow to fit the window, down to a width a card still reads at. Short of that, Done and then Backlog
             // fold to strips with their counts, so Ready, In progress, and Blocked and Review, the ones waiting on you,
             // show without scrolling sideways.
@@ -74,6 +96,25 @@ struct BoardView: View {
         .settlesAfterAppearing()
         // What the runs Binders started say they're doing, on their cards.
         .followingAgentDoing()
+    }
+
+    private var hint: some View {
+        Text("Drag cards between columns. Agents such as Claude pick up Ready cards through Binders' MCP server.")
+            .font(.callout)
+            .foregroundStyle(.secondary)
+    }
+
+    @ViewBuilder
+    private var switches: some View {
+        Toggle("Agents can finish cards", isOn: $binder.agentsMayFinish)
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .help("When this is off, an agent's finished card goes to Review for you to check.")
+        Toggle("Agents may place work items", isOn: $binder.agentsMayPlace)
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .help("Off: an agent's work items from Distill wait for you to review and place them. On: it places them itself, in Ready, meant for the agents it picked, which start on them as their own switches allow, without you reading them first.")
+            .fitProbe("board.header.last")
     }
 
     private func column(_ column: BoardColumn, width: CGFloat, foldable: Bool) -> some View {
@@ -263,6 +304,11 @@ struct CardTile: View {
                 }
                 if let due = card.dueAt, card.column != .done {
                     DueBadge(due: due)
+                }
+                // Lane DS1: it waits for other cards; an agent can't take it until they're done.
+                if !card.waitsFor.isEmpty, card.column != .done, let waiting = CardWaitsBadge.count(card), waiting > 0 {
+                    Badge(text: "Waits for \(waiting)", symbol: "hourglass")
+                        .help(CardWaitsBadge.line(card) ?? "")
                 }
                 Spacer(minLength: 0)
                 if !card.links.isEmpty {

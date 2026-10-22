@@ -45,6 +45,8 @@ final class NotePopouts: NSObject, NSWindowDelegate {
 
     private var popouts: [UUID: Popout] = [:]
     private static let savedKey = "notePopouts"
+    /// Whether a Distill note's own window shows its Work panel: one choice for every such window.
+    static let workPanelKey = "notePopoutWorkPanel"
     private static let bubbleSize: CGFloat = 56
 
     override init() {
@@ -71,6 +73,7 @@ final class NotePopouts: NSObject, NSWindowDelegate {
     func collapse(_ id: UUID) {
         guard let popout = popouts[id], let note = Store.shared.note(id) else { return }
         MarkdownEditor.flushAll()
+        left(id)
         if let window = popout.window, window.isVisible {
             popout.frame = window.frame
             if popout.bubbleOrigin == nil { popout.bubbleOrigin = edgePoint(near: window.frame) }
@@ -108,10 +111,18 @@ final class NotePopouts: NSObject, NSWindowDelegate {
     func close(_ id: UUID, closingWindow: Bool = true) {
         guard let popout = popouts.removeValue(forKey: id) else { return }
         MarkdownEditor.flushAll()
+        left(id)
         popout.window?.delegate = nil
         if closingWindow { popout.window?.close() }
         popout.bubble?.close()
         save()
+    }
+
+    /// The note's window closed or folded: your editing session in it ends, kept as a version, and for a Distill note the
+    /// sections your typing changed are looked at now, as leaving the note page does.
+    private func left(_ id: UUID) {
+        DistillService.shared?.settleNow(id)
+        NoteHistory.endSession(id)
     }
 
     func setPinned(_ id: UUID, _ pinned: Bool) {
@@ -187,7 +198,8 @@ final class NotePopouts: NSObject, NSWindowDelegate {
         window.delegate = self
         window.identifier = NSUserInterfaceItemIdentifier(note.id.uuidString)
         let id = note.id
-        window.contentView = NSHostingView(rootView: PopoutNoteView(note: note, look: look, focused: focused).modelContainer(Store.shared.container))
+        window.contentView = NSHostingView(rootView: PopoutNoteView(note: note, look: look, focused: focused, controller: HubWindowController.shared.controller)
+            .modelContainer(Store.shared.container))
         // The colour, back to Binders, the pin and the fold, in the title bar.
         let buttons = NSTitlebarAccessoryViewController()
         let hosting = NSHostingView(rootView: PopoutTitleButtons(look: look, onColor: { NotePopouts.shared.setColor(id, $0) },
@@ -363,35 +375,84 @@ final class BubbleColorMenu: NSObject, NSMenuDelegate {
     }
 }
 
-/// A note in its own window, on its page, with its colour along the top edge.
+/// A note in its own window, on its page, with its colour along the top edge. A note with Distill on has its Work bar
+/// above it, the Work panel (beside the note when the window is wide enough for both, in its place otherwise) and the
+/// heading tips, as the note page has them.
 private struct PopoutNoteView: View {
     @Bindable var note: NoteItem
     let look: PopoutLook
     var focused = false
+    /// The app's, for a Distill note's Work bar, panel and heading tips; nil leaves them out.
+    var controller: DictationController?
+    /// Every note's own window follows the same choice: its Work panel shown or not.
+    @AppStorage(NotePopouts.workPanelKey, store: AppDefaults.store) private var workShown = false
+
+    /// From this width, the Work panel goes beside the note, this wide; narrower, in its place.
+    static let panelBeside: CGFloat = 560
+    static let panelWidth: CGFloat = 250
 
     var body: some View {
-        MarkdownNoteEditor(text: $note.text, fontSize: 14, placeholder: "Write, or hold fn to dictate.", inset: NSSize(width: 14, height: 10),
-                           compactToolbar: true, links: LinkTargets.forNote(note), focused: focused, paper: true)
-            .onChange(of: note.text) { previous, _ in
-                note.updatedAt = Date()
-                NoteHistory.changed(note.id, previous: previous)
+        GeometryReader { proxy in
+            page(beside: proxy.size.width >= Self.panelBeside)
+                .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
+        }
+        .onChange(of: note.text) { previous, _ in
+            note.updatedAt = Date()
+            NoteHistory.changed(note.id, previous: previous)
+            // A note shared through a team database: the typing goes to the team once it pauses (lane DB3).
+            TeamNotes.current?.typed(note.id)
+        }
+        // The team sees who's in a shared note.
+        .onAppear { TeamNotes.current?.opened(note.id) }
+        .onDisappear { TeamNotes.current?.closed(note.id) }
+        .paperSheet(raised: false)
+        .overlay(alignment: .top) {
+            look.color.frame(height: 3).ignoresSafeArea()
+        }
+        // An agent's words in it: whose, as in the hub, where Make It Mine is.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if !note.agentMark.isEmpty {
+                AgentLabel(note.agentMark)
+                    .font(.caption)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 6)
+                    .background(BindersTheme.paper)
             }
-            .paperSheet(raised: false)
-            .overlay(alignment: .top) {
-                look.color.frame(height: 3).ignoresSafeArea()
-            }
-            // An agent's words in it: whose, as in the hub, where Make It Mine is.
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                if !note.agentMark.isEmpty {
-                    AgentLabel(note.agentMark)
-                        .font(.caption)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 6)
-                        .background(BindersTheme.paper)
+        }
+        .onChange(of: note.title) { _, title in NSApp.windows.first { $0.identifier?.rawValue == note.id.uuidString }?.title = title }
+    }
+
+    /// The note, and for a Distill note its Work bar above it and its Work panel beside it or in its place.
+    @ViewBuilder
+    private func page(beside: Bool) -> some View {
+        if note.distill, let controller {
+            VStack(spacing: 0) {
+                WorkBar(note: note, panelShown: $workShown, compact: true, panelInPlace: !beside)
+                    .padding(.horizontal, 8)
+                    .padding(.top, 6)
+                HStack(spacing: 0) {
+                    if !workShown || beside { editor(controller) }
+                    if workShown {
+                        if beside { Divider() }
+                        ScrollView { WorkPanel(note: note).padding(12) }
+                            .frame(width: beside ? Self.panelWidth : nil)
+                            .frame(maxWidth: beside ? nil : .infinity)
+                    }
                 }
             }
-            .onChange(of: note.title) { _, title in NSApp.windows.first { $0.identifier?.rawValue == note.id.uuidString }?.title = title }
+            .environment(controller)
+        } else {
+            editor(nil)
+        }
+    }
+
+    /// The editor; for a Distill note, hovering a heading says who last changed its section and the cards made from it.
+    private func editor(_ controller: DictationController?) -> some View {
+        var tip: ((String) -> String?)?
+        if note.distill, let controller { tip = { [note] heading in controller.distill.headingTip(heading, in: note) } }
+        return MarkdownNoteEditor(text: $note.text, fontSize: 14, placeholder: "Write, or hold fn to dictate.", inset: NSSize(width: 14, height: 10),
+                                  compactToolbar: true, links: LinkTargets.forNote(note), focused: focused, paper: true, headingTip: tip)
     }
 }
 

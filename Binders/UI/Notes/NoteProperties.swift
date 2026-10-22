@@ -69,7 +69,7 @@ struct NotePropertiesPanel: View {
     private func update(_ change: (inout NoteProperties) -> Void) {
         var properties = note.properties
         change(&properties)
-        note.properties = NoteProperties(status: properties.status, owner: properties.owner, due: properties.due)
+        note.properties = NoteProperties(status: properties.status, owner: properties.owner, due: properties.due, distill: properties.distill)
         note.updatedAt = Date()
     }
 }

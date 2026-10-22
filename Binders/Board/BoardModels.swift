@@ -36,6 +36,17 @@ final class TaskCard {
     var meantFor: String?
     /// Meant for someone by an agent rather than by you: a suggestion. Binders wakes no one for it until you assign it.
     var meantForByAgent: Bool = false
+    /// The cards it waits for, by id (`card_dependencies`): an agent can't take it until each is Done (BoardRules' wait
+    /// rule). A card never waits for itself, directly or through others (`BoardService.setWaits`).
+    var waitsFor: [String] = []
+    /// Where Distill made it from (`DistilledFrom`, as JSON): its note, the distill and item, its section and that
+    /// section's version. Empty for any other card.
+    var distilledJSON: String = ""
+    /// On a board shared through a team database (lane DB2): what the database last said of it (`TeamCardShadow`, as
+    /// JSON): its version, and the title, details, due date, links and Distill's part it had, so an edit made here is
+    /// told from one that came from the team. "held" for a card kept on this Mac (made from what your iPhone heard)
+    /// until you share it. Empty for every other card.
+    var teamShadow: String = ""
 
     init(title: String, binderID: UUID?, column: BoardColumn = .backlog) {
         self.id = UUID()
@@ -50,6 +61,12 @@ final class TaskCard {
     var column: BoardColumn {
         get { BoardColumn(rawValue: columnRaw) ?? .backlog }
         set { columnRaw = newValue.rawValue }
+    }
+
+    /// Where Distill made it from, or nil.
+    var distilledFrom: DistilledFrom? {
+        get { DistilledFrom(json: distilledJSON) }
+        set { distilledJSON = newValue?.json ?? "" }
     }
 
     var state: CardState {
@@ -108,6 +125,12 @@ final class TaskEvent {
     var fromColumn: String?
     var toColumn: String?
     var createdAt: Date
+    /// On a board shared through a team database (lane DB2): the operation this line was written by, while the database's
+    /// answer is awaited. Its own line takes this one's place once it comes. Nil for every other line.
+    var teamOperation: String?
+    /// A line by Binders saying the card's section of its spec changed (`SectionChangeMark`, as JSON): whose change it
+    /// was, and whether it waits for a person to look, so what of it reaches an agent can be told. Nil for every other line.
+    var sectionChange: String?
 
     enum Kind: String {
         case created, moved, claimed, released, lapsed, progress, question, answer, comment, completed, edited, assigned, woke
