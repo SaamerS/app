@@ -4,7 +4,7 @@ import Foundation
 /// The tools that can host the MCP server: whether each is on this Mac, whether Binders is already in it, and how to add it.
 /// Every change backs the tool's configuration up first and touches only the Binders entry.
 enum MCPHost: String, CaseIterable, Identifiable {
-    case claudeCode, claudeDesktop, cursor, windsurf, vsCode, geminiCLI, codex
+    case claudeCode, claudeDesktop, cursor, windsurf, antigravity, vsCode, geminiCLI, codex
 
     var id: String { rawValue }
 
@@ -14,6 +14,7 @@ enum MCPHost: String, CaseIterable, Identifiable {
         case .claudeDesktop: "Claude Desktop"
         case .cursor: "Cursor"
         case .windsurf: "Windsurf"
+        case .antigravity: "Antigravity"
         case .vsCode: "VS Code"
         case .geminiCLI: "Gemini CLI"
         case .codex: "Codex CLI"
@@ -49,6 +50,7 @@ enum MCPHost: String, CaseIterable, Identifiable {
         case .claudeDesktop: Self.home.appendingPathComponent("Library/Application Support/Claude/claude_desktop_config.json")
         case .cursor: Self.home.appendingPathComponent(".cursor/mcp.json")
         case .windsurf: Self.home.appendingPathComponent(".codeium/windsurf/mcp_config.json")
+        case .antigravity: Self.home.appendingPathComponent(".gemini/config/mcp_config.json")
         case .vsCode: Self.home.appendingPathComponent("Library/Application Support/Code/User/mcp.json")
         case .geminiCLI: Self.home.appendingPathComponent(".gemini/settings.json")
         case .codex: Self.home.appendingPathComponent(".codex/config.toml")
@@ -63,6 +65,7 @@ enum MCPHost: String, CaseIterable, Identifiable {
         case .claudeDesktop: Self.exists("/Applications/Claude.app") || Self.exists(home + "/Library/Application Support/Claude")
         case .cursor: Self.exists("/Applications/Cursor.app") || Self.exists(home + "/.cursor")
         case .windsurf: Self.exists("/Applications/Windsurf.app") || Self.exists(home + "/.codeium/windsurf")
+        case .antigravity: Self.exists("/Applications/Antigravity.app") || Self.exists(home + "/.gemini/antigravity-cli") || Self.exists(home + "/.gemini/antigravity") || Self.exists(home + "/.local/bin/agy") || Self.exists("/usr/local/bin/agy") || Self.exists("/opt/homebrew/bin/agy")
         case .vsCode: Self.exists("/Applications/Visual Studio Code.app") || Self.exists(home + "/Library/Application Support/Code/User")
         case .geminiCLI: Self.exists(home + "/.gemini")
         case .codex: Self.exists(home + "/.codex")
@@ -89,7 +92,7 @@ enum MCPHost: String, CaseIterable, Identifiable {
     var afterAdding: String {
         switch self {
         case .claudeDesktop: "Quit and reopen Claude Desktop to load it."
-        case .cursor, .windsurf: "Reload the window, or restart the app, to load it."
+        case .cursor, .windsurf, .antigravity: "Reload the window, or restart the app, to load it."
         case .vsCode: "Reload the VS Code window to load it."
         case .claudeCode, .geminiCLI, .codex: "It is there the next time the tool starts."
         }
